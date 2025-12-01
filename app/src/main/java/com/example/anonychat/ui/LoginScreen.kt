@@ -1,4 +1,19 @@
 package com.example.anonychat.ui
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.res.painterResource
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 
 import android.content.Context
 import android.graphics.BitmapFactory
@@ -71,6 +86,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -91,32 +107,32 @@ import kotlinx.coroutines.launch
 import kotlin.math.cos
 import kotlin.math.sin
 
-@OptIn(UnstableApi::class) 
+@OptIn(UnstableApi::class)
 @Composable
 fun LoginScreen(
     onLoginClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val transitionColor = Color(0xFFDBF0F9) 
-    
+    val transitionColor = Color(0xFFDBF0F9)
+
     // State for checkboxes
     var acceptedTerms by remember { mutableStateOf(false) }
     var isEighteenPlus by remember { mutableStateOf(false) }
     var noAbuse by remember { mutableStateOf(false) }
-    
+
     // State for loading
     var isLoading by remember { mutableStateOf(false) }
-    
+
     // Handle Back Button Press to stop loading
     BackHandler(enabled = isLoading) {
         isLoading = false
     }
-    
+
     val isLoginEnabled = acceptedTerms && isEighteenPlus && noAbuse && !isLoading
 
     // Root Box to allow overlaying the heart
     Box(modifier = Modifier.fillMaxSize()) {
-        
+
         // Main Content Column
         Column(modifier = Modifier.fillMaxSize()) {
             // Top Half: Video
@@ -126,7 +142,7 @@ fun LoginScreen(
                     .fillMaxWidth()
             ) {
                 VideoBackground(context = context)
-                
+
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -136,19 +152,19 @@ fun LoginScreen(
                             brush = Brush.verticalGradient(
                                 colors = listOf(
                                     Color.Transparent,
-                                    transitionColor 
+                                    transitionColor
                                 )
                             )
                         )
-                ) {} 
+                ) {}
             }
-            
+
             // Bottom Half: Sky Background Image & Login
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .background(Color.White), 
+                    .background(Color.White),
                 contentAlignment = Alignment.Center
             ) {
                 val imageBitmap = remember(context) {
@@ -163,7 +179,7 @@ fun LoginScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                 }
-                
+
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -177,23 +193,23 @@ fun LoginScreen(
                                 )
                             )
                         )
-                ) {} 
-                
+                ) {}
+
                 // Login Card
                 Card(
                     modifier = Modifier
-                        .padding(start = 24.dp, end = 24.dp, bottom = 40.dp) 
+                        .padding(start = 24.dp, end = 24.dp, bottom = 40.dp)
                         .fillMaxWidth()
-                        .navigationBarsPadding() 
-                        .imePadding(), 
+                        .navigationBarsPadding()
+                        .imePadding(),
                     elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.White),
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Column(
                         modifier = Modifier
-                            .padding(20.dp) 
-                            .verticalScroll(rememberScrollState()), 
+                            .padding(20.dp)
+                            .verticalScroll(rememberScrollState()),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
@@ -202,46 +218,46 @@ fun LoginScreen(
                             style = MaterialTheme.typography.headlineSmall,
                             color = Color.Black,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 22.sp 
+                            fontSize = 22.sp
                         )
-                        
-                        Spacer(modifier = Modifier.height(8.dp)) 
-                        
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
                         Text(
                             text = "You will remain anonymous",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.Gray
                         )
 
-                        Spacer(modifier = Modifier.height(16.dp)) 
-                        
+                        Spacer(modifier = Modifier.height(16.dp))
+
                         // Checkboxes
                         TermsCheckbox(
                             checked = acceptedTerms,
                             onCheckedChange = { acceptedTerms = it },
                             text = "I accept Terms and Conditions and Privacy Policy"
                         )
-                        
+
                         TermsCheckbox(
                             checked = isEighteenPlus,
                             onCheckedChange = { isEighteenPlus = it },
                             text = "I confirm I am 18 years or older"
                         )
-                        
+
                         TermsCheckbox(
                             checked = noAbuse,
                             onCheckedChange = { noAbuse = it },
                             text = "Abuse and inappropriate content won't be tolerated"
                         )
-                        
-                        Spacer(modifier = Modifier.height(20.dp)) 
-                        
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
                         Button(
                             onClick = {
                                 isLoading = true
                                 onLoginClick()
                             },
-                            enabled = isLoginEnabled || isLoading, 
+                            enabled = isLoginEnabled || isLoading,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF4285F4),
@@ -249,7 +265,7 @@ fun LoginScreen(
                             )
                         ) {
                             Text(
-                                text = "Proceed to setup profile", 
+                                text = "Proceed to setup profile",
                                 color = Color.White
                             )
                         }
@@ -314,8 +330,8 @@ fun LoginScreen(
                     Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f)) 
-                    .clickable(enabled = false) {}, 
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .clickable(enabled = false) {},
                 contentAlignment = Alignment.Center
             ) {
                 val imageLoader = remember(context) {
@@ -444,39 +460,77 @@ fun TermsCheckbox(
     }
 }
 
+
+
 @Composable
 @OptIn(UnstableApi::class)
 fun VideoBackground(context: Context) {
+    // 1. State to track if the video has actually produced a visual frame
+    var isVideoReady by remember { mutableStateOf(false) }
+
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
             val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.video_ending_suggestion}")
             setMediaItem(MediaItem.fromUri(videoUri))
-            
+
             repeatMode = Player.REPEAT_MODE_ONE
-            volume = 0f // Mute the video
+            volume = 0f
             prepare()
             playWhenReady = true
+
+            // 2. Add Listener to detect exactly when the first frame appears
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    super.onRenderedFirstFrame()
+                    isVideoReady = true
+                }
+            })
         }
     }
 
     DisposableEffect(Unit) {
-        onDispose {
-            exoPlayer.release()
-        }
+        onDispose { exoPlayer.release() }
     }
 
-    AndroidView(
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exoPlayer
-                useController = false // Hide controls
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            }
-        },
-        modifier = Modifier.fillMaxSize()
-    )
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Layer 1: The Video Player (Initially black/invisible)
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+
+                    // IMPORTANT: Set the shutter to Transparent so it doesn't paint black
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Layer 2: The Placeholder Image (Sits ON TOP of the video)
+        // We fade this out once the video is ready.
+        AnimatedVisibility(
+            visible = !isVideoReady,
+            exit = fadeOut(animationSpec = androidx.compose.animation.core.tween(500)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.video_placeholder),
+                contentDescription = "Video Placeholder",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
 }
+
+
 
 @Preview(showBackground = true)
 @Composable
