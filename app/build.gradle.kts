@@ -45,6 +45,13 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    // Retrofit for Networking
+    implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
+    implementation("com.squareup.retrofit2:retrofit:2.9.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    implementation("com.google.android.gms:play-services-appset:16.1.0")
+    // Coroutines (You likely already have this)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
@@ -54,7 +61,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.0")
     implementation("androidx.media3:media3-ui:1.2.0")
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
-    implementation("io.coil-kt:coil-gif:2.7.0") // Updated to 2.7.0
+    implementation("io.coil-kt:coil-gif:2.7.0")
+    implementation(libs.androidx.compose.runtime)
+    implementation(libs.androidx.compose.animation.core)
+    implementation(libs.androidx.compose.foundation.layout)
+    implementation(libs.androidx.compose.animation) // Updated to 2.7.0
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
