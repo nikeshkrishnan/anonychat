@@ -9,16 +9,10 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
-import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -71,12 +65,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -95,29 +87,16 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import coil.ImageLoader
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import coil.compose.AsyncImagePainter
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
-import coil.decode.GifDecoder
-import coil.decode.ImageDecoderDecoder
-import coil.request.ImageRequest
 import com.example.anonychat.R
+import com.example.anonychat.model.User
 import com.example.anonychat.network.NetworkClient
-import com.example.anonychat.network.UserRegistrationRequest
 import com.example.anonychat.network.UserLoginRequest
+import com.example.anonychat.network.UserRegistrationRequest
+import com.example.anonychat.network.UserResetPasswordRequest
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.android.gms.appset.AppSet
-import com.google.android.gms.tasks.Tasks
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.math.cos
-import kotlin.math.sin
-import com.example.anonychat.model.User
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 @ExperimentalFoundationApi
 @ExperimentalLayoutApi
@@ -126,56 +105,53 @@ import kotlinx.coroutines.withContext
 )
 @Composable
 fun LoginScreen(
-    onLoginClick: (User) -> Unit = {} // <--- This is causing the error
+    onLoginClick: (User) -> Unit = {}
 ) {
     val context = LocalContext.current
 
-// Detect IME (keyboard) visibility — MUST be inside a @Composable
+    // Detect IME (keyboard) visibility
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
-// Allow scrolling UP only once per keyboard-open session
+    // Allow scrolling UP only once per keyboard-open session
     var imeHandled by remember { mutableStateOf(false) }
     val density = LocalDensity.current
 
     val imeHeight = WindowInsets.ime.getBottom(density)
 
-// track if keyboard is visible
+    // track if keyboard is visible
     val keyboardVisible = imeHeight > 0
 
-// shift the card up only once when keyboard shows
+    // shift the card up only once when keyboard shows
     var cardOffset by remember { mutableStateOf(0.dp) }
 
-// animate the movement
+    // animate the movement
     val animatedOffset by animateDpAsState(
         targetValue = cardOffset,
         label = "card offset"
     )
 
-// when keyboard becomes visible → move up once
+    // when keyboard becomes visible → move up once
     LaunchedEffect(keyboardVisible) {
         if (keyboardVisible) {
-            // Move the card UP to keep all fields visible
-
-            cardOffset = (-300).dp   // adjust as needed
+            cardOffset = (-300).dp
         } else {
-            // Reset when keyboard hides
             cardOffset = -(50).dp
         }
     }
 
-
-// BringIntoViewRequesters for the fields
+    // BringIntoViewRequesters for the fields
     val usernameBring = remember { BringIntoViewRequester() }
     val passwordBring = remember { BringIntoViewRequester() }
     val confirmBring = remember { BringIntoViewRequester() }
 
     val coroutine = rememberCoroutineScope()
     val transitionColor = Color(0xFFDBF0F9)
+    
     // Define standard colors for all text fields
     val textFieldColors = OutlinedTextFieldDefaults.colors(
         focusedTextColor = Color.Black,
         unfocusedTextColor = Color.Black,
-        focusedLabelColor = Color(0xFF4285F4), // Blue when active
+        focusedLabelColor = Color(0xFF4285F4),
         unfocusedLabelColor = Color.Gray,
         cursorColor = Color(0xFF4285F4),
         focusedBorderColor = Color(0xFF4285F4),
@@ -183,8 +159,6 @@ fun LoginScreen(
     )
 
     // --- STATE MANAGEMENT ---
-
-    // Modes: "Terms" (Initial), "Login", "SignUp"
     var authMode by remember { mutableStateOf("Terms") }
 
     // Terms State
@@ -204,13 +178,11 @@ fun LoginScreen(
     var isLoading by remember { mutableStateOf(false) }
 
     // --- BACK HANDLER ---
-    // If we are not in "Terms" mode (meaning we are in Login or SignUp), Back goes to Terms
     BackHandler(enabled = isLoading || authMode != "Terms") {
         if (isLoading) {
             isLoading = false
         } else if (authMode != "Terms") {
-            authMode = "Terms" // Go back to start
-            // Optional: Clear fields when going back
+            authMode = "Terms" 
             password = ""
             confirmPassword = ""
             newPassword = ""
@@ -234,8 +206,9 @@ fun LoginScreen(
             // Video Section
             Box(
                 modifier = Modifier
-                    .weight(1.3f)
+                    .weight(1f)
                     .fillMaxWidth()
+                    .padding(top = 50.dp)
             ) {
                 VideoBackground(context = context)
                 Box(
@@ -293,9 +266,8 @@ fun LoginScreen(
             Card(
                 modifier = Modifier
                     .padding(horizontal = 32.dp)
-                    .offset(y = animatedOffset)   // ⭐ ADD THIS ONE LINE
-                    .fillMaxWidth()
-                    .heightIn(max = 400.dp),   // ⭐ ADD THI
+                    .offset(y = animatedOffset)
+                    .fillMaxWidth().heightIn(max = 400.dp),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
                 shape = RoundedCornerShape(16.dp)
@@ -304,7 +276,7 @@ fun LoginScreen(
                     modifier = Modifier
                         .padding(20.dp)
                         .verticalScroll(rememberScrollState())
-                        .imeNestedScroll(),   // <-- smooth stable keyboard handling
+                        .imeNestedScroll(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Top
                 ) {
@@ -313,17 +285,6 @@ fun LoginScreen(
 
                     when (authMode) {
                         "Terms" -> {
-                            // ==========================================
-                            // VIEW 1: Terms & Selection
-                            // ==========================================
-//                            Text(
-//                                text = "Welcome to AnonyChat",
-//                                style = MaterialTheme.typography.headlineSmall,
-//                                color = Color.Black,
-//                                fontWeight = FontWeight.Bold,
-//                                fontSize = 22.sp
-//                            )
-//                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = "You will remain anonymous",
                                 style = MaterialTheme.typography.bodyLarge,
@@ -363,14 +324,14 @@ fun LoginScreen(
 
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            // Sign Up Button (Outlined style for visual distinction)
+                            // Sign Up Button
                             Button(
                                 onClick = { authMode = "SignUp" },
                                 enabled = isTermsEnabled,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color.White, // White background
-                                    contentColor = Color(0xFF4285F4), // Blue text
+                                    containerColor = Color.White,
+                                    contentColor = Color(0xFF4285F4),
                                     disabledContainerColor = Color.Gray.copy(alpha = 0.1f),
                                     disabledContentColor = Color.Gray
                                 ),
@@ -381,9 +342,6 @@ fun LoginScreen(
                         }
 
                         "Login" -> {
-                            // ==========================================
-                            // VIEW 2: LOGIN (User + Pass + Forgot)
-                            // ==========================================
                             Text(
                                 text = "Login",
                                 style = MaterialTheme.typography.headlineSmall,
@@ -442,7 +400,6 @@ fun LoginScreen(
                                 }
                             }
 
-
                             // Reset Password Option
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 Text(
@@ -462,82 +419,61 @@ fun LoginScreen(
                             Spacer(modifier = Modifier.height(24.dp))
 
                             Button(
-                                    onClick = {
-                                        if (!isLoginComplete) return@Button
-                                        isLoading = true // Start Heartbeat
+                                onClick = {
+                                    isLoading = true
+                                    coroutine.launch {
+                                        try {
+                                            val fakeUserDto = com.example.anonychat.network.UserDto(
+                                                id = "debug_user_123",
+                                                username = username,
+                                                email = "debug@test.com",
+                                                gender = "unknown"
+                                            )
+                                            val fakeBody = com.example.anonychat.network.LoginResponse(
+                                                message = "Debug Login Success",
+                                                accessToken = "fake_access_token",
+                                                refreshToken = "fake_refresh_token",
+                                                user = fakeUserDto
+                                            )
 
-                                        // Launch Network Request
-                                        coroutine.launch(Dispatchers.IO) {
-                                            try {
-                                                // Create the login request object
-                                                val request = UserLoginRequest(
-                                                    username = username,
-                                                    password = password
+// Create a successful Retrofit response manually
+                                            val response = retrofit2.Response.success(fakeBody)
+//val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
+                                            if (response.isSuccessful && response.body() != null) {
+                                                val loginResponse = response.body()!!
+                                                // Map UserDto to User
+                                                val dto = loginResponse.user
+                                                val user = User(
+                                                    id = dto.id,
+                                                    username = dto.username,
+                                                    profilePictureUrl = null // DTO doesn't provide this yet
                                                 )
+                                                onLoginClick(user)
+                                            } else {
+                                                //log full response
 
-                                                // Make the API Call using the existing NetworkClient
-                                                val response = NetworkClient.api.loginUser(request)
+                                                isLoading = false
+//                                                val errorBody = response.errorBody()?.string() ?: "No error body"
+//// Log it to Logcat so you can copy-paste it if needed (tag: LOGIN_ERROR)
+//                                                android.util.Log.e("LOGIN_ERROR!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", "Response: $errorBody")
 
-                                                withContext(Dispatchers.Main) {
-                                                    if (response.isSuccessful) {
-                                                        Toast.makeText(context, "Login Successful!", Toast.LENGTH_SHORT).show()
-
-                                                        val loginBody = response.body()
-
-                                                        if (loginBody != null) {
-                                                            Toast.makeText(context, "Login Successful!", Toast.LENGTH_SHORT).show()
-
-                                                            // Create User object from the real API response
-                                                            val loggedInUser = User(
-                                                                id = loginBody.user.id,       // "id": "ttwo5..."
-                                                                username = loginBody.user.username, // "username": "user8"
-                                                                profilePictureUrl = null
-                                                            )
-
-                                                            // Call the callback to navigate to ChatScreen
-                                                            onLoginClick(loggedInUser)
-                                                        } else {
-                                                            Toast.makeText(context, "Login failed: Empty response", Toast.LENGTH_SHORT).show()
-                                                        }
-                                                    } else {
-                                                        // Parse the error message from the server response
-                                                        val errorMsg = try {
-                                                            val rawError = response.errorBody()?.string()
-                                                            if (rawError != null) {
-                                                                org.json.JSONObject(rawError).getString("message")
-                                                            } else {
-                                                                "Unknown Error"
-                                                            }
-                                                        } catch (e: Exception) {
-                                                            "Login Failed"
-                                                        }
-                                                        Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
-                                                    }
-                                                }
-                                            } catch (e: Exception) {
-                                                withContext(Dispatchers.Main) {
-                                                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-                                                }
-                                            } finally {
-                                                withContext(Dispatchers.Main) {
-                                                    isLoading = false // Stop Heartbeat
-                                                }
+                                                Toast.makeText(context, "Login failed: ${response.errorBody()?.string()}", Toast.LENGTH_LONG).show()
                                             }
+                                        } catch (e: Exception) {
+                                            isLoading = false
+                                            Toast.makeText(context, "Login error!!!!: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
                                         }
-                                    },
-                                    enabled = isLoginComplete && !isLoading,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4))
-                                ) {
-                                    Text(text = "Login", color = Color.White)
-                                }
-
+                                    }
+                                },
+                                enabled = isLoginComplete && !isLoading,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4))
+                            ) {
+                                Text(text = "Login", color = Color.White)
+                            }
                         }
 
                         "SignUp" -> {
-                            // ==========================================
-                            // VIEW 3: SIGN UP (User + Pass + Confirm)
-                            // ==========================================
                             Text(
                                 text = "Create Account",
                                 style = MaterialTheme.typography.headlineSmall,
@@ -545,37 +481,27 @@ fun LoginScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Spacer(modifier = Modifier.height(10.dp))
-                            var usernameFocused by remember { mutableStateOf(false) }
-
+                            
                             OutlinedTextField(
                                 value = username,
                                 onValueChange = { username = it },
                                 label = { Text("Username") },
                                 singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth(),
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                                 colors = textFieldColors
                             )
                             Spacer(modifier = Modifier.height(8.dp))
-//                            LaunchedEffect(usernameFocused, imeVisible) {
-//                                if (usernameFocused && imeVisible && !imeHandled) {
-//                                    imeHandled = true
-//                                    coroutine.launch { usernameBring.bringIntoView() }
-//                                }
-//                            }
 
                             Spacer(modifier = Modifier.height(12.dp))
-                            var passwordFocused by remember { mutableStateOf(false) }
-
+                            
                             OutlinedTextField(
                                 value = password,
                                 onValueChange = { password = it },
                                 label = { Text("Password") },
                                 singleLine = true,
                                 visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier
-                                    .fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth(),
                                 keyboardOptions = KeyboardOptions(
                                     keyboardType = KeyboardType.Text,
                                     imeAction = ImeAction.Next
@@ -583,16 +509,6 @@ fun LoginScreen(
                                 colors = textFieldColors
                             )
                             Spacer(modifier = Modifier.height(8.dp))
-//                            LaunchedEffect(passwordFocused, imeVisible) {
-//                                if (passwordFocused && imeVisible && !imeHandled) {
-//                                    imeHandled = true
-//                                    coroutine.launch { passwordBring.bringIntoView() }
-//                                }
-//                            }
-
-//                            Spacer(modifier = Modifier.height(12.dp))
-
-                            var confirmFocused by remember { mutableStateOf(false) }
 
                             OutlinedTextField(
                                 value = confirmPassword,
@@ -609,15 +525,6 @@ fun LoginScreen(
                                 colors = textFieldColors
                             )
 
-
-//                            LaunchedEffect(confirmFocused, imeVisible) {
-//                                if (confirmFocused && imeVisible && !imeHandled) {
-//                                    imeHandled = true
-//                                    coroutine.launch { confirmBring.bringIntoView() }
-//                                }
-//                            }
-
-
                             if (confirmPassword.isNotEmpty() && password != confirmPassword) {
                                 Text(
                                     text = "Passwords do not match",
@@ -630,53 +537,38 @@ fun LoginScreen(
                             Button(
                                 onClick = {
                                     isLoading = true
-                                    // 1. Get Android ID
-                                    val androidId = android.provider.Settings.Secure.getString(
-                                        context.contentResolver,
-                                        android.provider.Settings.Secure.ANDROID_ID
-                                    )
-
-                                    // 2. Combine to format: androidId:appSetId
-
+                                    
                                     // Retrieve AppSet ID and Register
                                     val client = AppSet.getClient(context)
                                     client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
                                         val appSetId = appSetIdInfo.id
-                                        val finalUserId = "$androidId:$appSetId"
-
                                         val request = UserRegistrationRequest(
                                             username = username,
                                             password = password,
-                                            userId = finalUserId, // Using AppSet ID as userId
-                                            email = "$finalUserId@email.com", // Optional or empty based on user input or requirements
-                                            googleId = "" // Optional
+                                            userId = "androidid:$appSetId",
+                                            email = "", 
+                                            googleId = "" 
                                         )
-
+                                        
                                         coroutine.launch {
                                             try {
                                                 val response = NetworkClient.api.registerUser(request)
+                                                isLoading = false
                                                 if (response.isSuccessful) {
-                                                    // Registration successful
-                                                    val newUser = User(
-                                                        id = request.userId,
-                                                        username = username,
-                                                        profilePictureUrl = null
-                                                    )
-
-                                                    // Navigate and pass the user
-                                                    onLoginClick(newUser)
+                                                    authMode = "Login" // Move to Login on success
+                                                    Toast.makeText(context, "Sign up successful! Please login.", Toast.LENGTH_SHORT).show()
                                                 } else {
-                                                    // Handle error
-                                                    isLoading = false
+                                                    Toast.makeText(context, "Sign up failed: ${response.errorBody()?.string()}", Toast.LENGTH_SHORT).show()
                                                 }
                                             } catch (e: Exception) {
-                                                e.printStackTrace()
                                                 isLoading = false
+                                                e.printStackTrace()
+                                                Toast.makeText(context, "Sign up error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
                                             }
                                         }
                                     }.addOnFailureListener {
                                         isLoading = false
-                                        // Handle failure to get AppSet ID
+                                        Toast.makeText(context, "Failed to retrieve ID", Toast.LENGTH_SHORT).show()
                                     }
                                 },
                                 enabled = isSignUpComplete && !isLoading,
@@ -689,9 +581,6 @@ fun LoginScreen(
                         }
 
                         "ResetPassword" -> {
-                            // ==========================================
-                            // VIEW 4: RESET PASSWORD
-                            // ==========================================
                             Text(
                                 text = "Reset Password",
                                 style = MaterialTheme.typography.headlineSmall,
@@ -757,14 +646,34 @@ fun LoginScreen(
                             Button(
                                 onClick = {
                                     isLoading = true
-                                    // Handle password reset logic
-                                    // After successful reset, navigate back to login
-                                    // authMode = "Login"
-                                    // Simulate delay or API call
-                                    coroutine.launch {
-                                        delay(2000) // Simulate network
+                                    val client = AppSet.getClient(context)
+                                    client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
+                                        val appSetId = appSetIdInfo.id
+                                        val userId = "androidid:$appSetId"
+                                        val request = UserResetPasswordRequest(
+                                            userId = userId, 
+                                            username = currentUsername, 
+                                            newPassword = newPassword
+                                        )
+
+                                        coroutine.launch {
+                                            try {
+                                                val response = NetworkClient.api.resetPassword(request)
+                                                isLoading = false
+                                                if (response.isSuccessful) {
+                                                    authMode = "Login" // Move to Login on success
+                                                    Toast.makeText(context, "Password reset successful.", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    Toast.makeText(context, "Reset failed: ${response.errorBody()?.string()}", Toast.LENGTH_SHORT).show()
+                                                }
+                                            } catch (e: Exception) {
+                                                isLoading = false
+                                                Toast.makeText(context, "Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }.addOnFailureListener {
                                         isLoading = false
-                                        authMode = "Login"
+                                        Toast.makeText(context, "Failed to get ID", Toast.LENGTH_SHORT).show()
                                     }
                                 },
                                 enabled = isResetPasswordComplete && !isLoading,
@@ -779,146 +688,8 @@ fun LoginScreen(
             }
         }
 
-        // LAYER 3: LOADING OVERLAY (Existing code)
-        if (isLoading) {
-            DisposableEffect(Unit) {
-                val vibrator = if (Build.VERSION.SDK_INT >= 31) {
-                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                    vibratorManager.defaultVibrator
-                } else {
-                    @Suppress("DEPRECATION")
-                    context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                }
-
-                val job = kotlinx.coroutines.GlobalScope.launch {
-                    while (true) {
-                        if (vibrator.hasVibrator()) {
-                            if (Build.VERSION.SDK_INT >= 26) {
-                                vibrator.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE))
-                            } else {
-                                @Suppress("DEPRECATION")
-                                vibrator.vibrate(60)
-                            }
-                            delay(200)
-                            if (Build.VERSION.SDK_INT >= 26) {
-                                vibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
-                            } else {
-                                @Suppress("DEPRECATION")
-                                vibrator.vibrate(40)
-                            }
-                            delay(1000)
-                        }
-                    }
-                }
-                onDispose {
-                    job.cancel()
-                    vibrator.cancel()
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable(enabled = false) {},
-                contentAlignment = Alignment.Center
-            ) {
-                val imageLoader = remember(context) {
-                    ImageLoader.Builder(context)
-                        .components {
-                            if (Build.VERSION.SDK_INT >= 28) {
-                                add(ImageDecoderDecoder.Factory())
-                            } else {
-                                add(GifDecoder.Factory())
-                            }
-                        }
-                        .build()
-                }
-
-                SubcomposeAsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(R.drawable.heart)
-                        .crossfade(true)
-                        .build(),
-                    imageLoader = imageLoader,
-                    contentDescription = "Loading Heart",
-                    modifier = Modifier.size(150.dp)
-                ) {
-                    val state = painter.state
-                    if (state is AsyncImagePainter.State.Error) {
-                        CodeGenerated3DHeart()
-                    } else {
-                        SubcomposeAsyncImageContent()
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-
-@Composable
-fun CodeGenerated3DHeart() {
-    val infiniteTransition = rememberInfiniteTransition(label = "heart")
-
-    // Throbbing Effect (Scale)
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scale"
-    )
-
-    // Spinning Effect (Rotation Y)
-    val rotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
-    )
-    val density = LocalDensity.current
-    // 3D Heart
-    Box(
-        modifier = Modifier
-            .size(100.dp)
-            .scale(scale)
-            .graphicsLayer {
-                rotationY = rotation
-                cameraDistance = 12f * density.density
-            }
-    ) {
-        // Base Red Heart
-        Icon(
-            imageVector = Icons.Default.Favorite,
-            contentDescription = "Loading",
-            tint = Color.Red,
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // Shine/Highlight
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 15.dp, top = 15.dp)
-                .size(25.dp, 15.dp)
-                .graphicsLayer { rotationZ = -45f }
-                .background(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.8f),
-                            Color.Transparent
-                        )
-                    ),
-                    shape = CircleShape
-                )
-        )
+        // LAYER 3: SHARED LOADING OVERLAY
+        LoadingHeartOverlay(isLoading = isLoading)
     }
 }
 
@@ -949,8 +720,6 @@ fun TermsCheckbox(
         )
     }
 }
-
-
 
 @Composable
 @OptIn(UnstableApi::class)
@@ -1005,9 +774,9 @@ fun VideoBackground(context: Context) {
 
         // Layer 2: The Placeholder Image (Sits ON TOP of the video)
         // We fade this out once the video is ready.
-        AnimatedVisibility(
+        androidx.compose.animation.AnimatedVisibility(
             visible = !isVideoReady,
-            exit = fadeOut(animationSpec = androidx.compose.animation.core.tween(500)),
+            exit = androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(500)),
             modifier = Modifier.fillMaxSize()
         ) {
             Image(
@@ -1019,8 +788,6 @@ fun VideoBackground(context: Context) {
         }
     }
 }
-
-
 
 @kotlin.OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Preview(showBackground = true)

@@ -46,11 +46,32 @@ import com.example.anonychat.model.User
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.scale
+import androidx.activity.compose.BackHandler
+
+object ChatScreenPipController {
+    var onBeforeEnterPip: (() -> Unit)? = null
+}
+
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class) // Add this
 @Composable
-fun ChatScreen(user: User) {
+
+fun ChatScreen(user: User ,onChatActive: () -> Unit, onChatInactive: () -> Unit) {
+    // notify MainActivity that chat is now active
+    LaunchedEffect(Unit) {
+        onChatActive()
+    }
+
+    // when leaving ChatScreen
+    DisposableEffect(Unit) {
+        onDispose {
+            onChatInactive()
+        }
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     val otherUsers = emptyList<User>()
     var roses by remember { mutableStateOf(0) }
@@ -69,9 +90,17 @@ fun ChatScreen(user: User) {
             prepare()
         }
     }
-
+// Register cleanup callback for PiP mode
+    LaunchedEffect(exoPlayer) {
+        ChatScreenPipController.onBeforeEnterPip = {
+            exoPlayer.pause()
+            exoPlayer.stop()
+            exoPlayer.clearVideoSurface()   // 🔥 THIS IS WHAT PREVENTS BACKGROUND FROM RETURNING
+        }
+    }
     DisposableEffect(Unit) {
         onDispose {
+            ChatScreenPipController.onBeforeEnterPip = null
             exoPlayer.release()
         }
     }
@@ -80,23 +109,18 @@ fun ChatScreen(user: User) {
         modifier = Modifier
             .fillMaxSize()
     ) {
-        AndroidView(
-            factory = { ctx ->
-                // PlayerView doesn't support changing surface type programmatically.
-                // Using TextureView directly gives you the TEXTURE_VIEW behavior (transparency support)
-                // and MATCH_PARENT gives you the RESIZE_MODE_FILL behavior (no black bars).
-                android.view.TextureView(ctx).apply {
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    // Bind the player to this specific TextureView
-                    exoPlayer.setVideoTextureView(this)
-                }
-            },
-            // Ensure the view fills the screen
-            modifier = Modifier.fillMaxSize()
-        )
+
+
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = false
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        player = exoPlayer
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
 
 
 
@@ -310,7 +334,10 @@ fun ChatScreen(user: User) {
 
         }
         // ... (Your existing AndroidView and Column code) ...
-
+        var isLoading by remember { mutableStateOf(false) }
+        BackHandler(enabled = isLoading) {
+            isLoading = false   // stop the heart overlay
+        }
         // --- BIRD GIF (Bottom Right Corner) ---
         val birdImageLoader = remember(context) {
             ImageLoader.Builder(context)
@@ -334,7 +361,6 @@ fun ChatScreen(user: User) {
 
             // 1. Detect if the user is pressing down
             val isPressed by interactionSource.collectIsPressedAsState()
-
             // 2. Animate scale: Shrink to 0.9f when pressed, back to 1f when released
             val scale by animateFloatAsState(
                 targetValue = if (isPressed) 0.7f else 1f, // Changed 0.9f to 0.7f
@@ -362,12 +388,12 @@ fun ChatScreen(user: User) {
                         interactionSource = interactionSource,
                         indication = null // Keep this null to avoid the square shadow box
                     ) {
-                        // 4. Add your action here
-                       // android.widget.Toast.makeText(context, "Bird Clicked!", android.widget.Toast.LENGTH_SHORT).show()
+                        isLoading = true                         // 4. Add your action here
+                        // android.widget.Toast.makeText(context, "Bird Clicked!", android.widget.Toast.LENGTH_SHORT).show()
                     }
             )
         }
-
+        LoadingHeartOverlay(isLoading = isLoading)
     }
 }
 
