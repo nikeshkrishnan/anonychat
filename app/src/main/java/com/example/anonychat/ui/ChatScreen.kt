@@ -1,30 +1,55 @@
 package com.example.anonychat.ui
 
+import android.content.Context
 import android.net.Uri
 import android.os.Build
-import android.view.ViewGroup
-import android.widget.FrameLayout
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -35,7 +60,6 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import androidx.compose.foundation.BorderStroke
 import coil.ImageLoader
 import coil.compose.rememberAsyncImagePainter
 import coil.decode.GifDecoder
@@ -43,14 +67,60 @@ import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
 import com.example.anonychat.model.User
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.ui.draw.scale
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.Animatable2
+import android.graphics.drawable.Drawable
+import androidx.annotation.RequiresApi
 
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class) // Add this
+@RequiresApi(Build.VERSION_CODES.P)
+private fun registerPlayOnceCallback(
+    drawable: AnimatedImageDrawable,
+    onEnd: () -> Unit
+): Animatable2.AnimationCallback {
+    val cb = object : Animatable2.AnimationCallback() {
+        override fun onAnimationEnd(d: Drawable?) {
+            android.util.Log.e("ProfileAnim", "onAnimationEnd CALLED for drawable: ${d?.javaClass?.simpleName}")
+            try {
+                (d as? android.graphics.drawable.Animatable)?.stop()
+            } catch (_: Exception) {}
+
+            // notify composable that animation ended
+            onEnd()
+
+            try {
+                drawable.unregisterAnimationCallback(this)
+            } catch (_: Exception) {}
+        }
+    }
+    drawable.registerAnimationCallback(cb)
+    return cb
+}
+
+object ChatScreenPipController {
+    var onBeforeEnterPip: (() -> Unit)? = null
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun ChatScreen(user: User) {
+fun ChatScreen(
+    user: User,
+    onChatActive: () -> Unit,
+    onChatInactive: () -> Unit,
+    onNavigateToProfile: (String) -> Unit
+) {
+    // notify MainActivity that chat is now active
+    LaunchedEffect(Unit) { onChatActive() }
+
+    // when leaving ChatScreen
+    DisposableEffect(Unit) {
+        onDispose { onChatInactive() }
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     val otherUsers = emptyList<User>()
     var roses by remember { mutableStateOf(0) }
@@ -59,9 +129,39 @@ fun ChatScreen(user: User) {
     var thunderKey by remember { mutableStateOf(0) }
     val context = LocalContext.current
 
-    val exoPlayer = remember(context) {
+    val prefs = remember { context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE) }
+    var isDarkTheme by remember { mutableStateOf(prefs.getBoolean("is_dark_theme", false)) }
+    var showThemeDialog by remember { mutableStateOf(false) }
+
+    if (showThemeDialog) {
+        AlertDialog(
+            onDismissRequest = { showThemeDialog = false },
+            title = { Text("Choose Theme") },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        isDarkTheme = false
+                        showThemeDialog = false
+                        prefs.edit().putBoolean("is_dark_theme", false).apply()
+                    }) { Text("Light Theme") }
+                    TextButton(onClick = {
+                        isDarkTheme = true
+                        showThemeDialog = false
+                        prefs.edit().putBoolean("is_dark_theme", true).apply()
+                    }) { Text("Dark Theme") }
+                }
+            },
+            confirmButton = { }
+        )
+    }
+
+    val exoPlayer = remember(context, isDarkTheme) {
         ExoPlayer.Builder(context).build().apply {
-            val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.cloud}")
+            val videoUri = if (isDarkTheme) {
+                Uri.parse("android.resource://${context.packageName}/${R.raw.night}")
+            } else {
+                Uri.parse("android.resource://${context.packageName}/${R.raw.cloud}")
+            }
             setMediaItem(MediaItem.fromUri(videoUri))
             repeatMode = Player.REPEAT_MODE_ONE
             volume = 0f
@@ -69,42 +169,34 @@ fun ChatScreen(user: User) {
             prepare()
         }
     }
-
-    DisposableEffect(Unit) {
+    // Register cleanup callback for PiP mode
+    LaunchedEffect(exoPlayer) {
+        ChatScreenPipController.onBeforeEnterPip = {
+            exoPlayer.pause()
+            exoPlayer.stop()
+            exoPlayer.clearVideoSurface()
+        }
+    }
+    DisposableEffect(exoPlayer) {
         onDispose {
+            ChatScreenPipController.onBeforeEnterPip = null
             exoPlayer.release()
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
-            factory = { ctx ->
-                // PlayerView doesn't support changing surface type programmatically.
-                // Using TextureView directly gives you the TEXTURE_VIEW behavior (transparency support)
-                // and MATCH_PARENT gives you the RESIZE_MODE_FILL behavior (no black bars).
-                android.view.TextureView(ctx).apply {
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    // Bind the player to this specific TextureView
-                    exoPlayer.setVideoTextureView(this)
+            factory = {
+                PlayerView(it).apply {
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 }
             },
-            // Ensure the view fills the screen
+            update = { it.player = exoPlayer },
             modifier = Modifier.fillMaxSize()
         )
 
-
-
-        Column(
-            modifier = Modifier.fillMaxSize()
-        ) {
-            // Profile Header
-
+        Column(modifier = Modifier.fillMaxSize()) {
             // Profile Header
             Row(
                 modifier = Modifier
@@ -116,17 +208,92 @@ fun ChatScreen(user: User) {
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .size(90.dp)
-                        // 1. White Circle Outline (Border)
                         .border(4.dp, Color.White, CircleShape)
-                        // 2. Sky Blue Background
-                        .background(Color(0xFF87CEEB), CircleShape) // Sky Blue hex code
+                        .background(
+                            if (isDarkTheme) Color(0xFF142235) else Color(0xFF87CEEB),
+                            CircleShape
+                        )
                         .clip(CircleShape)
+                        .clickable { onNavigateToProfile(user.username) }
                 ) {
+                    // ---------- PROFILE IMAGE (PLAY ONCE, RETURN TO FRAME-0) ----------
+                    var profileReloadKey by remember { mutableStateOf(0) }
+
+                    // tracks the current drawable returned by Coil
+                    var animatable by remember { mutableStateOf<android.graphics.drawable.Animatable?>(null) }
+                    var isPlaying by remember { mutableStateOf(false) }
+                    var animCallback by remember { mutableStateOf<android.graphics.drawable.Animatable2.AnimationCallback?>(null) }
+
+                    // watchdog job to force-reset if decoder never fires end callback
+                    val scope = rememberCoroutineScope()
+                    var watchdogJob by remember { mutableStateOf<Job?>(null) }
+
+                    // guard to avoid double reload (callback + watchdog)
+                    var reloadRequested by remember { mutableStateOf(false) }
+
+                    val profileImageLoader = remember(context) {
+                        ImageLoader.Builder(context)
+                            .components {
+                                if (Build.VERSION.SDK_INT >= 28) {
+                                    add(ImageDecoderDecoder.Factory())
+                                } else {
+                                    add(GifDecoder.Factory())
+                                }
+                            }
+                            .build()
+                    }
+
                     Image(
-                        // 3. Load from res/raw/profilepic
-                        // Note: Coil can load raw resources using the android.resource URI scheme
                         painter = rememberAsyncImagePainter(
-                            model = Uri.parse("android.resource://${context.packageName}/${R.raw.profilepic}")
+                            model = ImageRequest.Builder(context)
+                                .data(Uri.parse("android.resource://${context.packageName}/${R.raw.profilepic_once}"))
+                                .memoryCacheKey("profile_$profileReloadKey")
+                                .build(),
+                            imageLoader = profileImageLoader,
+                            onSuccess = { state ->
+                                val drawable = state.result.drawable
+
+                                // reset guard & cancel watchdog when image reloaded
+                                reloadRequested = false
+                                watchdogJob?.cancel()
+                                watchdogJob = null
+
+                                if (drawable is android.graphics.drawable.Animatable) {
+                                    animatable = drawable
+
+                                    // Stop if decoder auto-started
+                                    try { if (drawable.isRunning) drawable.stop() } catch (_: Exception) {}
+
+                                    // API 28+ → strong control path
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && drawable is AnimatedImageDrawable) {
+                                        // try to limit repeats (some decoders ignore this, so we keep watchdog)
+                                        try { drawable.setRepeatCount(1) } catch (_: Exception) {}
+
+                                        // Clean any previous callback
+                                        try { animCallback?.let { drawable.unregisterAnimationCallback(it) } } catch (_: Exception) {}
+                                        animCallback = null
+
+                                        // Register play-once callback -> will request reload when animation ends
+                                        try {
+                                            animCallback = registerPlayOnceCallback(drawable) {
+                                                // onAnimationEnd
+                                                isPlaying = false
+                                                animCallback = null
+
+                                                // request reload (guarded)
+                                                if (!reloadRequested) {
+                                                    reloadRequested = true
+                                                    profileReloadKey++
+                                                }
+                                            }
+                                        } catch (_: Exception) {
+                                            animCallback = null
+                                        }
+                                    }
+
+                                    isPlaying = false
+                                }
+                            }
                         ),
                         contentDescription = "Profile Picture",
                         contentScale = ContentScale.Crop,
@@ -216,7 +383,15 @@ fun ChatScreen(user: User) {
 
 
                 }
-                // REMOVED: Spacer(modifier = Modifier.weight(1f)) and the IconButton
+                Spacer(modifier = Modifier.weight(1f))
+
+                IconButton(onClick = { showThemeDialog = true }) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = if (isDarkTheme) Color.White else Color.Black
+                    )
+                }
             }
 
 
@@ -230,7 +405,7 @@ fun ChatScreen(user: User) {
                     .padding(start = 16.dp, end = 16.dp, top = 16.dp)
                     .wrapContentHeight(),
                 shape = RoundedCornerShape(32.dp),
-                color = Color(0x4DFFFFFF) // Transparent Glassy White
+                color = if (isDarkTheme) Color(0x4DFFFFFF) else Color(0x4DFFFFFF) // Transparent Glassy
             ) {
 
                 // REMOVED padding(16.dp) from this Column so the Search Bar touches edges
@@ -243,7 +418,7 @@ fun ChatScreen(user: User) {
                             .wrapContentHeight(),
                         // Top corners match the parent card (32.dp), bottom corners are slightly less rounded (8.dp)
                         shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp, bottomStart = 8.dp, bottomEnd = 8.dp),
-                        color = Color.White, // Solid White Background
+                        color = if (isDarkTheme) Color(0xFF3A4552) else Color.White, // Moon-glow night soft white vs Solid White Background
                         shadowElevation = 0.dp
                     ) {
                         // Inner Text Field
@@ -258,7 +433,7 @@ fun ChatScreen(user: User) {
                             placeholder = {
                                 Text(
                                     text = "Search",
-                                    color = Color(0xFF5A6B88),
+                                    color = if (isDarkTheme) Color(0xFF8FA4C0) else Color(0xFF5A6B88), // Muted night-blue vs muted gray
                                     fontSize = 16.sp
                                 )
                             },
@@ -266,21 +441,39 @@ fun ChatScreen(user: User) {
                                 Icon(
                                     imageVector = Icons.Default.Search,
                                     contentDescription = "Search Icon",
-                                    tint = Color(0xFF5A6B88),
+                                    tint = if (isDarkTheme) Color(0xFF7A8FA9) else Color.Gray,
+
                                     modifier = Modifier.size(24.dp)
                                 )
                             },
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color(0xFFEFF3FA),
-                                unfocusedContainerColor = Color(0xFFEFF3FA),
-                                disabledContainerColor = Color(0xFFEFF3FA),
-                                cursorColor = Color(0xFF5A6B88),
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                                disabledIndicatorColor = Color.Transparent,
-                                focusedTextColor = Color(0xFF2D3648),
-                                unfocusedTextColor = Color(0xFF2D3648)
-                            ),
+                            colors = if (isDarkTheme) {
+                                TextFieldDefaults.colors( //night theme
+                                    focusedContainerColor = Color(0xFF121821),    // near-black navy
+                                    unfocusedContainerColor = Color(0xFF121821),
+                                    disabledContainerColor = Color(0xFF10151C),   // even darker
+
+                                    cursorColor = Color(0xFFEFF3FA),              // moon-white cursor
+
+                                    focusedTextColor = Color.White,               // text visible on black
+                                    unfocusedTextColor = Color.White,
+
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                    disabledIndicatorColor = Color.Transparent
+                                )
+                            } else {
+                                TextFieldDefaults.colors(
+                                    focusedContainerColor = Color(0xFFEFF3FA),
+                                    unfocusedContainerColor = Color(0xFFEFF3FA),
+                                    disabledContainerColor = Color(0xFFEFF3FA),
+                                    cursorColor = Color(0xFF5A6B88),
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                    disabledIndicatorColor = Color.Transparent,
+                                    focusedTextColor = Color(0xFF2D3648),
+                                    unfocusedTextColor = Color(0xFF2D3648)
+                                )
+                            },
                             singleLine = true
                         )
                     }
@@ -296,80 +489,71 @@ fun ChatScreen(user: User) {
                     }
                 }
             }
-
-
-
-
-
-
-
-
-
-
-
-
         }
-        // ... (Your existing AndroidView and Column code) ...
-
-        // --- BIRD GIF (Bottom Right Corner) ---
-        val birdImageLoader = remember(context) {
-            ImageLoader.Builder(context)
-                .components {
-                    if (Build.VERSION.SDK_INT >= 28) {
-                        add(ImageDecoderDecoder.Factory())
-                    } else {
-                        add(GifDecoder.Factory())
-                    }
-                }
-                .build()
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(end = 2.dp,bottom = 50.dp),
-            contentAlignment = Alignment.BottomEnd
-        ) {
-            val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-
-            // 1. Detect if the user is pressing down
-            val isPressed by interactionSource.collectIsPressedAsState()
-
-            // 2. Animate scale: Shrink to 0.9f when pressed, back to 1f when released
-            val scale by animateFloatAsState(
-                targetValue = if (isPressed) 0.7f else 1f, // Changed 0.9f to 0.7f
-                animationSpec = androidx.compose.animation.core.spring(
-                    dampingRatio = androidx.compose.animation.core.Spring.DampingRatioHighBouncy, // Makes it wobble/bounce on release
-                    stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
-                ),
-                label = "bird_bounce"
-            )
-
-            Image(
-                painter = rememberAsyncImagePainter(
-                    model = ImageRequest.Builder(context)
-                        // Ensure this path matches your file (raw vs drawable)
-                        .data(Uri.parse("android.resource://${context.packageName}/${R.drawable.bird}"))
-                        .build(),
-                    imageLoader = birdImageLoader
-                ),
-                contentDescription = "Search Bird",
-                modifier = Modifier
-                    .size(150.dp)
-                    // 3. Apply the bounce animation
-                    .scale(scale)
-                    .clickable(
-                        interactionSource = interactionSource,
-                        indication = null // Keep this null to avoid the square shadow box
-                    ) {
-                        // 4. Add your action here
-                       // android.widget.Toast.makeText(context, "Bird Clicked!", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-            )
-        }
-
     }
+    // ... (Your existing AndroidView and Column code) ...
+    var isLoading by remember { mutableStateOf(false) }
+    BackHandler(enabled = isLoading) {
+        isLoading = false   // stop the heart overlay
+    }
+    // --- BIRD GIF (Bottom Right Corner) ---
+    val birdImageLoader = remember(context) {
+        ImageLoader.Builder(context)
+            .components {
+                if (Build.VERSION.SDK_INT >= 28) {
+                    add(ImageDecoderDecoder.Factory())
+                } else {
+                    add(GifDecoder.Factory())
+                }
+            }
+            .build()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(end = 2.dp, bottom = 50.dp),
+        contentAlignment = Alignment.BottomEnd
+    ) {
+        val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+
+        // 1. Detect if the user is pressing down
+        val isPressed by interactionSource.collectIsPressedAsState()
+        // 2. Animate scale: Shrink to 0.9f when pressed, back to 1f when released
+        val scale by animateFloatAsState(
+            targetValue = if (isPressed) 0.7f else 1f, // Changed 0.9f to 0.7f
+            animationSpec = androidx.compose.animation.core.spring(
+                dampingRatio = androidx.compose.animation.core.Spring.DampingRatioHighBouncy, // Makes it wobble/bounce on release
+                stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+            ),
+            label = "bird_bounce"
+        )
+
+        Image(
+            painter = rememberAsyncImagePainter(
+                model = ImageRequest.Builder(context)
+                    // Ensure this path matches your file (raw vs drawable)
+                    .data(Uri.parse("android.resource://${context.packageName}/${if (isDarkTheme) R.drawable.owlt else R.drawable.bird}"))
+                    .build(),
+                imageLoader = birdImageLoader
+            ),
+            contentDescription = "Search Bird",
+            modifier = Modifier
+                .size(150.dp)
+                // 3. Apply the bounce animation
+                .scale(scale)
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null // Keep this null to avoid the square shadow box
+                ) {
+                    isLoading = true                         // 4. Add your action here
+                    // android.widget.Toast.makeText(context, "Bird Clicked!", android.widget.Toast.LENGTH_SHORT).show()
+                }
+        )
+    }
+    LoadingHeartOverlay(isLoading = isLoading)
 }
+
 
 @Composable
 fun UserListItem(user: User) {
@@ -409,11 +593,7 @@ fun UserListItem(user: User) {
                 Box(
                     modifier = Modifier
                         .size(24.dp)
-                        .background(Color(0xFFFFD700), CircleShape), // Gold/Yellow badge
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = "2", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
+                )
             }
         }
     }
