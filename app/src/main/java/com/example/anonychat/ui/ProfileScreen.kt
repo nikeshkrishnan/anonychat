@@ -1,9 +1,17 @@
 package com.example.anonychat.ui
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.drawable.Animatable
 import android.net.Uri
 import android.os.Build
+import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.PreferencesRequest
+import com.example.anonychat.network.AgeRange
+import com.example.anonychat.network.RomanceRange
+import android.widget.Toast
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,6 +27,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,6 +52,7 @@ import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -131,6 +142,7 @@ fun ProfileScreen(
     }
 
     /* ================= UI ================= */
+    var isLoading by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
 
@@ -177,29 +189,134 @@ fun ProfileScreen(
                         .clip(CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    var animatable by remember { mutableStateOf<Animatable?>(null) }
+                    // -----------------------------
+                    // Dynamic animated avatar:
+                    // - maps romanceRange -> emotion (1..11)
+                    // - picks raw resource: male_exp{N} / female_exp{N}
+                    // - crossfades between images
+                    // - preserves animatable start/stop on tap (like your previous code)
+                    // -----------------------------
 
-                    Image(
-                        painter = rememberAsyncImagePainter(
+                    // place inside your avatar Box (replaces the Crossfade block + animatable handling)
+                    var animatable by remember { mutableStateOf<Animatable?>(null) }
+                    var animDurationMs by remember { mutableStateOf(3000L) } // default fallback
+                    var isPlaying by remember { mutableStateOf(false) }
+
+// Map of resource base name -> duration in ms (converted from your values)
+                    val animationDurations = remember {
+                        mapOf(
+                            "male_exp9" to 3580L,
+                            "female_exp8" to 8500L,
+                            "female_exp9" to 8500L,
+                            "female_exp10" to 5700L,
+                            "female_exp11" to 5020L,
+                            "male_exp10" to 8380L,
+                            "male_exp11" to 11600L,
+                            "male_exp1" to 5400L,
+                            "male_exp2" to 4420L,
+                            "female_exp1" to 2740L,
+                            "male_exp3" to 7640L,
+                            "female_exp2" to 3100L,
+                            "male_exp4" to 2020L,
+                            "female_exp3" to 1540L,
+                            "male_exp5" to 2380L,
+                            "female_exp4" to 1360L,
+                            "male_exp6" to 1840L,
+                            "female_exp5" to 1720L,
+                            "male_exp7" to 3760L,
+                            "female_exp6" to 1480L,
+                            "male_exp8" to 2800L,
+                            "female_exp7" to 5700L
+                        )
+                    }
+
+// compute emotion and resource name like you did earlier
+                    val emotion = remember(romanceRange.start, romanceRange.endInclusive) {
+                        romanceRangeToEmotion(romanceRange.start, romanceRange.endInclusive)
+                    }
+                    val resBaseName = remember(gender, emotion) {
+                        if (gender.lowercase() == "female") "female_exp$emotion" else "male_exp$emotion"
+                    }
+                    val resUri = remember(gender, emotion) {
+                        "android.resource://${context.packageName}/raw/$resBaseName"
+                    }
+                    var playToken by remember { mutableIntStateOf(0) }
+
+                    Crossfade(
+                        targetState = resUri,
+                        animationSpec = tween(durationMillis = 1500)
+                    ) { uri ->
+                        val painter = rememberAsyncImagePainter(
                             ImageRequest.Builder(context)
-                                .data("android.resource://${context.packageName}/${R.raw.profilepic_once}")
+                                .data(uri)
+                                .setParameter("playToken", playToken) // 👈 forces reload
                                 .build(),
                             imageLoader = imageLoader,
-                            onSuccess = { animatable = it.result.drawable as? Animatable }
-                        ),
-                        contentDescription = null,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clickable {
-                                animatable?.let {
+                            onSuccess = { result ->
+                                val drawable = result.result.drawable
+                                if (drawable is Animatable) {
+                                    animatable = drawable
+                                    // set duration from map (fallback to default)
+                                    animDurationMs = animationDurations[resBaseName] ?: 3000L
+                                    // ensure it is stopped initially (no autoplay)
                                     scope.launch {
-                                        it.stop()
-                                        it.start()
+                                        try { drawable.stop() } catch (_: Exception) {}
                                     }
+                                } else {
+                                    animatable = null
                                 }
-                            },
-                        contentScale = ContentScale.Crop
-                    )
+                            }
+                        )
+
+                        Image(
+                            painter = painter,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clickable {
+                                    if (isPlaying) return@clickable
+
+                                    animatable?.let { anim ->
+                                        scope.launch {
+                                            try {
+                                                isPlaying = true
+
+                                                // always start clean
+                                                try {
+                                                    anim.stop()
+                                                } catch (_: Exception) {
+                                                }
+                                                try {
+                                                    anim.start()
+                                                } catch (_: Exception) {
+                                                }
+
+                                                // play exactly once
+                                                kotlinx.coroutines.delay(animDurationMs)
+
+                                                // stop at end
+                                                try {
+                                                    anim.stop()
+                                                } catch (_: Exception) {
+                                                }
+
+                                                // 🔥 FORCE RESET TO FIRST FRAME
+                                                playToken++   // <-- this reloads drawable → frame 0
+                                            } finally {
+                                                isPlaying = false
+                                            }
+                                        }
+                                    }
+                                },
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+
+
+// ...
+
+//...
+
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -299,7 +416,6 @@ fun ProfileScreen(
                             Color.White
                         else
                             Color(0xFF37474F) // soft neutral, not harsh blue
-
                     Surface(
                         modifier = Modifier
                             .padding(start = 4.dp, top = 8.dp),
@@ -418,17 +534,27 @@ fun ProfileScreen(
 
                     Button(
                         onClick = {
+                            isLoading = true
                             saveUserPrefs(
-                                userPrefs,
-                                username,
-                                gender,
-                                age,
-                                preferredGender,
-                                preferredAgeRange,
-                                romanceRange
+                                context = context,
+                                scope = scope,
+                                userPrefs = userPrefs,
+                                username = username,
+                                gender = gender,
+                                age = age,
+                                preferredGender = preferredGender,
+                                preferredAgeRange = preferredAgeRange,
+                                romanceRange = romanceRange,
+                                onSuccess = {
+                                    isLoading = false
+                                    Toast.makeText(context, "Preferences saved!", Toast.LENGTH_SHORT).show()
+                                },
+                                onFailure = {
+                                    isLoading = false
+                                    Toast.makeText(context, "Failed to save. Please try again.", Toast.LENGTH_LONG).show()
+                                }
                             )
-                            navController.popBackStack()
-                        },
+                         },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(46.dp),
@@ -441,8 +567,11 @@ fun ProfileScreen(
                         Text("Save")
                     }
                 }
+
             }
         }
+        LoadingHeartOverlay(isLoading = isLoading)
+
     }
 }
 
@@ -567,27 +696,73 @@ private fun RowScope.GiftCounter(
     }
 }
 
+// ... inside ProfileScreen.kt, at the bottom of the file
+
+// --- THIS IS THE NEW IMPLEMENTATION ---
 private fun saveUserPrefs(
-    prefs: android.content.SharedPreferences,
+    context: Context,
+    scope: CoroutineScope,
+    userPrefs: SharedPreferences,
     username: String,
     gender: String,
     age: Int,
     preferredGender: String,
     preferredAgeRange: ClosedFloatingPointRange<Float>,
-    romanceRange: ClosedFloatingPointRange<Float>
+    romanceRange: ClosedFloatingPointRange<Float>,
+    onSuccess: () -> Unit,
+    onFailure: () -> Unit
 ) {
-    with(prefs.edit()) {
-        putString("username", username)
-        putString("gender", gender)
-        putInt("age", age)
-        putString("preferred_gender", preferredGender)
-        putFloat("preferred_age_min", preferredAgeRange.start)
-        putFloat("preferred_age_max", preferredAgeRange.endInclusive)
-        putFloat("romance_min", romanceRange.start)
-        putFloat("romance_max", romanceRange.endInclusive)
-        apply()
+    scope.launch {
+        try {
+            // 1. Build the request body
+            val request = PreferencesRequest(
+                userId = userPrefs.getString("user_id", "") ?: "", // Get userId from prefs
+                age = age,
+                gender = gender,
+                preferredGender = preferredGender,
+                preferredAgeRange = AgeRange(
+                    min = preferredAgeRange.start.toInt(),
+                    max = preferredAgeRange.endInclusive.toInt()
+                ),
+                romanceRange = RomanceRange(
+                    min = romanceRange.start.toInt(),
+                    max = romanceRange.endInclusive.toInt()
+                )
+            )
+
+            // 2. Make the network call
+            val response = NetworkClient.api.setPreferences(request)
+
+            // 3. Handle the response
+            if (response.isSuccessful) {
+                // On success, save the preferences locally
+                with(userPrefs.edit()) {
+                    putString("username", username)
+                    putString("gender", gender)
+                    putInt("age", age)
+                    putString("preferred_gender", preferredGender)
+                    putFloat("preferred_age_min", preferredAgeRange.start)
+                    putFloat("preferred_age_max", preferredAgeRange.endInclusive)
+                    putFloat("romance_min", romanceRange.start)
+                    putFloat("romance_max", romanceRange.endInclusive)
+                    apply()
+                }
+                onSuccess() // Trigger success callback (e.g., show toast and navigate)
+            } else {
+                // On failure, log the error and show a toast
+                val errorBody = response.errorBody()?.string() ?: "Unknown error"
+                android.util.Log.e("PREFS_SAVE_ERROR", "Failed to save preferences: $errorBody")
+                onFailure() // Trigger failure callback (e.g., show error toast)
+            }
+        } catch (e: Exception) {
+            // Handle network exceptions (e.g., no internet)
+            android.util.Log.e("PREFS_SAVE_ERROR", "Exception while saving preferences", e)
+            onFailure() // Trigger failure callback
+        }
     }
 }
+// --- END ---
+
 
 @Composable
 private fun RatingRow(
@@ -651,5 +826,31 @@ private fun RatingRow(
                 modifier = Modifier.size(18.dp)
             )
         }
+    }
+}
+
+/* ---------------------------
+   Utility: romance range -> emotion (1..11)
+   Mirrors the mapping we discussed earlier.
+   --------------------------- */
+private fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
+    // Explicit examples preserved: 1-2 -> 1, 9-10 -> 11
+    if (rangeEnd <= 2f) return 1
+    if (rangeStart >= 9f && rangeEnd == 10f) return 11
+
+    val mid = (rangeStart + rangeEnd) / 2f
+
+    return when {
+        mid < 1.95f -> 1
+        mid < 2.95f -> 2
+        mid < 3.95f -> 3
+        mid < 4.95f -> 4
+        mid < 5.95f -> 5
+        mid < 6.95f -> 6
+        mid < 7.95f -> 7
+        mid < 8.95f -> 8
+        mid < 9.5f -> 9
+        mid < 9.9f -> 10
+        else -> 11
     }
 }

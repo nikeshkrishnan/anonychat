@@ -3,7 +3,9 @@ package com.example.anonychat.ui
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -105,6 +107,28 @@ object ChatScreenPipController {
     var onBeforeEnterPip: (() -> Unit)? = null
 }
 
+private fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
+    // Explicit examples preserved: 1-2 -> 1, 9-10 -> 11
+    if (rangeEnd <= 2f) return 1
+    if (rangeStart >= 9f && rangeEnd == 10f) return 11
+
+    val mid = (rangeStart + rangeEnd) / 2f
+
+    return when {
+        mid < 1.95f -> 1
+        mid < 2.95f -> 2
+        mid < 3.95f -> 3
+        mid < 4.95f -> 4
+        mid < 5.95f -> 5
+        mid < 6.95f -> 6
+        mid < 7.95f -> 7
+        mid < 8.95f -> 8
+        mid < 9.5f -> 9
+        mid < 9.9f -> 10
+        else -> 11
+    }
+}
+
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun ChatScreen(
@@ -129,8 +153,8 @@ fun ChatScreen(
     var thunderKey by remember { mutableStateOf(0) }
     val context = LocalContext.current
 
-    val prefs = remember { context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE) }
-    var isDarkTheme by remember { mutableStateOf(prefs.getBoolean("is_dark_theme", false)) }
+    val themePrefs = remember { context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE) }
+    var isDarkTheme by remember { mutableStateOf(themePrefs.getBoolean("is_dark_theme", false)) }
     var showThemeDialog by remember { mutableStateOf(false) }
 
     if (showThemeDialog) {
@@ -142,12 +166,12 @@ fun ChatScreen(
                     TextButton(onClick = {
                         isDarkTheme = false
                         showThemeDialog = false
-                        prefs.edit().putBoolean("is_dark_theme", false).apply()
+                        themePrefs.edit().putBoolean("is_dark_theme", false).apply()
                     }) { Text("Light Theme") }
                     TextButton(onClick = {
                         isDarkTheme = true
                         showThemeDialog = false
-                        prefs.edit().putBoolean("is_dark_theme", true).apply()
+                        themePrefs.edit().putBoolean("is_dark_theme", true).apply()
                     }) { Text("Dark Theme") }
                 }
             },
@@ -216,89 +240,28 @@ fun ChatScreen(
                         .clip(CircleShape)
                         .clickable { onNavigateToProfile(user.username) }
                 ) {
-                    // ---------- PROFILE IMAGE (PLAY ONCE, RETURN TO FRAME-0) ----------
-                    var profileReloadKey by remember { mutableStateOf(0) }
+                    val userPrefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
+                    val gender = userPrefs.getString("gender", "male") ?: "male"
+                    val romanceStart = userPrefs.getFloat("romance_min", 2f)
+                    val romanceEnd = userPrefs.getFloat("romance_max", 9f)
 
-                    // tracks the current drawable returned by Coil
-                    var animatable by remember { mutableStateOf<android.graphics.drawable.Animatable?>(null) }
-                    var isPlaying by remember { mutableStateOf(false) }
-                    var animCallback by remember { mutableStateOf<android.graphics.drawable.Animatable2.AnimationCallback?>(null) }
+                    val emotion = romanceRangeToEmotion(romanceStart, romanceEnd)
+                    val resName = if (gender == "female") "female_exp$emotion" else "male_exp$emotion"
+                    val imageResId = context.resources.getIdentifier(resName, "raw", context.packageName)
+                    val imageUri = if (imageResId != 0) Uri.parse("android.resource://${context.packageName}/$imageResId") else Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
 
-                    // watchdog job to force-reset if decoder never fires end callback
-                    val scope = rememberCoroutineScope()
-                    var watchdogJob by remember { mutableStateOf<Job?>(null) }
-
-                    // guard to avoid double reload (callback + watchdog)
-                    var reloadRequested by remember { mutableStateOf(false) }
-
-                    val profileImageLoader = remember(context) {
-                        ImageLoader.Builder(context)
-                            .components {
-                                if (Build.VERSION.SDK_INT >= 28) {
-                                    add(ImageDecoderDecoder.Factory())
-                                } else {
-                                    add(GifDecoder.Factory())
-                                }
-                            }
-                            .build()
+                    Crossfade(targetState = imageUri, animationSpec = tween(500)) { uri ->
+                        Image(
+                            painter = rememberAsyncImagePainter(
+                                model = ImageRequest.Builder(context)
+                                    .data(uri)
+                                    .build()
+                            ),
+                            contentDescription = "Profile Picture",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
-
-                    Image(
-                        painter = rememberAsyncImagePainter(
-                            model = ImageRequest.Builder(context)
-                                .data(Uri.parse("android.resource://${context.packageName}/${R.raw.profilepic_once}"))
-                                .memoryCacheKey("profile_$profileReloadKey")
-                                .build(),
-                            imageLoader = profileImageLoader,
-                            onSuccess = { state ->
-                                val drawable = state.result.drawable
-
-                                // reset guard & cancel watchdog when image reloaded
-                                reloadRequested = false
-                                watchdogJob?.cancel()
-                                watchdogJob = null
-
-                                if (drawable is android.graphics.drawable.Animatable) {
-                                    animatable = drawable
-
-                                    // Stop if decoder auto-started
-                                    try { if (drawable.isRunning) drawable.stop() } catch (_: Exception) {}
-
-                                    // API 28+ → strong control path
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && drawable is AnimatedImageDrawable) {
-                                        // try to limit repeats (some decoders ignore this, so we keep watchdog)
-                                        try { drawable.setRepeatCount(1) } catch (_: Exception) {}
-
-                                        // Clean any previous callback
-                                        try { animCallback?.let { drawable.unregisterAnimationCallback(it) } } catch (_: Exception) {}
-                                        animCallback = null
-
-                                        // Register play-once callback -> will request reload when animation ends
-                                        try {
-                                            animCallback = registerPlayOnceCallback(drawable) {
-                                                // onAnimationEnd
-                                                isPlaying = false
-                                                animCallback = null
-
-                                                // request reload (guarded)
-                                                if (!reloadRequested) {
-                                                    reloadRequested = true
-                                                    profileReloadKey++
-                                                }
-                                            }
-                                        } catch (_: Exception) {
-                                            animCallback = null
-                                        }
-                                    }
-
-                                    isPlaying = false
-                                }
-                            }
-                        ),
-                        contentDescription = "Profile Picture",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
                 }
                 Spacer(modifier = Modifier.width(16.dp))
                 Column {

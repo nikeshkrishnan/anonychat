@@ -437,11 +437,19 @@ fun LoginScreen(
                                             )
 
 // Create a successful Retrofit response manually
-                                            val response = retrofit2.Response.success(fakeBody)
-//val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
+                                           // val response = retrofit2.Response.success(fakeBody)
+val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
+                                           android.util.Log.e("response!!!!!!!!!!!", "Response: $response")
                                             if (response.isSuccessful && response.body() != null) {
                                                 val loginResponse = response.body()!!
                                                 // Map UserDto to User
+                                                android.util.Log.d("LOGIN_SUCCESS", "Received Token: ${loginResponse.accessToken}")
+                                                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                with(prefs.edit()) {
+                                                    putString("access_token", loginResponse.accessToken)
+                                                    putString("user_id", loginResponse.user.id)
+                                                    apply()
+                                                }
                                                 val dto = loginResponse.user
                                                 val user = User(
                                                     id = dto.id,
