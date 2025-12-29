@@ -13,6 +13,8 @@ import retrofit2.http.Body
 import retrofit2.http.Headers
 import retrofit2.http.POST
 import retrofit2.http.PUT
+import retrofit2.http.GET // Make sure to import this
+import retrofit2.http.Path   // And this
 import android.util.Log
 import okhttp3.Interceptor
 
@@ -36,6 +38,15 @@ class AuthInterceptor(context: Context) : Interceptor {
         return chain.proceed(request)
     }
 }
+
+data class GetPreferencesResponse(
+    val gmail: String?,
+    val age: Int?,
+    val gender: String?,
+    val preferredGender: String?,
+    val romanceRange: RomanceRange?,
+    val preferredAgeRange: AgeRange?
+)
 
 // --- DATA MODELS ---
 data class UserRegistrationRequest(
@@ -101,6 +112,8 @@ interface AuthApiService {
     @Headers("Content-Type: application/json")
     @PUT("preferences/")
     suspend fun setPreferences(@Body request: PreferencesRequest): Response<Void>
+    @GET("preferences/{email}")
+    suspend fun getPreferences(@Path("email") email: String): Response<GetPreferencesResponse>
 }
 
 

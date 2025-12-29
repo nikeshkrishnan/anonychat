@@ -110,6 +110,61 @@ fun ProfileScreen(
         )
     }
 
+
+        // --- NEW: FETCH PREFERENCES IF MISSING ---
+        LaunchedEffect(Unit) {
+            android.util.Log.d("existing ProfilePrefs", "Local prefs not found. Fetching for $userPrefs")
+
+            // Check if preferences are missing locally. We use 'gender' as a key indicator.
+            if (!userPrefs.contains("gender")) {
+                val userEmail = userPrefs.getString("user_email", null)
+                if (userEmail != null) {
+                    android.util.Log.d("ProfilePrefs", "Local prefs not found. Fetching for $userEmail")
+                    try {
+                        val response = NetworkClient.api.getPreferences(userEmail)
+                        android.util.Log.e("ProfilePrefsFetch", "Response Code: ${response.code()}, Body: ${response.body()}, Error: ${response.errorBody()?.string()}")
+                        if (response.isSuccessful && response.body() != null) {
+                            val serverPrefs = response.body()!!
+
+                            // Update the composable's state with the fetched data
+                            serverPrefs.gender?.let { gender = it }
+                            serverPrefs.age?.let { age = it }
+                            serverPrefs.preferredGender?.let { preferredGender = it }
+                            serverPrefs.preferredAgeRange?.let {
+                                preferredAgeRange = it.min.toFloat()..it.max.toFloat()
+                            }
+                            serverPrefs.romanceRange?.let {
+                                romanceRange = it.min.toFloat()..it.max.toFloat()
+                            }
+
+                            // Save the fetched preferences to SharedPreferences for next time
+                            with(userPrefs.edit()) {
+                                putString("gender", gender)
+                                putInt("age", age)
+                                putString("preferred_gender", preferredGender)
+                                putFloat("preferred_age_min", preferredAgeRange.start)
+                                putFloat("preferred_age_max", preferredAgeRange.endInclusive)
+                                putFloat("romance_min", romanceRange.start)
+                                putFloat("romance_max", romanceRange.endInclusive)
+                                apply()
+                            }
+                            android.util.Log.d("ProfilePrefs", "Fetched and updated prefs from server.")
+                        } else {
+                            android.util.Log.e("ProfilePrefs", "Failed to fetch prefs: ${response.errorBody()?.string()}")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("ProfilePrefs", "Error fetching prefs: ${e.message}")
+                    }
+                } else {
+                    android.util.Log.w("ProfilePrefs", "User email not found in SharedPreferences, cannot fetch.")
+                }
+            } else {
+                android.util.Log.d("ProfilePrefs", "Local preferences found, skipping fetch.")
+            }
+        }
+
+
+
     /* ---------- VIDEO ---------- */
     val exoPlayer = remember(isDarkTheme) {
         ExoPlayer.Builder(context).build().apply {
@@ -471,7 +526,7 @@ fun ProfileScreen(
 
 
                     SectionTitle("Your Gender", textColor)
-                    CompactGenderSelector(gender, { gender = it }, isDarkTheme, primaryColor)
+                    YourGenderSelector(gender, { gender = it }, isDarkTheme, primaryColor)
 
                     CompactSlider("Your Age", age.toString(), textColor, primaryColor) {
                         Slider(
@@ -488,7 +543,7 @@ fun ProfileScreen(
                     }
 
                     SectionTitle("Preferred Gender", textColor)
-                    CompactGenderSelector(preferredGender, { preferredGender = it }, isDarkTheme, primaryColor)
+                    PreferredGenderSelector(preferredGender, { preferredGender = it }, isDarkTheme, primaryColor)
 
                     CompactSlider(
                         "Preferred Age Range",
@@ -597,11 +652,11 @@ private fun SectionTitle(text: String, color: Color) {
         color = color
     )
 }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CompactGenderSelector(
-    value: String,
-    onChange: (String) -> Unit,
+private fun PreferredGenderSelector( // <--- NEW composable
+    value: String,    onChange: (String) -> Unit,
     isDarkTheme: Boolean,
     activeColor: Color
 ) {
@@ -617,7 +672,7 @@ private fun CompactGenderSelector(
         SegmentedButton(
             selected = value == "male",
             onClick = { onChange("male") },
-            shape = SegmentedButtonDefaults.itemShape(0, 2),
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3), // Count is 3
             label = { Text("Male") },
             colors = buttonColors,
             border = SegmentedButtonDefaults.borderStroke(color = activeColor, width = 1.dp)
@@ -625,13 +680,23 @@ private fun CompactGenderSelector(
         SegmentedButton(
             selected = value == "female",
             onClick = { onChange("female") },
-            shape = SegmentedButtonDefaults.itemShape(1, 2),
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3), // Count is 3
             label = { Text("Female") },
+            colors = buttonColors,
+            border = SegmentedButtonDefaults.borderStroke(color = activeColor, width = 1.dp)
+        )
+        // Add the "Both" button
+        SegmentedButton(
+            selected = value == "any",
+            onClick = { onChange("any") },
+            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3), // Count is 3
+            label = { Text("Both") },
             colors = buttonColors,
             border = SegmentedButtonDefaults.borderStroke(color = activeColor, width = 1.dp)
         )
     }
 }
+
 
 //... (at the bottom of ProfileScreen.kt, inside the HELPERS section)
 
@@ -669,6 +734,42 @@ private fun CompactSlider(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun YourGenderSelector( // <--- RENAMED
+    value: String,
+    onChange: (String) -> Unit,
+    isDarkTheme: Boolean,
+    activeColor: Color
+) {
+    // ... (The rest of the code with 2 buttons remains exactly the same) ...
+    val buttonColors = SegmentedButtonDefaults.colors(
+        activeContainerColor = activeColor,
+        activeContentColor = if (isDarkTheme) Color.Black else Color.White,
+        inactiveContainerColor = Color.Transparent,
+        inactiveContentColor = activeColor,
+        activeBorderColor = activeColor,
+        inactiveBorderColor = activeColor.copy(alpha = 0.5f)
+    )
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.scale(0.9f)) {
+        SegmentedButton(
+            selected = value == "male",
+            onClick = { onChange("male") },
+            shape = SegmentedButtonDefaults.itemShape(0, 2),
+            label = { Text("Male") },
+            colors = buttonColors,
+            border = SegmentedButtonDefaults.borderStroke(color = activeColor, width = 1.dp)
+        )
+        SegmentedButton(
+            selected = value == "female",
+            onClick = { onChange("female") },
+            shape = SegmentedButtonDefaults.itemShape(1, 2),
+            label = { Text("Female") },
+            colors = buttonColors,
+            border = SegmentedButtonDefaults.borderStroke(color = activeColor, width = 1.dp)
+        )
+    }
+}
 
 @Composable
 private fun RowScope.GiftCounter(

@@ -1,4 +1,5 @@
 package com.example.anonychat.ui
+import android.provider.Settings
 
 import android.content.Context
 import android.graphics.BitmapFactory
@@ -197,6 +198,10 @@ fun LoginScreen(
             confirmPassword.isNotEmpty() && (password == confirmPassword)
     val isLoginComplete = username.isNotEmpty() && password.isNotEmpty()
     val isResetPasswordComplete = currentUsername.isNotEmpty() && newPassword.isNotEmpty() && confirmNewPassword.isNotEmpty() && (newPassword == confirmNewPassword)
+    val androidId = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ANDROID_ID
+    )
 
     // ROOT BOX
     Box(modifier = Modifier.fillMaxSize()) {
@@ -448,6 +453,7 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                                                 with(prefs.edit()) {
                                                     putString("access_token", loginResponse.accessToken)
                                                     putString("user_id", loginResponse.user.id)
+                                                    putString("user_email", loginResponse.user.email)
                                                     apply()
                                                 }
                                                 val dto = loginResponse.user
@@ -545,7 +551,7 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                             Button(
                                 onClick = {
                                     isLoading = true
-                                    
+
                                     // Retrieve AppSet ID and Register
                                     val client = AppSet.getClient(context)
                                     client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
@@ -553,8 +559,8 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                                         val request = UserRegistrationRequest(
                                             username = username,
                                             password = password,
-                                            userId = "androidid:$appSetId",
-                                            email = "", 
+                                            userId = "$androidId:$appSetId",
+                                            email = "$androidId:$appSetId"+"@email.com",
                                             googleId = "" 
                                         )
                                         
@@ -657,7 +663,7 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                                     val client = AppSet.getClient(context)
                                     client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
                                         val appSetId = appSetIdInfo.id
-                                        val userId = "androidid:$appSetId"
+                                        val userId = "$androidId:$appSetId"
                                         val request = UserResetPasswordRequest(
                                             userId = userId, 
                                             username = currentUsername, 
