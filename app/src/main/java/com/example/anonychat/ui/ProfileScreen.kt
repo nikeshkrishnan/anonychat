@@ -90,7 +90,7 @@ fun ProfileScreen(
     val userPrefs = remember {
         context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
     }
-
+    var isRandomMatch by remember { mutableStateOf(userPrefs.getBoolean("random_match", true)) }
     var username by remember { mutableStateOf(initialUsername) }
     var gender by remember { mutableStateOf(userPrefs.getString("gender", "male") ?: "male") }
     var age by remember { mutableStateOf(userPrefs.getInt("age", 30)) }
@@ -99,14 +99,14 @@ fun ProfileScreen(
     }
     var preferredAgeRange by remember {
         mutableStateOf(
-            userPrefs.getFloat("preferred_age_min", 27f)..
-                    userPrefs.getFloat("preferred_age_max", 31f)
+            userPrefs.getFloat("preferred_age_min", 18f)..
+                    userPrefs.getFloat("preferred_age_max", 100f)
         )
     }
     var romanceRange by remember {
         mutableStateOf(
-            userPrefs.getFloat("romance_min", 2f)..
-                    userPrefs.getFloat("romance_max", 9f)
+            userPrefs.getFloat("romance_min", 1f)..
+                    userPrefs.getFloat("romance_max", 5f)
         )
     }
 
@@ -260,28 +260,16 @@ fun ProfileScreen(
 // Map of resource base name -> duration in ms (converted from your values)
                     val animationDurations = remember {
                         mapOf(
-                            "male_exp9" to 3580L,
-                            "female_exp8" to 8500L,
-                            "female_exp9" to 8500L,
-                            "female_exp10" to 5700L,
-                            "female_exp11" to 5020L,
-                            "male_exp10" to 8380L,
-                            "male_exp11" to 11600L,
+                            "female_exp4" to 8500L,
+                            "female_exp5" to 5020L,
+                            "male_exp4" to 8380L,
+                            "male_exp5" to 11600L,
                             "male_exp1" to 5400L,
-                            "male_exp2" to 4420L,
                             "female_exp1" to 2740L,
-                            "male_exp3" to 7640L,
-                            "female_exp2" to 3100L,
-                            "male_exp4" to 2020L,
-                            "female_exp3" to 1540L,
-                            "male_exp5" to 2380L,
-                            "female_exp4" to 1360L,
-                            "male_exp6" to 1840L,
-                            "female_exp5" to 1720L,
-                            "male_exp7" to 3760L,
-                            "female_exp6" to 1480L,
-                            "male_exp8" to 2800L,
-                            "female_exp7" to 5700L
+                            "male_exp2" to 2020L,
+                            "male_exp3" to 2380L,
+                            "female_exp2" to 1360L,
+                            "female_exp3" to 1720L
                         )
                     }
 
@@ -565,26 +553,47 @@ fun ProfileScreen(
                         )
                     }
 
-                    CompactSlider(
-                        "Romance Range",
-                        "${romanceRange.start.toInt()} - ${romanceRange.endInclusive.toInt()}",
-                        textColor,
-                        primaryColor
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        RangeSlider(
-                            value = romanceRange,
-                            onValueChange = { romanceRange = it },
-                            valueRange = 1f..10f,
-                            colors = SliderDefaults.colors(
-                                activeTrackColor = primaryColor,
-                                inactiveTrackColor = inactiveSliderColor,
-                                thumbColor = Color.White
-                            ),
-                            startThumb = { CircularThumb(color = Color.White) },
-                            endThumb = { CircularThumb(color = Color.White) }
+                        SectionTitle("Random Matches", textColor)
+                        Switch(
+                            checked = isRandomMatch,
+                            onCheckedChange = { isRandomMatch = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = primaryColor,
+                                uncheckedThumbColor = Color.White,
+                                uncheckedTrackColor = inactiveSliderColor
+                            )
                         )
                     }
 
+                    if (!isRandomMatch) {
+                        CompactSlider(
+                            "Romance Range",
+                            "${romanceRange.start.toInt()} - ${romanceRange.endInclusive.toInt()}",
+                            textColor,
+                            primaryColor
+                        ) {
+                            RangeSlider(
+                                value = romanceRange,
+                                onValueChange = { romanceRange = it },
+                                valueRange = 1f..5f,
+                                colors = SliderDefaults.colors(
+                                    activeTrackColor = primaryColor,
+                                    inactiveTrackColor = inactiveSliderColor,
+                                    thumbColor = Color.White
+                                ),
+                                startThumb = { CircularThumb(color = Color.White) },
+                                endThumb = { CircularThumb(color = Color.White) }
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(6.dp))
 
                     Button(
@@ -600,6 +609,7 @@ fun ProfileScreen(
                                 preferredGender = preferredGender,
                                 preferredAgeRange = preferredAgeRange,
                                 romanceRange = romanceRange,
+                                random = isRandomMatch,
                                 onSuccess = {
                                     isLoading = false
                                     Toast.makeText(context, "Preferences saved!", Toast.LENGTH_SHORT).show()
@@ -810,6 +820,7 @@ private fun saveUserPrefs(
     preferredGender: String,
     preferredAgeRange: ClosedFloatingPointRange<Float>,
     romanceRange: ClosedFloatingPointRange<Float>,
+    random: Boolean,
     onSuccess: () -> Unit,
     onFailure: () -> Unit
 ) {
@@ -828,7 +839,8 @@ private fun saveUserPrefs(
                 romanceRange = RomanceRange(
                     min = romanceRange.start.toInt(),
                     max = romanceRange.endInclusive.toInt()
-                )
+                ),
+                random = random
             )
 
             // 2. Make the network call
@@ -846,6 +858,7 @@ private fun saveUserPrefs(
                     putFloat("preferred_age_max", preferredAgeRange.endInclusive)
                     putFloat("romance_min", romanceRange.start)
                     putFloat("romance_max", romanceRange.endInclusive)
+                    putBoolean("random_match", random)
                     apply()
                 }
                 onSuccess() // Trigger success callback (e.g., show toast and navigate)
@@ -934,24 +947,22 @@ private fun RatingRow(
    Utility: romance range -> emotion (1..11)
    Mirrors the mapping we discussed earlier.
    --------------------------- */
-private fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
-    // Explicit examples preserved: 1-2 -> 1, 9-10 -> 11
-    if (rangeEnd <= 2f) return 1
-    if (rangeStart >= 9f && rangeEnd == 10f) return 11
+// ... other imports ...
 
+// Add this function to your CommonComponents.kt file
+fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
+    // The slider range is 1f to 5f.
+    // We will map this float range to 5 integer emotions.
     val mid = (rangeStart + rangeEnd) / 2f
 
+    // New logic for a 1f-5f range mapping to 5 emotions.
+    // Each integer (1, 2, 3, 4, 5) gets an equal portion of the range.
     return when {
-        mid < 1.95f -> 1
-        mid < 2.95f -> 2
-        mid < 3.95f -> 3
-        mid < 4.95f -> 4
-        mid < 5.95f -> 5
-        mid < 6.95f -> 6
-        mid < 7.95f -> 7
-        mid < 8.95f -> 8
-        mid < 9.5f -> 9
-        mid < 9.9f -> 10
-        else -> 11
+        mid < 1.8f -> 1 // Covers the first ~20% of the slider
+        mid < 2.6f -> 2
+        mid < 3.4f -> 3
+        mid < 4.2f -> 4
+        else       -> 5 // Covers the last ~20% of the slider
     }
 }
+

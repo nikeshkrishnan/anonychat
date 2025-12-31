@@ -1,4 +1,7 @@
 package com.example.anonychat.ui
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import android.util.Log
 
 import android.content.Context
 import android.net.Uri
@@ -78,6 +81,7 @@ import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Animatable2
 import android.graphics.drawable.Drawable
 import androidx.annotation.RequiresApi
+import com.example.anonychat.network.NetworkClient
 
 @RequiresApi(Build.VERSION_CODES.P)
 private fun registerPlayOnceCallback(
@@ -107,27 +111,27 @@ object ChatScreenPipController {
     var onBeforeEnterPip: (() -> Unit)? = null
 }
 
-private fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
-    // Explicit examples preserved: 1-2 -> 1, 9-10 -> 11
-    if (rangeEnd <= 2f) return 1
-    if (rangeStart >= 9f && rangeEnd == 10f) return 11
-
-    val mid = (rangeStart + rangeEnd) / 2f
-
-    return when {
-        mid < 1.95f -> 1
-        mid < 2.95f -> 2
-        mid < 3.95f -> 3
-        mid < 4.95f -> 4
-        mid < 5.95f -> 5
-        mid < 6.95f -> 6
-        mid < 7.95f -> 7
-        mid < 8.95f -> 8
-        mid < 9.5f -> 9
-        mid < 9.9f -> 10
-        else -> 11
-    }
-}
+//private fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
+//    // Explicit examples preserved: 1-2 -> 1, 9-10 -> 11
+//    if (rangeEnd <= 2f) return 1
+//    if (rangeStart >= 9f && rangeEnd == 10f) return 11
+//
+//    val mid = (rangeStart + rangeEnd) / 2f
+//
+//    return when {
+//        mid < 1.95f -> 1
+//        mid < 2.95f -> 2
+//        mid < 3.95f -> 3
+//        mid < 4.95f -> 4
+//        mid < 5.95f -> 5
+//        mid < 6.95f -> 6
+//        mid < 7.95f -> 7
+//        mid < 8.95f -> 8
+//        mid < 9.5f -> 9
+//        mid < 9.9f -> 10
+//        else -> 11
+//    }
+//}
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -152,7 +156,7 @@ fun ChatScreen(
     var flowerKey by remember { mutableStateOf(0) }
     var thunderKey by remember { mutableStateOf(0) }
     val context = LocalContext.current
-
+    val scope = rememberCoroutineScope() // <--- ADD THIS LINE
     val themePrefs = remember { context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE) }
     var isDarkTheme by remember { mutableStateOf(themePrefs.getBoolean("is_dark_theme", false)) }
     var showThemeDialog by remember { mutableStateOf(false) }
@@ -508,9 +512,23 @@ fun ChatScreen(
                 .clickable(
                     interactionSource = interactionSource,
                     indication = null // Keep this null to avoid the square shadow box
-                ) {
-                    isLoading = true                         // 4. Add your action here
-                    // android.widget.Toast.makeText(context, "Bird Clicked!", android.widget.Toast.LENGTH_SHORT).show()
+                ) {    scope.launch {
+                    isLoading = true
+                    try {
+                        val userPrefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                        val email = userPrefs.getString("user_email", null)
+                        if (email != null) {
+                            val response = NetworkClient.api.callMatch(email)
+                            Log.e("ChatScreen", "Match API Response: $response")
+                        } else {
+                            Log.e("ChatScreen", "User email not found in SharedPreferences")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("ChatScreen", "Match API call failed", e)
+                    } finally {
+                        isLoading = false
+                    }
+                }
                 }
         )
     }

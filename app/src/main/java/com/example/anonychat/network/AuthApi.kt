@@ -20,7 +20,7 @@ import okhttp3.Interceptor
 
 // This interceptor adds the auth token to requests
 class AuthInterceptor(context: Context) : Interceptor {
-    private val sharedPreferences: SharedPreferences =
+    private val sharedPreferences: SharedPreferences = 
         context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
 
     override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
@@ -45,7 +45,8 @@ data class GetPreferencesResponse(
     val gender: String?,
     val preferredGender: String?,
     val romanceRange: RomanceRange?,
-    val preferredAgeRange: AgeRange?
+    val preferredAgeRange: AgeRange?,
+    val random: Boolean?
 )
 
 // --- DATA MODELS ---
@@ -82,7 +83,8 @@ data class PreferencesRequest(
     val gender: String,
     val preferredGender: String,
     val preferredAgeRange: AgeRange,
-    val romanceRange: RomanceRange
+    val romanceRange: RomanceRange,
+    val random: Boolean
 )
 
 data class AgeRange(val min: Int, val max: Int)
@@ -114,6 +116,9 @@ interface AuthApiService {
     suspend fun setPreferences(@Body request: PreferencesRequest): Response<Void>
     @GET("preferences/{email}")
     suspend fun getPreferences(@Path("email") email: String): Response<GetPreferencesResponse>
+
+    @POST("/api/match/{gmail}")
+    suspend fun callMatch(@Path("gmail") gmail: String): Response<Void>
 }
 
 

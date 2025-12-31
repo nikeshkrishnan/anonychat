@@ -1,6 +1,11 @@
 package com.example.anonychat.ui
-import android.provider.Settings
 
+import android.provider.Settings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.example.anonychat.network.PreferencesRequest
+import com.example.anonychat.network.AgeRange
+import com.example.anonychat.network.RomanceRange
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -147,7 +152,7 @@ fun LoginScreen(
 
     val coroutine = rememberCoroutineScope()
     val transitionColor = Color(0xFFDBF0F9)
-    
+
     // Define standard colors for all text fields
     val textFieldColors = OutlinedTextFieldDefaults.colors(
         focusedTextColor = Color.Black,
@@ -183,7 +188,7 @@ fun LoginScreen(
         if (isLoading) {
             isLoading = false
         } else if (authMode != "Terms") {
-            authMode = "Terms" 
+            authMode = "Terms"
             password = ""
             confirmPassword = ""
             newPassword = ""
@@ -425,57 +430,153 @@ fun LoginScreen(
 
                             Button(
                                 onClick = {
+                                    // set loading on Main
                                     isLoading = true
+
                                     coroutine.launch {
                                         try {
-                                            val fakeUserDto = com.example.anonychat.network.UserDto(
-                                                id = "debug_user_123",
-                                                username = username,
-                                                email = "debug@test.com",
-                                                gender = "unknown"
-                                            )
-                                            val fakeBody = com.example.anonychat.network.LoginResponse(
-                                                message = "Debug Login Success",
-                                                accessToken = "fake_access_token",
-                                                refreshToken = "fake_refresh_token",
-                                                user = fakeUserDto
-                                            )
+                                            // 1) LOGIN network call on IO
+                                            val response = withContext(Dispatchers.IO) {
+                                                NetworkClient.api.loginUser(UserLoginRequest(username, password))
+                                            }
 
-// Create a successful Retrofit response manually
-                                           // val response = retrofit2.Response.success(fakeBody)
-val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
-                                           android.util.Log.e("response!!!!!!!!!!!", "Response: $response")
                                             if (response.isSuccessful && response.body() != null) {
                                                 val loginResponse = response.body()!!
-                                                // Map UserDto to User
+
                                                 android.util.Log.d("LOGIN_SUCCESS", "Received Token: ${loginResponse.accessToken}")
-                                                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                                with(prefs.edit()) {
-                                                    putString("access_token", loginResponse.accessToken)
-                                                    putString("user_id", loginResponse.user.id)
-                                                    putString("user_email", loginResponse.user.email)
-                                                    apply()
+
+                                                // 2) Write tokens and connect websocket on Main
+                                                withContext(Dispatchers.Main) {
+                                                    try {
+                                                        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                        prefs.edit().apply {
+                                                            putString("access_token", loginResponse.accessToken)
+                                                            putString("user_id", loginResponse.user.id)
+                                                            putString("user_email", loginResponse.user.email)
+                                                            apply()
+                                                        }
+
+                                                        android.util.Log.e("LoginPrefs!!!!!!!!!!", "p $prefs")
+
+                                                        // Ensure WebSocket connect runs on Main (many implementations require this)
+                                                        com.example.anonychat.network.WebSocketManager.connect(context)
+                                                    } catch (e: Exception) {
+                                                        android.util.Log.e("LoginPrefs", "Error during main-thread prefs/ws actions", e)
+                                                        // Continue — we'll surface to user below
+                                                    }
                                                 }
-                                                val dto = loginResponse.user
-                                                val user = User(
-                                                    id = dto.id,
-                                                    username = dto.username,
-                                                    profilePictureUrl = null // DTO doesn't provide this yet
-                                                )
-                                                onLoginClick(user)
+
+                                                // 3) Check if detailed preferences exist; network on IO, prefs & navigation on Main
+                                                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                if (!prefs.contains("gender")) {
+                                                    android.util.Log.e("LoginPrefs", "Local preferences missing. Fetching from server for ${loginResponse.user.email}")
+
+                                                    try {
+                                                        val prefResponse = withContext(Dispatchers.IO) {
+                                                            NetworkClient.api.getPreferences(loginResponse.user.email)
+                                                        }
+
+                                                        if (prefResponse.isSuccessful && prefResponse.body() != null) {
+                                                            val serverPrefs = prefResponse.body()!!
+
+                                                            withContext(Dispatchers.Main) {
+                                                                prefs.edit().apply {
+                                                                    serverPrefs.gender?.let { putString("gender", it) }
+                                                                    serverPrefs.age?.let { putInt("age", it) }
+                                                                    serverPrefs.preferredGender?.let { putString("preferred_gender", it) }
+                                                                    serverPrefs.preferredAgeRange?.let {
+                                                                        putFloat("preferred_age_min", it.min.toFloat())
+                                                                        putFloat("preferred_age_max", it.max.toFloat())
+                                                                    }
+                                                                    serverPrefs.romanceRange?.let {
+                                                                        putFloat("romance_min", it.min.toFloat())
+                                                                        putFloat("romance_max", it.max.toFloat())
+                                                                    }
+                                                                    putBoolean("random_match", serverPrefs.random ?: true)
+                                                                    apply()
+                                                                }
+
+                                                                android.util.Log.d("LoginPrefs", "Successfully fetched and saved preferences.")
+                                                                isLoading = false
+                                                                onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                            }
+                                                        } else if (prefResponse.code() == 404) {
+                                                            // set defaults via network call on IO
+                                                            val defaultRequest = PreferencesRequest(
+                                                                userId = loginResponse.user.id,
+                                                                age = 18,
+                                                                gender = "male",
+                                                                preferredGender = "any",
+                                                                preferredAgeRange = AgeRange(min = 18, max = 100),
+                                                                romanceRange = RomanceRange(min = 1, max = 5),
+                                                                random = true
+                                                            )
+
+                                                            val setResponse = withContext(Dispatchers.IO) {
+                                                                NetworkClient.api.setPreferences(defaultRequest)
+                                                            }
+
+                                                            withContext(Dispatchers.Main) {
+                                                                isLoading = false
+                                                                if (setResponse.isSuccessful) {
+                                                                    // persist defaults locally
+                                                                    prefs.edit().apply {
+                                                                        putString("gender", defaultRequest.gender)
+                                                                        putInt("age", defaultRequest.age)
+                                                                        putString("preferred_gender", defaultRequest.preferredGender)
+                                                                        putFloat("preferred_age_min", defaultRequest.preferredAgeRange.min.toFloat())
+                                                                        putFloat("preferred_age_max", defaultRequest.preferredAgeRange.max.toFloat())
+                                                                        putFloat("romance_min", defaultRequest.romanceRange.min.toFloat())
+                                                                        putFloat("romance_max", defaultRequest.romanceRange.max.toFloat())
+                                                                        apply()
+                                                                    }
+                                                                    onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                } else {
+                                                                    Toast.makeText(context, "Failed to set default preferences.", Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            }
+                                                        } else {
+                                                            withContext(Dispatchers.Main) {
+                                                                isLoading = false
+                                                                android.util.Log.e("LoginPrefs", "Failed to fetch prefs: ${prefResponse.code()}")
+                                                                Toast.makeText(context, "Failed to fetch preferences: ${prefResponse.code()}", Toast.LENGTH_LONG).show()
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        android.util.Log.e("LoginPrefs", "Exception fetching prefs", e)
+                                                        withContext(Dispatchers.Main) {
+                                                            isLoading = false
+                                                            Toast.makeText(context, "Login failed while fetching preferences: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                                        }
+                                                    }
+                                                } else {
+                                                    // prefs exist — navigate immediately (on main)
+                                                    withContext(Dispatchers.Main) {
+                                                        isLoading = false
+                                                        android.util.Log.d("LoginPrefs", "Local preferences found. Navigating immediately.")
+                                                        onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                    }
+                                                }
                                             } else {
-                                                //log full response
+                                                val errorBody = try {
+                                                    withContext(Dispatchers.IO) {
+                                                        response.errorBody()?.string()
+                                                    }
+                                                } catch (e: Exception) {
+                                                    "Could not read error body"
+                                                }
 
-                                                isLoading = false
-//                                                val errorBody = response.errorBody()?.string() ?: "No error body"
-//// Log it to Logcat so you can copy-paste it if needed (tag: LOGIN_ERROR)
-//                                                android.util.Log.e("LOGIN_ERROR!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", "Response: $errorBody")
-
-                                                Toast.makeText(context, "Login failed: ${response.errorBody()?.string()}", Toast.LENGTH_LONG).show()
+                                                withContext(Dispatchers.Main) {
+                                                    isLoading = false
+                                                    Toast.makeText(context, "Login failed: $errorBody", Toast.LENGTH_LONG).show()
+                                                }
                                             }
                                         } catch (e: Exception) {
-                                            isLoading = false
-                                            Toast.makeText(context, "Login error!!!!: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            android.util.Log.e("LOGIN_ERROR", "Exception during login", e)
+                                            withContext(Dispatchers.Main) {
+                                                isLoading = false
+                                                Toast.makeText(context, "Login error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            }
                                         }
                                     }
                                 },
@@ -495,7 +596,7 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                                 fontWeight = FontWeight.Bold
                             )
                             Spacer(modifier = Modifier.height(10.dp))
-                            
+
                             OutlinedTextField(
                                 value = username,
                                 onValueChange = { username = it },
@@ -508,7 +609,7 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                             Spacer(modifier = Modifier.height(8.dp))
 
                             Spacer(modifier = Modifier.height(12.dp))
-                            
+
                             OutlinedTextField(
                                 value = password,
                                 onValueChange = { password = it },
@@ -561,9 +662,9 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                                             password = password,
                                             userId = "$androidId:$appSetId",
                                             email = "$androidId:$appSetId"+"@email.com",
-                                            googleId = "" 
+                                            googleId = ""
                                         )
-                                        
+
                                         coroutine.launch {
                                             try {
                                                 val response = NetworkClient.api.registerUser(request)
@@ -665,8 +766,8 @@ val response = NetworkClient.api.loginUser(UserLoginRequest(username, password))
                                         val appSetId = appSetIdInfo.id
                                         val userId = "$androidId:$appSetId"
                                         val request = UserResetPasswordRequest(
-                                            userId = userId, 
-                                            username = currentUsername, 
+                                            userId = userId,
+                                            username = currentUsername,
                                             newPassword = newPassword
                                         )
 
