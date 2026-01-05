@@ -54,6 +54,10 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    implementation(platform("androidx.compose:compose-bom:2024.02.01"))
+
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-text")
 
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.navigation:navigation-compose:2.7.7")
@@ -70,9 +74,11 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
-    implementation("androidx.media3:media3-exoplayer:1.2.0") {
-        exclude(group = "androidx.media3", module = "media3-ui")
-    }
+    implementation("androidx.media3:media3-ui:1.3.1")
+    implementation("androidx.media3:media3-exoplayer:1.3.1")
+//    implementation("androidx.media3:media3-exoplayer:1.2.0") {
+//        exclude(group = "androidx.media3", module = "media3-ui")
+//    }
     implementation("androidx.media3:media3-ui:1.2.0")
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
     implementation("io.coil-kt:coil-gif:2.7.0")

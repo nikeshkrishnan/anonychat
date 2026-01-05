@@ -1,4 +1,5 @@
 package com.example.anonychat.ui
+import com.example.anonychat.network.NetworkClient
 
 import com.example.anonychat.MainActivity
 import com.example.anonychat.R
@@ -19,6 +20,7 @@ import android.util.Log
 import android.view.*
 import android.view.animation.DecelerateInterpolator
 import android.widget.ImageView
+import android.widget.Toast
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
@@ -48,6 +50,12 @@ class BirdBubbleService : Service() {
     private var inCloseZone = false
 
     private val vibScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    // Service scope for API calls / UI updates
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    // Add a new state variable for the cupid phase
+    private var cupidIsActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -186,16 +194,6 @@ class BirdBubbleService : Service() {
     }
 
     // Heart animation + vibration
-    // Heart animation + vibration
-    // Heart animation + vibration
-    // ... inside BirdBubbleService.kt class
-
-    // Add a new state variable for the cupid phase
-    private var cupidIsActive = false
-
-    // ...
-
-    // Heart animation + vibration
     private fun showHeartTemporary() {
         if (showingHeart) return // Prevent re-triggering
 
@@ -212,18 +210,83 @@ class BirdBubbleService : Service() {
         }
         startVibration()
 
-        // --- Stage 2: Show HEART-CUPID ---
-        handler.postDelayed({
-            stopVibration()
-            cupidIsActive = true // Cupid is now active
+        // Launch matchmaking API call in serviceScope
+        serviceScope.launch {
+            val userPrefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            val email = userPrefs.getString("user_email", null)
 
+            if (email == null) {
+                Log.w(TAG, "No user email saved. Cannot call matchmaking.")
+                // show heart for short duration then revert
+                delay(3000)
+                stopVibration()
+                revertToBird()
+                return@launch
+            }
+
+            // Call the matchmaking API with a timeout. Adjust timeout as needed.
+            val matchResponse = withContext(Dispatchers.IO) {
+                try {
+                    // keep the same timeout wrapper
+                    withTimeoutOrNull(30_000) {
+                        try {
+                            NetworkClient.api.callMatch(email)
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "callMatch failed: $t")
+                            null
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "match request exception: $t")
+                    null
+                }
+            }
+
+            stopVibration()
+
+            // --- Robust null check: API returns JSON like {"match":"..."} or {"match":null}
+            val matchedEmail = matchResponse
+                ?.takeIf { it.isSuccessful }
+                ?.body()
+                ?.match
+
+            if (matchedEmail != null) {
+                // We got a match — switch to heart-cupid and make it permanent
+                bubbleView?.let { iv ->
+                    (iv.drawable as? AnimatedImageDrawable)?.stop()
+                    setImageSafely(iv, R.drawable.heartcupid)
+                    Log.d(TAG, "Image set to: heart-cupid.gif. This is now the permanent state. Matched: $matchedEmail")
+                }
+
+                cupidIsActive = true
+                showingHeart = false // we are no longer "waiting"
+
+            } else {
+                // No match / error / timeout — revert to bird after a short delay
+                Log.w(TAG, "No match value found. Reverting to bird.")
+                delay(800)
+                revertToBird()
+            }
+        }
+    }
+
+    private fun revertToBird() {
+        try {
+            val prefs = getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE)
+            val isDarkTheme = prefs.getBoolean("is_dark_theme", false)
+            val birdDrawable = if (isDarkTheme) R.drawable.owlt else R.drawable.bird
             bubbleView?.let { iv ->
                 (iv.drawable as? AnimatedImageDrawable)?.stop()
-                setImageSafely(iv, R.drawable.heartcupid)
-                Log.d(TAG, "Image set to: heart-cupid.gif. This is now the permanent state.")
+                setImageSafely(iv, birdDrawable)
             }
-        }, HEART_DURATION)
+        } catch (t: Throwable) {
+            Log.e(TAG, "revertToBird failed: $t")
+        } finally {
+            showingHeart = false
+            cupidIsActive = false
+        }
     }
+
     private fun bounce(view: View) {
         view.animate()
             .scaleX(0.85f)
@@ -240,54 +303,150 @@ class BirdBubbleService : Service() {
     }
 
     // Touch handler
+
+    private fun updateOverlayPosition() {
+        try {
+            val params = bubbleParams ?: return
+            val overlay = overlayParams ?: return
+            // Keep overlay centered on bubble
+            overlay.x = params.x + params.width / 2 - dp(25)
+            overlay.y = params.y + params.height / 2 - dp(25)
+            // If overlay view is already added, update it
+            closeOverlay?.let {
+                try { windowManager.updateViewLayout(it, overlay) } catch (_: Exception) {}
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "updateOverlayPosition failed: $t")
+        }
+    }
+    private fun animatePoofAndRemove(view: View) {
+
+        // --- WHITE PUFF FLASH ---
+        view.animate()
+            .alpha(0.6f)
+            .setDuration(40)
+            .withEndAction {
+                view.alpha = 1f
+            }
+            .start()
+
+        // --- SOUND EFFECT ---
+        try {
+            view.playSoundEffect(SoundEffectConstants.CLICK)
+        } catch (_: Exception) {}
+
+        // --- TINY HAPTIC ---
+        vibrateShort()
+
+        // --- MAIN POOF ANIMATION ---
+        view.animate()
+            .scaleX(0.1f)
+            .scaleY(0.1f)
+            .alpha(0f)
+            .translationYBy(-dp(24).toFloat())
+            .setDuration(180)
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction {
+                try { windowManager.removeView(view) } catch (_: Exception) {}
+                try { closeOverlay?.let { windowManager.removeView(it) } } catch (_: Exception) {}
+                bubbleView = null
+                closeOverlay = null
+                stopSelf()
+            }
+            .start()
+    }
+
+
     @OptIn(ExperimentalLayoutApi::class)
     private fun attachDragHandler(view: View, params: WindowManager.LayoutParams) {
+        var longPressConsumed = false
 
         val gestureDetector = GestureDetector(this,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onSingleTapUp(e: MotionEvent): Boolean {
-                    bubbleView?.let { bounce(it) }   // 🔥 ADD THIS LINE
+                    bubbleView?.let { bounce(it) }
 
-                    // --- THIS IS THE MAIN LOGIC CHANGE ---
                     if (cupidIsActive) {
                         Log.d(TAG, "Heart-cupid clicked. Opening app to ChatScreen.")
-
-                        // Create an Intent to launch MainActivity
                         val intent = Intent(this@BirdBubbleService, MainActivity::class.java).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                            // Add an extra to tell MainActivity where to go
                             putExtra("NAVIGATE_TO", "CHAT")
                         }
                         startActivity(intent)
-
                     } else if (!showingHeart) {
                         Log.d(TAG, "Bird clicked. Starting heart sequence.")
                         showHeartTemporary()
                     }
-                    // --- END OF CHANGE ---
-
                     return true
                 }
+
+                override fun onLongPress(e: MotionEvent) {
+                    Log.d(TAG, "Long press detected - smooth remove")
+                    longPressConsumed = true
+
+                    stopVibration()
+                    handler.removeCallbacksAndMessages(null)
+
+                    try {
+                        // 🔴 IMPORTANT: stop any running animations to prevent flicker
+                        view.animate().cancel()
+                        view.clearAnimation()
+
+                        // Optional feedback
+                        try { view.playSoundEffect(SoundEffectConstants.CLICK) } catch (_: Exception) {}
+                        vibrateShort()
+
+                        // Single smooth vanish animation (NO flicker)
+                        view.animate()
+                            .alpha(0f)
+                            .scaleX(0.2f)
+                            .scaleY(0.2f)
+                            .translationYBy(-dp(16).toFloat())
+                            .setDuration(180)
+                            .setInterpolator(DecelerateInterpolator())
+                            .withEndAction {
+                                try { windowManager.removeView(view) } catch (_: Exception) {}
+                                try { closeOverlay?.let { windowManager.removeView(it) } } catch (_: Exception) {}
+                                bubbleView = null
+                                closeOverlay = null
+                                stopSelf()
+                            }
+                            .start()
+
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "error removing on long press: $t")
+                        // fallback: immediate removal
+                        try { windowManager.removeView(view) } catch (_: Exception) {}
+                        try { closeOverlay?.let { windowManager.removeView(it) } } catch (_: Exception) {}
+                        bubbleView = null
+                        closeOverlay = null
+                        stopSelf()
+                    }
+                }
+
+
             }
         )
 
-        // ... the rest of the attachDragHandler function remains exactly the same
+        // local state to mark a long-press that already handled the gesture
+         longPressConsumed = false
+
         var initialX = 0
         var initialY = 0
         var touchX = 0f
         var touchY = 0f
 
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
-        val closeThreshold = screenH - dp(120)
-
         view.setOnTouchListener { _, event ->
+
+            // If we already consumed a long-press, ignore all further events for this gesture
+            if (longPressConsumed) return@setOnTouchListener true
 
             if (gestureDetector.onTouchEvent(event)) return@setOnTouchListener true
 
             when (event.action) {
-                // ... (ACTION_DOWN, ACTION_MOVE, ACTION_UP logic is unchanged)
                 MotionEvent.ACTION_DOWN -> {
+                    // reset flag at the start of a new gesture
+                    longPressConsumed = false
                     initialX = params.x
                     initialY = params.y
                     touchX = event.rawX
@@ -301,33 +460,29 @@ class BirdBubbleService : Service() {
 
                     windowManager.updateViewLayout(view, params)
 
-                    // Update close overlay position always
+                    // Update close overlay position always (keep it in sync)
                     overlayParams?.apply {
                         x = params.x + params.width / 2 - dp(25)
                         y = params.y + params.height / 2 - dp(25)
-                        windowManager.updateViewLayout(closeOverlay, this)
+                        try { windowManager.updateViewLayout(closeOverlay, this) } catch (_: Exception) {}
                     }
 
-                    // --- CLOSE ZONE LOGIC ---
+                    // --- CLOSE ZONE LOGIC: compute screen dims here so they are always fresh ---
+                    val screenW = resources.displayMetrics.widthPixels
+                    val screenH = resources.displayMetrics.heightPixels
+                    val closeThreshold = screenH - dp(120)
+
                     val centerY = params.y + params.height / 2
                     if (centerY >= closeThreshold) {
-
                         if (!inCloseZone) {
                             inCloseZone = true
-
-                            // shrink bubble
                             view.animate().scaleX(0.82f).scaleY(0.82f).setDuration(80).start()
-
-                            // show cross
                             closeOverlay?.visibility = View.VISIBLE
-
                             vibrateShort()
                         }
-
                     } else {
                         if (inCloseZone) {
                             inCloseZone = false
-
                             view.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
                             closeOverlay?.visibility = View.GONE
                         }
@@ -337,24 +492,24 @@ class BirdBubbleService : Service() {
                 }
 
                 MotionEvent.ACTION_UP -> {
-
                     if (inCloseZone) {
                         animateRemove(params, view)
                         return@setOnTouchListener true
                     }
 
+                    // compute screen width dynamically so snapping also respects rotation
+                    val screenW = resources.displayMetrics.widthPixels
                     val w = if (view.width > 0) view.width else params.width
                     val centerX = params.x + w / 2
-
                     val targetX = if (centerX < screenW / 2) 30 else screenW - w - 30
                     animateSnap(params, view, targetX)
-
                     true
                 }
                 else -> false
             }
         }
     }
+
 
     private fun animateRemove(params: WindowManager.LayoutParams, view: View) {
 
@@ -433,6 +588,7 @@ class BirdBubbleService : Service() {
         handler.removeCallbacksAndMessages(null)
         stopVibration()
         vibScope.cancel()
+        serviceScope.cancel()
         try {
             bubbleView?.let { windowManager.removeView(it) }
             closeOverlay?.let { windowManager.removeView(it) }

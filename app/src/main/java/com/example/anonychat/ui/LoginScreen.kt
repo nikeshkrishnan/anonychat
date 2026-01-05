@@ -453,6 +453,8 @@ fun LoginScreen(
                                                             putString("access_token", loginResponse.accessToken)
                                                             putString("user_id", loginResponse.user.id)
                                                             putString("user_email", loginResponse.user.email)
+                                                            putString("username", loginResponse.user.username)
+
                                                             apply()
                                                         }
 
@@ -481,6 +483,7 @@ fun LoginScreen(
 
                                                             withContext(Dispatchers.Main) {
                                                                 prefs.edit().apply {
+                                                                    serverPrefs.username.let { putString("username", it) }
                                                                     serverPrefs.gender?.let { putString("gender", it) }
                                                                     serverPrefs.age?.let { putInt("age", it) }
                                                                     serverPrefs.preferredGender?.let { putString("preferred_gender", it) }

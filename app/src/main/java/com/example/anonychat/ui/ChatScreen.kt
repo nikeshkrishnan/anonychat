@@ -82,6 +82,11 @@ import android.graphics.drawable.Animatable2
 import android.graphics.drawable.Drawable
 import androidx.annotation.RequiresApi
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.PreferencesRequest
+import com.example.anonychat.network.AgeRange
+import com.example.anonychat.network.RomanceRange
+import com.example.anonychat.network.GetPreferencesResponse
+import com.example.anonychat.model.Preferences
 
 @RequiresApi(Build.VERSION_CODES.P)
 private fun registerPlayOnceCallback(
@@ -139,7 +144,8 @@ fun ChatScreen(
     user: User,
     onChatActive: () -> Unit,
     onChatInactive: () -> Unit,
-    onNavigateToProfile: (String) -> Unit
+    onNavigateToProfile: (String) -> Unit,
+    onNavigateToDirectChat: (User, Preferences) -> Unit   // new
 ) {
     // notify MainActivity that chat is now active
     LaunchedEffect(Unit) { onChatActive() }
@@ -515,20 +521,67 @@ fun ChatScreen(
                 ) {    scope.launch {
                     isLoading = true
                     try {
-                        val userPrefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                        val email = userPrefs.getString("user_email", null)
-                        if (email != null) {
-                            val response = NetworkClient.api.callMatch(email)
-                            Log.e("ChatScreen", "Match API Response: $response")
-                        } else {
-                            Log.e("ChatScreen", "User email not found in SharedPreferences")
+                        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                        val myEmail = prefs.getString("user_email", null)
+
+                        if (myEmail == null) {
+                            Log.e("ChatScreen", "User email missing")
+                            return@launch
                         }
+
+                        // 1️⃣ Call match API
+                        val matchResponse = NetworkClient.api.callMatch(myEmail)
+
+                        val matchedEmail = matchResponse
+                            ?.takeIf { it.isSuccessful }
+                            ?.body()
+                            ?.match
+
+                        if (matchedEmail.isNullOrBlank()) {
+                            Log.e("ChatScreen", "No match found")
+                            return@launch
+                        }
+
+                        // 2️⃣ Fetch matched user's preferences
+                        val matchedPrefsResponse =
+                            NetworkClient.api.getPreferences(matchedEmail)
+                        val prefsBody = matchedPrefsResponse
+                            .takeIf { it.isSuccessful }
+                            ?.body()
+
+                        if (prefsBody == null) {
+                            Log.e("ChatScreen", "Failed to fetch preferences for $matchedEmail")
+                            return@launch
+                        }
+val matchedUsername=prefsBody.username?:""
+                        val romanceMin = prefsBody.romanceRange?.min?.toFloat() ?: 1f
+                        val romanceMax = prefsBody.romanceRange?.max?.toFloat() ?: 5f
+                        val gender = prefsBody.gender ?: "male"
+                        val matchedPrefs = Preferences(
+                            romanceMin = romanceMin,
+                            romanceMax = romanceMax,
+                            gender = gender
+                        )
+
+
+                        // 3️⃣ Build matched user object
+                        val matchedUser = User(
+                            username = matchedUsername, // or API username
+                            profilePictureUrl = null,
+                            id = matchedEmail
+
+                        )
+
+                        // 4️⃣ NAVIGATE TO DIRECT CHAT
+                        onNavigateToDirectChat(matchedUser, matchedPrefs)
+
                     } catch (e: Exception) {
-                        Log.e("ChatScreen", "Match API call failed", e)
+                        Log.e("ChatScreen", "Match flow failed", e)
                     } finally {
                         isLoading = false
                     }
                 }
+
                 }
         )
     }

@@ -40,6 +40,7 @@ class AuthInterceptor(context: Context) : Interceptor {
 }
 
 data class GetPreferencesResponse(
+    val username: String?,
     val gmail: String?,
     val age: Int?,
     val gender: String?,
@@ -95,6 +96,9 @@ data class UserResetPasswordRequest(
     val username: String,
     val newPassword: String
 )
+data class MatchResponse(
+    val match: String?
+)
 
 
 // --- API INTERFACE ---
@@ -118,7 +122,7 @@ interface AuthApiService {
     suspend fun getPreferences(@Path("email") email: String): Response<GetPreferencesResponse>
 
     @POST("/api/match/{gmail}")
-    suspend fun callMatch(@Path("gmail") gmail: String): Response<Void>
+    suspend fun callMatch(@Path("gmail") gmail: String): Response<MatchResponse>
 }
 
 

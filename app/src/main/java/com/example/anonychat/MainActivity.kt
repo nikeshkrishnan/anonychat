@@ -1,10 +1,11 @@
 package com.example.anonychat
-
+import androidx.compose.ui.platform.LocalContext
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import com.example.anonychat.model.Preferences
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,9 +25,11 @@ import com.example.anonychat.ui.ChatScreen
 import com.example.anonychat.ui.BirdBubbleService
 import com.example.anonychat.ui.LoginScreen
 import com.example.anonychat.ui.ProfileScreen
+import com.example.anonychat.ui.DirectChatScreen
 import com.example.anonychat.ui.RatingsScreen
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.gson.Gson
+import android.content.Context   // ✅ THIS IMPORT FIXES IT
 
 sealed class Screen(val route: String) {
     object Login : Screen("login")
@@ -38,6 +41,14 @@ sealed class Screen(val route: String) {
             return "chat/$encodedJson"
         }
     }
+    object DirectChat : Screen("direct_chat/{user}/{prefs}") {
+        fun createRoute(userJson: String, prefsJson: String): String {
+            val u = java.net.URLEncoder.encode(userJson, "UTF-8")
+            val p = java.net.URLEncoder.encode(prefsJson, "UTF-8")
+            return "direct_chat/$u/$p"
+        }
+    }
+
     object Profile : Screen("profile/{username}") {
         fun createRoute(username: String): String {
             return "profile/$username"
@@ -100,6 +111,20 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         stopService(Intent(this, BirdBubbleService::class.java))
+    }
+
+    fun getCurrentUser(context: Context): User {
+        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+
+        val username = prefs.getString("username", null)
+            ?: error("Username missing in SharedPreferences")
+        val email = prefs.getString("user_email", null)
+            ?: error("Useremail missing in SharedPreferences")
+        return User(
+            username = username,
+            profilePictureUrl = null,
+            id = email
+        )
     }
 
 
@@ -196,9 +221,51 @@ class MainActivity : ComponentActivity() {
                     user = user,
                     onChatActive = onChatActive,
                     onChatInactive = onChatInactive,
-                    onNavigateToProfile = { username -> navController.navigate(Screen.Profile.createRoute(username)) }
+                    onNavigateToProfile = { username ->
+                        navController.navigate(Screen.Profile.createRoute(username))
+                    },
+                    onNavigateToDirectChat = { matchedUser, matchedPrefs ->
+                        val gson = Gson()
+                        navController.navigate(
+                            Screen.DirectChat.createRoute(
+                                gson.toJson(matchedUser),
+                                gson.toJson(matchedPrefs)
+                            )
+                        )
+                    }
+                )
+
+
+            }
+
+
+            composable(
+                Screen.DirectChat.route,
+                arguments = listOf(
+                    navArgument("user") { type = NavType.StringType },
+                    navArgument("prefs") { type = NavType.StringType }
+                )
+            ) { entry ->
+                val userJson = java.net.URLDecoder.decode(
+                    entry.arguments!!.getString("user")!!, "UTF-8"
+                )
+                val prefsJson = java.net.URLDecoder.decode(
+                    entry.arguments!!.getString("prefs")!!, "UTF-8"
+                )
+                val context = LocalContext.current
+
+                val matchedUser = Gson().fromJson(userJson, User::class.java)
+                val matchedPrefs = Gson().fromJson(prefsJson, Preferences::class.java)
+                val user = getCurrentUser(context)
+
+                DirectChatScreen(
+                    currentUser = user,
+                    matchedUser = matchedUser,
+                    matchedUserPrefs = matchedPrefs,
+                    onBack = { navController.popBackStack() }
                 )
             }
+
 
             composable(
                 Screen.Profile.route,
