@@ -27,9 +27,19 @@ import com.example.anonychat.ui.LoginScreen
 import com.example.anonychat.ui.ProfileScreen
 import com.example.anonychat.ui.DirectChatScreen
 import com.example.anonychat.ui.RatingsScreen
+import com.example.anonychat.ui.ChatMessage
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.gson.Gson
 import android.content.Context   // ✅ THIS IMPORT FIXES IT
+import java.util.UUID
+
+data class ChatMessage(
+    val id: String = UUID.randomUUID().toString(),
+    val from: String,
+    val to: String,
+    val text: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
 
 sealed class Screen(val route: String) {
     object Login : Screen("login")
@@ -65,7 +75,104 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalFoundationApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
+//        WindowCompat.setDecorFitsSystemWindows(window, false)
+//        setContent {
+//                val user = User("ws_user1", "ws_user1", "1")
+//    val prefs = Preferences(2f, 8f, "female")
+//
+//    val sampleMessages = listOf(
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
+//
+//
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//
+//
+//
+//
+//
+//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
+//        ChatMessage(from = "ws_user1", to = "me", text = "Just testing the new UI — looks great!")
+//    )
+//
+//            KeyboardProofScreen(
+//        currentUser = user,
+//        matchedUser = user,
+//        matchedUserPrefs = prefs,
+//        onBack = {},
+//        initialMessages = sampleMessages,
+//        forceDarkTheme = true
+//    )
+//        }
         // Prevent screenshots
 //        window.setFlags(
 //            WindowManager.LayoutParams.FLAG_SECURE,
@@ -258,7 +365,7 @@ class MainActivity : ComponentActivity() {
                 val matchedPrefs = Gson().fromJson(prefsJson, Preferences::class.java)
                 val user = getCurrentUser(context)
 
-                DirectChatScreen(
+                KeyboardProofScreen(
                     currentUser = user,
                     matchedUser = matchedUser,
                     matchedUserPrefs = matchedPrefs,
