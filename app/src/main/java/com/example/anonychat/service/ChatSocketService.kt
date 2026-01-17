@@ -19,7 +19,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import android.content.pm.ServiceInfo
+import android.util.Log
 import androidx.core.app.ServiceCompat
+import com.example.anonychat.network.WebSocketManager.reconnectIfNeeded
+
 class ChatSocketService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -29,11 +32,14 @@ class ChatSocketService : Service() {
             Lifecycle.Event.ON_START -> {
                 // App moved to foreground
 
+                Log.e("APP TO FORGROUND!!!!!!!!!!!", "ONLINE")
                 WebSocketManager.reconnectIfNeeded(applicationContext)
                 WebSocketManager.sendPresence("online")
             }
 
             Lifecycle.Event.ON_STOP -> {
+                Log.e("APP TO BACKD=GROUND!!!!!!!!!!!", "OFFLINE")
+
                 // App moved to background
                 WebSocketManager.sendPresence("offline")
             }

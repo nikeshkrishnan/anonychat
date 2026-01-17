@@ -349,7 +349,7 @@ object WebSocketManager {
                 // reset liveness timestamp and start monitors
                 lastServerMessageAt = System.currentTimeMillis()
                 startReadyHandshake()
-                startLivenessMonitor()
+          //      startLivenessMonitor()
 
                 continuation?.resumeWith(Result.success(Unit))
             }
