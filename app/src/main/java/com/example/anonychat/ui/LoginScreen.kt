@@ -5,10 +5,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.anonychat.network.PreferencesRequest
 import com.example.anonychat.network.AgeRange
+import com.example.anonychat.service.ChatSocketService
 import com.example.anonychat.network.RomanceRange
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.content.Intent
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -90,6 +92,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.core.content.ContextCompat
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -385,6 +388,14 @@ fun LoginScreen(
                             Spacer(modifier = Modifier.height(12.dp))
 
                             var passwordFocused by remember { mutableStateOf(false) }
+                            var appSetId by remember { mutableStateOf("") }
+
+// Get App Set IDLaunchedEffect(Unit) {
+                            AppSet.getClient(context).appSetIdInfo
+                                .addOnSuccessListener {
+                                    appSetId = it.id
+                                }
+
 
                             OutlinedTextField(
                                 value = password,
@@ -437,7 +448,7 @@ fun LoginScreen(
                                         try {
                                             // 1) LOGIN network call on IO
                                             val response = withContext(Dispatchers.IO) {
-                                                NetworkClient.api.loginUser(UserLoginRequest(username, password))
+                                                NetworkClient.api.loginUser(UserLoginRequest(username, password,"$androidId:$appSetId"))
                                             }
 
                                             if (response.isSuccessful && response.body() != null) {
@@ -459,9 +470,9 @@ fun LoginScreen(
                                                         }
 
                                                         android.util.Log.e("LoginPrefs!!!!!!!!!!", "p $prefs")
+                                                        val intent = Intent(context, ChatSocketService::class.java)
+                                                        ContextCompat.startForegroundService(context, intent)
 
-                                                        // Ensure WebSocket connect runs on Main (many implementations require this)
-                                                        com.example.anonychat.network.WebSocketManager.connect(context)
                                                     } catch (e: Exception) {
                                                         android.util.Log.e("LoginPrefs", "Error during main-thread prefs/ws actions", e)
                                                         // Continue — we'll surface to user below

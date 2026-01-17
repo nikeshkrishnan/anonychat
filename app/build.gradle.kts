@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id ("kotlin-kapt" )  // 👈 ADD THIS
     id("kotlin-parcelize")
 }
 
@@ -54,11 +55,9 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
-    implementation(platform("androidx.compose:compose-bom:2024.02.01"))
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-text")
-
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.navigation:navigation-compose:2.7.7")
     // Retrofit for Networking
@@ -79,6 +78,12 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.0") {
         exclude(group = "androidx.media3", module = "media3-ui")
     }
+    implementation ("androidx.compose.material:material-icons-extended")
+
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+    implementation ("androidx.room:room-runtime:2.6.1")
+    implementation ("androidx.room:room-ktx:2.6.1")
+    kapt ("androidx.room:room-compiler:2.6.1")
     implementation("androidx.media3:media3-ui:1.2.0")
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
     implementation("io.coil-kt:coil-gif:2.7.0")

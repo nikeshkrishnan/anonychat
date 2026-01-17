@@ -21,9 +21,13 @@ import android.view.*
 import android.view.animation.DecelerateInterpolator
 import android.widget.ImageView
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
+import com.example.anonychat.model.Preferences
+import com.example.anonychat.model.User
+
 
 private const val TAG = "BirdBubbleService"
 private const val NOTIF_CHANNEL_ID = "bird_bubble_channel"
@@ -32,6 +36,9 @@ private const val NOTIF_ID = 4231
 class BirdBubbleService : Service() {
 
     private lateinit var windowManager: WindowManager
+    companion object {
+        var onNavigateToDirectChat: ((User, Preferences) -> Unit)? = null
+    }
 
     private var bubbleView: ImageView? = null
     private var closeOverlay: ImageView? = null
@@ -194,6 +201,7 @@ class BirdBubbleService : Service() {
     }
 
     // Heart animation + vibration
+    @RequiresApi(Build.VERSION_CODES.P)
     private fun showHeartTemporary() {
         if (showingHeart) return // Prevent re-triggering
 
@@ -242,7 +250,6 @@ class BirdBubbleService : Service() {
                 }
             }
 
-            stopVibration()
 
             // --- Robust null check: API returns JSON like {"match":"..."} or {"match":null}
             val matchedEmail = matchResponse
@@ -250,26 +257,53 @@ class BirdBubbleService : Service() {
                 ?.body()
                 ?.match
 
-            if (matchedEmail != null) {
-                // We got a match — switch to heart-cupid and make it permanent
-                bubbleView?.let { iv ->
-                    (iv.drawable as? AnimatedImageDrawable)?.stop()
-                    setImageSafely(iv, R.drawable.heartcupid)
-                    Log.d(TAG, "Image set to: heart-cupid.gif. This is now the permanent state. Matched: $matchedEmail")
+            if (matchedEmail.isNullOrBlank()) {
+                Log.w(TAG, "No match found in API response. Reverting to bird.")
+                stopVibration() // Stop vibration since the search is over
+                revertToBird()
+                return@launch
+            }
+
+            Log.d(TAG, "Match found: $matchedEmail. Fetching preferences...")
+            try {
+                val myPrefsDeferred = async(Dispatchers.IO) { NetworkClient.api.getPreferences(email) }
+                val matchedPrefsDeferred = async(Dispatchers.IO) { NetworkClient.api.getPreferences(matchedEmail) }
+
+                val myPrefsResponse = myPrefsDeferred.await()
+                val matchedPrefsResponse = matchedPrefsDeferred.await()
+
+                // Stop vibration only after all network calls are complete
+                stopVibration()
+
+                if (!myPrefsResponse.isSuccessful || !matchedPrefsResponse.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch preferences for one or both users.")
+                    revertToBird()
+                    return@launch
                 }
 
-                cupidIsActive = true
-                showingHeart = false // we are no longer "waiting"
+                // 4️⃣ Store all necessary data in SharedPreferences for the tap handler
+                val gson = com.google.gson.Gson()
+                with(userPrefs.edit()) {
+                    putString("current_user_prefs_json", gson.toJson(myPrefsResponse.body()))
+                    putString("matched_user_prefs_json", gson.toJson(matchedPrefsResponse.body()))
+                    apply()
+                }
 
-            } else {
-                // No match / error / timeout — revert to bird after a short delay
-                Log.w(TAG, "No match value found. Reverting to bird.")
-                delay(800)
+                // 5️⃣ Switch to the cupid state to indicate a match is ready to be opened
+                cupidIsActive = true
+                showingHeart = false
+                setImageSafely(bubbleView!!, R.drawable.heartcupid)
+                Log.d(TAG, "Switched to heart-cupid state. Ready for tap.")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception while fetching preferences after match.", e)
+                stopVibration()
                 revertToBird()
             }
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.P)
     private fun revertToBird() {
         try {
             val prefs = getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE)
@@ -363,17 +397,46 @@ class BirdBubbleService : Service() {
 
         val gestureDetector = GestureDetector(this,
             object : GestureDetector.SimpleOnGestureListener() {
+                @RequiresApi(Build.VERSION_CODES.P)
                 override fun onSingleTapUp(e: MotionEvent): Boolean {
                     bubbleView?.let { bounce(it) }
 
                     if (cupidIsActive) {
-                        Log.d(TAG, "Heart-cupid clicked. Opening app to ChatScreen.")
-                        val intent = Intent(this@BirdBubbleService, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                            putExtra("NAVIGATE_TO", "CHAT")
+                        Log.d(TAG, "Heart-cupid clicked. Preparing to navigate to Direct Chat.")
+                        serviceScope.launch {
+                            try {
+                                val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                val myPrefsJson = prefs.getString("current_user_prefs_json", null)
+                                val matchedPrefsJson = prefs.getString("matched_user_prefs_json", null)
+
+                                if (myPrefsJson == null || matchedPrefsJson == null) {
+                                    Log.e(TAG, "Cannot navigate, user preference data is missing.")
+                                    revertToBird()
+                                    return@launch
+                                }
+
+                                // --- NEW: Create a broadcast intent ---
+                                val intent = Intent().apply {
+                                    // Use a custom action to identify this broadcast
+                                    action = "com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"
+                                    // Put the necessary data into the intent extras
+                                    putExtra("my_prefs_json", myPrefsJson)
+                                    putExtra("matched_prefs_json", matchedPrefsJson)
+                                    // Add this flag to make sure the activity is brought to the foreground
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                // Send the broadcast
+                                sendBroadcast(intent)
+
+                                // Close the bubble after sending the broadcast
+                                animatePoofAndRemove(bubbleView!!)
+
+                            } catch (ex: Exception) {
+                                Log.e(TAG, "Failed to prepare and start direct chat activity", ex)
+                            }
                         }
-                        startActivity(intent)
-                    } else if (!showingHeart) {
+
+                    }  else if (!showingHeart) {
                         Log.d(TAG, "Bird clicked. Starting heart sequence.")
                         showHeartTemporary()
                     }
@@ -576,6 +639,7 @@ class BirdBubbleService : Service() {
         vibrationJob?.cancel()
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun vibrateShort() {
         if (!vibrator.hasVibrator()) return
         try {

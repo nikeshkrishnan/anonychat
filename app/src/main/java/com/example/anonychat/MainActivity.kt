@@ -1,45 +1,49 @@
 package com.example.anonychat
-import androidx.compose.ui.platform.LocalContext
+
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import com.example.anonychat.model.Preferences
-import android.view.WindowManager
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
-import com.example.anonychat.ui.ChatScreen
 import com.example.anonychat.ui.BirdBubbleService
+import com.example.anonychat.ui.ChatScreen
 import com.example.anonychat.ui.LoginScreen
 import com.example.anonychat.ui.ProfileScreen
-import com.example.anonychat.ui.DirectChatScreen
 import com.example.anonychat.ui.RatingsScreen
-import com.example.anonychat.ui.ChatMessage
+import com.example.anonychat.ui.KeyboardProofScreen
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.gson.Gson
-import android.content.Context   // ✅ THIS IMPORT FIXES IT
+import java.net.URLEncoder
 import java.util.UUID
 
-data class ChatMessage(
-    val id: String = UUID.randomUUID().toString(),
-    val from: String,
-    val to: String,
-    val text: String,
-    val timestamp: Long = System.currentTimeMillis()
-)
+// Define your data models if they aren't in a separate file
+// data class User(...) - Assuming this is in model/User.kt
+// data class Preferences(...) - Assuming this is in model/Preferences.kt
 
 sealed class Screen(val route: String) {
     object Login : Screen("login")
@@ -47,197 +51,140 @@ sealed class Screen(val route: String) {
         fun createRoute(user: User): String {
             val gson = Gson()
             val json = gson.toJson(user)
-            val encodedJson = java.net.URLEncoder.encode(json, "UTF-8")
+            val encodedJson = URLEncoder.encode(json, "UTF-8")
             return "chat/$encodedJson"
         }
     }
-    object DirectChat : Screen("direct_chat/{user}/{prefs}") {
-        fun createRoute(userJson: String, prefsJson: String): String {
-            val u = java.net.URLEncoder.encode(userJson, "UTF-8")
-            val p = java.net.URLEncoder.encode(prefsJson, "UTF-8")
-            return "direct_chat/$u/$p"
-        }
-    }
-
     object Profile : Screen("profile/{username}") {
         fun createRoute(username: String): String {
             return "profile/$username"
         }
     }
     object Ratings : Screen("ratings")
+
+    object DirectChat : Screen("directChat/{currentUser}/{myPrefs}/{matchedUser}/{matchedPrefs}") {
+        fun createRoute(
+            currentUser: User,
+            myPrefs: Preferences,
+            matchedUser: User,
+            matchedPrefs: Preferences
+        ): String {
+            val gson = Gson()
+            val u1 = URLEncoder.encode(gson.toJson(currentUser), "UTF-8")
+            val p1 = URLEncoder.encode(gson.toJson(myPrefs), "UTF-8")
+            val u2 = URLEncoder.encode(gson.toJson(matchedUser), "UTF-8")
+            val p2 = URLEncoder.encode(gson.toJson(matchedPrefs), "UTF-8")
+            return "directChat/$u1/$p1/$u2/$p2"
+        }
+    }
 }
 
 @ExperimentalLayoutApi
 class MainActivity : ComponentActivity() {
 
     private var isChatScreenActive = false
+    private var navControllerHolder: androidx.navigation.NavController? = null
 
+    // --- BROADCAST RECEIVER TO HANDLE NAVIGATION FROM SERVICE ---
+    private val navigationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT") {
+                Log.d("MainActivity", "Received navigation broadcast from service.")
+                val myPrefsJson = intent.getStringExtra("my_prefs_json")
+                val matchedPrefsJson = intent.getStringExtra("matched_prefs_json")
+                val myEmail = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                    .getString("user_email", null)
+
+                if (myPrefsJson != null && matchedPrefsJson != null && myEmail != null) {
+                    val gson = Gson()
+                    try {
+                        val myPrefsBody = gson.fromJson(myPrefsJson, com.example.anonychat.network.GetPreferencesResponse::class.java)
+                        val matchedPrefsBody = gson.fromJson(matchedPrefsJson, com.example.anonychat.network.GetPreferencesResponse::class.java)
+
+                        val currentUser = User(id = myEmail, username = myPrefsBody.username ?: myEmail.substringBefore('@'), profilePictureUrl = null)
+                        val matchedUser = User(id = matchedPrefsBody.gmail!!, username = matchedPrefsBody.username ?: matchedPrefsBody.gmail.substringBefore('@'), profilePictureUrl = null)
+
+                        val myPrefs = Preferences(romanceMin = myPrefsBody.romanceRange?.min?.toFloat() ?: 1f, romanceMax = myPrefsBody.romanceRange?.max?.toFloat() ?: 5f, gender = myPrefsBody.gender ?: "male")
+                        val matchedPrefs = Preferences(romanceMin = matchedPrefsBody.romanceRange?.min?.toFloat() ?: 1f, romanceMax = matchedPrefsBody.romanceRange?.max?.toFloat() ?: 5f, gender = matchedPrefsBody.gender ?: "male")
+
+                        val route = Screen.DirectChat.createRoute(currentUser, myPrefs, matchedUser, matchedPrefs)
+
+                        // Relaunch the activity to bring it to the foreground
+                        val launchIntent = Intent(context, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                            action = "NAVIGATE_TO_ROUTE"
+                            data = Uri.parse("anonychat://$route")
+                        }
+                        startActivity(launchIntent)
+
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "Error processing navigation broadcast", e)
+                    }
+                }
+            }
+        }
+    }
+
+
+    @RequiresApi(Build.VERSION_CODES.O)
     @OptIn(ExperimentalFoundationApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-//        WindowCompat.setDecorFitsSystemWindows(window, false)
-//        setContent {
-//                val user = User("ws_user1", "ws_user1", "1")
-//    val prefs = Preferences(2f, 8f, "female")
-//
-//    val sampleMessages = listOf(
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Hey, how are you?"),
-//
-//
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//
-//
-//
-//
-//
-//        ChatMessage(from = "me", to = "ws_user1", text = "Hi! Doing good — you?"),
-//        ChatMessage(from = "ws_user1", to = "me", text = "Just testing the new UI — looks great!")
-//    )
-//
-//            KeyboardProofScreen(
-//        currentUser = user,
-//        matchedUser = user,
-//        matchedUserPrefs = prefs,
-//        onBack = {},
-//        initialMessages = sampleMessages,
-//        forceDarkTheme = true
-//    )
-//        }
-        // Prevent screenshots
-//        window.setFlags(
-//            WindowManager.LayoutParams.FLAG_SECURE,
-//            WindowManager.LayoutParams.FLAG_SECURE
-//        )
-
         WindowCompat.setDecorFitsSystemWindows(window, false)
         enableEdgeToEdge()
-
-        // Ask overlay permission only once
         checkOverlayPermission()
+
+        // Register the broadcast receiver
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(navigationReceiver, IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"), RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(
+                navigationReceiver,
+                IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"),
+                RECEIVER_NOT_EXPORTED // <-- ADD THIS FLAG
+            )        }
+
 
         setContent {
             AnonychatTheme {
                 NavGraph(
+                    intent = intent,
                     onChatActive = { isChatScreenActive = true },
-                    onChatInactive = { isChatScreenActive = false }
+                    onChatInactive = { isChatScreenActive = false },
+                    onNavControllerReady = { navControllerHolder = it }
                 )
             }
         }
-
-
-
     }
 
-    // -------------------------------------------------------
-    // APP ENTERING BACKGROUND → START BIRD OVERLAY
-    // -------------------------------------------------------
-//    override fun onPause() {
-//        super.onPause()
-//
-//        // Avoid starting bubble when rotating screen or navigating inside app
-//        if (isChangingConfigurations) return
-//
-//        // Start bubble ONLY when leaving app & chat screen is active
-//        if (isChatScreenActive && !isAppInForeground()) {
-//            startFloatingBubble()
-//        }
-//    }
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        // Handle intents received while the activity is alive
+        navControllerHolder?.let { handleIntentNavigation(it, intent) }
+    }
 
-    // -------------------------------------------------------
-    // APP RESUMED → STOP BIRD OVERLAY
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Unregister to prevent memory leaks
+        unregisterReceiver(navigationReceiver)
+    }
+
     override fun onResume() {
         super.onResume()
         stopService(Intent(this, BirdBubbleService::class.java))
     }
 
-    fun getCurrentUser(context: Context): User {
-        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-
-        val username = prefs.getString("username", null)
-            ?: error("Username missing in SharedPreferences")
-        val email = prefs.getString("user_email", null)
-            ?: error("Useremail missing in SharedPreferences")
-        return User(
-            username = username,
-            profilePictureUrl = null,
-            id = email
-        )
+    override fun onStop() {
+        super.onStop()
+        if (isChatScreenActive && !isChangingConfigurations) {
+            // Check for permission before starting service
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)) {
+                startService(Intent(this, BirdBubbleService::class.java))
+            }
+        }
     }
 
-
-    // -------------------------------------------------------
-    // Check permission to draw overlays
-    // -------------------------------------------------------
     private fun checkOverlayPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (!Settings.canDrawOverlays(this)) {
@@ -250,62 +197,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // -------------------------------------------------------
-    // Start/Stop Overlay Service
-    // -------------------------------------------------------
-
-
-    // -------------------------------------------------------
-    // Helper: Detect if app is in foreground
-    // -------------------------------------------------------
-    private fun isAppInForeground(): Boolean {
-        return lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
-    }
-    override fun onStop() {
-        super.onStop()
-        if (isChatScreenActive && !isChangingConfigurations) {
-            startService(Intent(this, BirdBubbleService::class.java))
+    // New helper to centralize intent handling
+    private fun handleIntentNavigation(navController: androidx.navigation.NavController, intent: Intent?) {
+        if (intent?.action == "NAVIGATE_TO_ROUTE" && intent.data != null) {
+            val route = intent.data.toString().substringAfter("anonychat://")
+            if (route.isNotBlank()) {
+                navController.navigate(route)
+            }
+            intent.action = null // Clear action to prevent re-triggering
+        } else if (intent?.getStringExtra("NAVIGATE_TO") == "CHAT") {
+            val lastUser = User("unknown", "Guest", "")
+            navController.navigate(Screen.Chat.createRoute(lastUser)) {
+                popUpTo(navController.graph.startDestinationId) { inclusive = true }
+                launchSingleTop = true
+            }
+            intent.removeExtra("NAVIGATE_TO")
         }
     }
-
-
-    // -------------------------------------------------------
-    // NAVIGATION
-    // -------------------------------------------------------
-
 
     @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
     @Composable
     fun NavGraph(
+        intent: Intent?,
         onChatActive: () -> Unit,
-        onChatInactive: () -> Unit
+        onChatInactive: () -> Unit,
+        onNavControllerReady: (androidx.navigation.NavController) -> Unit
     ) {
         val navController = rememberNavController()
 
+        // Give the activity a reference to the NavController
+        LaunchedEffect(navController) {
+            onNavControllerReady(navController)
+        }
+
         // --- Handle intent from the service to navigate to ChatScreen ---
         LaunchedEffect(intent) {
-            if (intent?.getStringExtra("NAVIGATE_TO") == "CHAT") {
-                // In a real app, you would retrieve the last logged-in user
-                // from SharedPreferences or a database. For now, we'll create a default one.
-                val lastUser = User("unknown", "Guest", "")
-
-                navController.navigate(Screen.Chat.createRoute(lastUser)) {
-                    // This clears the navigation stack up to the start destination (Login),
-                    // making ChatScreen the new "home" screen for this session.
-                    popUpTo(navController.graph.startDestinationId) {
-                        inclusive = true
-                    }
-                    // This ensures we don't launch multiple copies of the chat screen
-                    launchSingleTop = true
-                }
-                // Clear the extra so it doesn't trigger again on screen rotation
-                intent.removeExtra("NAVIGATE_TO")
-            }
+            handleIntentNavigation(navController, intent)
         }
-        // --- END ---
 
         NavHost(navController = navController, startDestination = Screen.Login.route) {
-
             composable(Screen.Login.route) {
                 LoginScreen(onLoginClick = { user ->
                     navController.navigate(Screen.Chat.createRoute(user))
@@ -323,7 +253,6 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     User("unknown", "Guest", "")
                 }
-
                 ChatScreen(
                     user = user,
                     onChatActive = onChatActive,
@@ -331,48 +260,41 @@ class MainActivity : ComponentActivity() {
                     onNavigateToProfile = { username ->
                         navController.navigate(Screen.Profile.createRoute(username))
                     },
-                    onNavigateToDirectChat = { matchedUser, matchedPrefs ->
-                        val gson = Gson()
-                        navController.navigate(
-                            Screen.DirectChat.createRoute(
-                                gson.toJson(matchedUser),
-                                gson.toJson(matchedPrefs)
-                            )
-                        )
+                    onNavigateToDirectChat = { currentUser, myPrefs, matchedUser, matchedPrefs ->
+                        val route = Screen.DirectChat.createRoute(currentUser, myPrefs, matchedUser, matchedPrefs)
+                        navController.navigate(route)
                     }
                 )
-
-
             }
-
 
             composable(
                 Screen.DirectChat.route,
                 arguments = listOf(
-                    navArgument("user") { type = NavType.StringType },
-                    navArgument("prefs") { type = NavType.StringType }
+                    navArgument("currentUser") { type = NavType.StringType },
+                    navArgument("myPrefs") { type = NavType.StringType },
+                    navArgument("matchedUser") { type = NavType.StringType },
+                    navArgument("matchedPrefs") { type = NavType.StringType }
                 )
             ) { entry ->
-                val userJson = java.net.URLDecoder.decode(
-                    entry.arguments!!.getString("user")!!, "UTF-8"
-                )
-                val prefsJson = java.net.URLDecoder.decode(
-                    entry.arguments!!.getString("prefs")!!, "UTF-8"
-                )
-                val context = LocalContext.current
+                val currentUserJson = java.net.URLDecoder.decode(entry.arguments!!.getString("currentUser")!!, "UTF-8")
+                val myPrefsJson = java.net.URLDecoder.decode(entry.arguments!!.getString("myPrefs")!!, "UTF-8")
+                val matchedUserJson = java.net.URLDecoder.decode(entry.arguments!!.getString("matchedUser")!!, "UTF-8")
+                val matchedPrefsJson = java.net.URLDecoder.decode(entry.arguments!!.getString("matchedPrefs")!!, "UTF-8")
 
-                val matchedUser = Gson().fromJson(userJson, User::class.java)
-                val matchedPrefs = Gson().fromJson(prefsJson, Preferences::class.java)
-                val user = getCurrentUser(context)
+                val gson = Gson()
+                val currentUser = gson.fromJson(currentUserJson, User::class.java)
+                val myPrefs = gson.fromJson(myPrefsJson, Preferences::class.java)
+                val matchedUser = gson.fromJson(matchedUserJson, User::class.java)
+                val matchedPrefs = gson.fromJson(matchedPrefsJson, Preferences::class.java)
 
                 KeyboardProofScreen(
-                    currentUser = user,
+                    currentUser = currentUser,
                     matchedUser = matchedUser,
                     matchedUserPrefs = matchedPrefs,
+                    matchedUserGmail = matchedUser.id,
                     onBack = { navController.popBackStack() }
                 )
             }
-
 
             composable(
                 Screen.Profile.route,
@@ -387,5 +309,4 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
 }

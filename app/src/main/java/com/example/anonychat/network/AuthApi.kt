@@ -75,7 +75,8 @@ data class UserDto(
 
 data class UserLoginRequest(
     val username: String,
-    val password: String
+    val password: String,
+    val userId: String
 )
 
 data class PreferencesRequest(

@@ -145,7 +145,8 @@ fun ChatScreen(
     onChatActive: () -> Unit,
     onChatInactive: () -> Unit,
     onNavigateToProfile: (String) -> Unit,
-    onNavigateToDirectChat: (User, Preferences) -> Unit   // new
+    onNavigateToDirectChat: (currentUser: User, myPrefs: Preferences, matchedUser: User, matchedPrefs: Preferences) -> Unit // <--- CORRECTED
+
 ) {
     // notify MainActivity that chat is now active
     LaunchedEffect(Unit) { onChatActive() }
@@ -573,8 +574,15 @@ val matchedUsername=prefsBody.username?:""
                         )
 
                         // 4️⃣ NAVIGATE TO DIRECT CHAT
-                        onNavigateToDirectChat(matchedUser, matchedPrefs)
+                        val currentUserForNav = User(id = myEmail, username = prefsBody.username ?: myEmail.substringBefore('@'), profilePictureUrl = null)
+                        val myPrefsForNav = Preferences(
+                            romanceMin = prefsBody.romanceRange?.min?.toFloat() ?: 1f,
+                            romanceMax = prefsBody.romanceRange?.max?.toFloat() ?: 5f,
+                            gender = prefsBody.gender ?: "male"
+                        )
 
+                        // Now call with all four arguments
+                        onNavigateToDirectChat(currentUserForNav, myPrefsForNav, matchedUser, matchedPrefs)
                     } catch (e: Exception) {
                         Log.e("ChatScreen", "Match flow failed", e)
                     } finally {
