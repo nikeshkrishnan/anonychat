@@ -8,6 +8,9 @@ import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.room.*
+
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.anonychat.ui.ChatMessage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
@@ -23,13 +26,15 @@ import java.util.concurrent.TimeUnit
 
 /* ---------------------------------------------------
    ROOM – ENTITY
+   (added state and lastSentAt for ack-tracking)
 --------------------------------------------------- */
 @Entity(tableName = "pending_messages")
 data class PendingMessageEntity(
     @PrimaryKey val messageId: String,
     val payload: String,
     val retries: Int,
-    val sent: Boolean,
+    val state: String,       // QUEUED | IN_FLIGHT | DELIVERED | FAILED
+    val lastSentAt: Long,    // epoch millis when sent (for IN_FLIGHT)
     val timestamp: Long
 )
 
@@ -50,15 +55,25 @@ interface PendingMessageDao {
 }
 
 /* ---------------------------------------------------
-   ROOM – DATABASE
+   ROOM – DATABASE (version bumped to 2)
+   Includes migration 1 -> 2 to add new columns
 --------------------------------------------------- */
 @Database(
     entities = [PendingMessageEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun pendingMessageDao(): PendingMessageDao
+}
+
+/* Migration from v1 -> v2: add state and lastSentAt columns with defaults */
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        // add columns with defaults to avoid losing preexisting rows
+        database.execSQL("ALTER TABLE pending_messages ADD COLUMN state TEXT NOT NULL DEFAULT 'QUEUED'")
+        database.execSQL("ALTER TABLE pending_messages ADD COLUMN lastSentAt INTEGER NOT NULL DEFAULT 0")
+    }
 }
 
 /* ---------------------------------------------------
@@ -68,17 +83,26 @@ sealed class WebSocketEvent {
     data class NewMessage(val message: ChatMessage) : WebSocketEvent()
     data class DeliveryAck(val messageId: String) : WebSocketEvent()
     data class DeliveryFailed(val messageId: String, val reason: String) : WebSocketEvent()
-    data class MessageSent(val messageId: String) : WebSocketEvent()
+    data class MessageSentAck(val messageId: String) : WebSocketEvent()
 }
 
 /* ---------------------------------------------------
    INTERNAL MODEL
 --------------------------------------------------- */
+private enum class MessageState {
+    QUEUED,
+    IN_FLIGHT,
+    DELIVERED,
+    FAILED
+}
+
 private data class PendingMessage(
     val messageId: String,
     val payload: String,
     var retries: Int,
-    var sent: Boolean
+    var state: MessageState,
+    var lastSentAt: Long,
+    val timestamp: Long
 )
 
 private enum class WsState {
@@ -127,15 +151,19 @@ object WebSocketManager {
 
     private const val MAX_RETRIES = 5
     private const val MAX_RECONNECT_DELAY_MS = 30_000L
-    private const val HEARTBEAT_INTERVAL_MS = 30_000L
+    private const val HEARTBEAT_INTERVAL_MS = 100L
     private const val READY_RETRY_INTERVAL_MS = 3_000L // increased to reduce spam
     private const val OUTGOING_SEND_DELAY_MS = 40L // throttle to avoid kernel buffer overflow
 
+    // ack timeout — how long to wait for delivery_ack before retrying
+    private const val ACK_TIMEOUT_MS = 20_000L
+
     private var heartbeatJob: Job? = null
     private var readyJob: Job? = null
+    private var ackMonitorJob: Job? = null
 
     private fun PendingMessage.toEntity() =
-        PendingMessageEntity(messageId, payload, retries, sent, System.currentTimeMillis())
+        PendingMessageEntity(messageId, payload, retries, state.name, lastSentAt, timestamp)
 
     // Backpressure-safe SharedFlow for UI-level events
     private val _events = MutableSharedFlow<WebSocketEvent>(
@@ -222,21 +250,33 @@ object WebSocketManager {
             context.applicationContext,
             AppDatabase::class.java,
             "anonychat.db"
-        ).build()
+        )
+            .fallbackToDestructiveMigration()
+            .build()
 
         dao = db.pendingMessageDao()
 
         pendingQueue.addAll(
             dao.getAll().map {
-                PendingMessage(it.messageId, it.payload, it.retries, it.sent)
+                val st = runCatching {
+                    MessageState.valueOf(it.state)
+                }.getOrElse {
+                    MessageState.QUEUED
+                }
+                PendingMessage(
+                    it.messageId,
+                    it.payload,
+                    it.retries,
+                    st,
+                    it.lastSentAt,
+                    it.timestamp
+                )
             }
         )
 
         initialized = true
         Log.i("WebSocketManager", "Initialized with pending messages=${pendingQueue.size}")
 
-        // Register network callback automatically so manager is proactive.
-        // You can still call registerNetworkCallback explicitly if you prefer.
         registerNetworkCallback(context)
     }
 
@@ -273,13 +313,17 @@ object WebSocketManager {
     --------------------------------------------------- */
     suspend fun connect(context: Context) {
         ensureInit()
-        Log.i("WebSocketManager", "Connecting...")
+        Log.e("WebSocketManager", "Connecting...")
         connectMutex.withLock {
+            Log.e("WebSocketManager", "connect$wsState.")
+
             if (wsState != WsState.DISCONNECTED) return
+            Log.e("WebSocketManager", "con!!!nect: starting coroutine to establish connection.")
+
             wsState = WsState.CONNECTING
 
             suspendCancellableCoroutine<Unit> { cont ->
-                Log.i("WebSocketManager", "connect: starting coroutine to establish connection.")
+                Log.e("WebSocketManager", "connect: starting coroutine to establish connection.")
                 val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
                 val token = prefs.getString("access_token", null)
                 val email = prefs.getString("user_email", null)
@@ -330,6 +374,59 @@ object WebSocketManager {
     }
 
     /* ---------------------------------------------------
+       ACK MONITOR (retries on ack-timeout)
+    --------------------------------------------------- */
+    private fun startAckMonitor() {
+        ackMonitorJob?.cancel()
+        ackMonitorJob = scope.launch {
+            while (isActive) {
+                try {
+                    val now = System.currentTimeMillis()
+                    for (msg in pendingQueue.toList()) {
+                        if (msg.state == MessageState.IN_FLIGHT) {
+                            if (now - msg.lastSentAt > ACK_TIMEOUT_MS) {
+                                // timed out waiting for delivery_ack
+                                Log.w("WebSocketManager", "Ack timeout for ${msg.messageId}")
+                                msg.retries++
+                                if (msg.retries > MAX_RETRIES) {
+                                    // permanently failed
+                                    msg.state = MessageState.FAILED
+                                    try {
+                                        dao.delete(msg.messageId)
+                                    } catch (e: Exception) {
+                                        Log.e("WebSocketManager", "Failed to delete failed message", e)
+                                    }
+                                    pendingQueue.removeIf { it.messageId == msg.messageId }
+                                    withContext(Dispatchers.Main.immediate) {
+                                        _events.emit(WebSocketEvent.DeliveryFailed(msg.messageId, "ack_timeout"))
+                                    }
+                                } else {
+                                    // requeue for send
+                                    msg.state = MessageState.QUEUED
+                                    msg.lastSentAt = 0
+                                    try {
+                                        dao.upsert(msg.toEntity())
+                                    } catch (e: Exception) {
+                                        Log.e("WebSocketManager", "Failed to persist retry after ack timeout", e)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("WebSocketManager", "Ack monitor error", e)
+                }
+                delay(1000)
+            }
+        }
+    }
+
+    private fun stopAckMonitor() {
+        ackMonitorJob?.cancel()
+        ackMonitorJob = null
+    }
+
+    /* ---------------------------------------------------
        LISTENER
     --------------------------------------------------- */
     private fun createListener(
@@ -349,7 +446,9 @@ object WebSocketManager {
                 // reset liveness timestamp and start monitors
                 lastServerMessageAt = System.currentTimeMillis()
                 startReadyHandshake()
-          //      startLivenessMonitor()
+            //    startLivenessMonitor()
+                startHeartbeat()
+                startAckMonitor()
 
                 continuation?.resumeWith(Result.success(Unit))
             }
@@ -382,6 +481,22 @@ object WebSocketManager {
             }
         }
     }
+    private fun sendMessageReceivedAck(messageId: String, senderGmail: String) {
+        if (readyState != ReadyState.READY) return
+
+        val payload = JSONObject()
+            .put("type", "message_received_ack")
+            .put("messageId", messageId)
+            .put("to", senderGmail)   // 👈 original sender
+            .toString()
+
+        try {
+            webSocket?.send(payload)
+            Log.i("WebSocketManager", "message_received_ack sent for $messageId to=$senderGmail")
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Failed to send message_received_ack", e)
+        }
+    }
 
     /**
      * Handle incoming message in coroutine context (IO), parse and emit to UI on Main.immediate.
@@ -397,6 +512,19 @@ object WebSocketManager {
                 "ready_ack" -> {
                     Log.i("WebSocketManager", "ready_ack received → READY")
                     readyState = ReadyState.READY
+                    // On ready, reset any IN_FLIGHT messages to QUEUED so they can be retried
+                    startHeartbeat()
+                    for (msg in pendingQueue.toList()) {
+                        if (msg.state == MessageState.IN_FLIGHT) {
+                            msg.state = MessageState.QUEUED
+                            msg.lastSentAt = 0
+                            try {
+                                dao.upsert(msg.toEntity())
+                            } catch (e: Exception) {
+                                Log.e("WebSocketManager", "Failed to persist reset of in-flight on ready", e)
+                            }
+                        }
+                    }
                     // send presence if needed
                     sendOnlinePresenceIfReady()
                     // flush pending outgoing
@@ -418,24 +546,61 @@ object WebSocketManager {
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.NewMessage(chatMessage))
                     }
+                    sendMessageReceivedAck(messageId, json.getString("from"))
                 }
+                "message_received_ack" -> {
+                    Log.e("WebSocketManager", "message_received_ack received for $messageId")
 
-                "delivery_ack" -> {
-                    removeFromQueue(messageId)
+                    // This means: peer has RECEIVED the message
+                    // UI should show delivered (double tick, etc.)
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.DeliveryAck(messageId))
                     }
                 }
 
-                "delivery_failed" -> {
+                "delivery_ack" -> {
+                    // Message successfully delivered: remove from queue & DB, emit ack event
+                    Log.i("WebSocketManager", "delivery_ack for $messageId")
                     removeFromQueue(messageId)
                     withContext(Dispatchers.Main.immediate) {
-                        _events.emit(
-                            WebSocketEvent.DeliveryFailed(
-                                messageId,
-                                json.optString("error", "unknown")
-                            )
-                        )
+                        _events.emit(WebSocketEvent.MessageSentAck(messageId))
+                    }
+                }
+                "pong" -> {
+                    Log.d("WebSocketManager", "pong received")
+                    lastServerMessageAt = System.currentTimeMillis()
+                    return
+                }
+
+                "delivery_failed" -> {
+                    Log.w("WebSocketManager", "delivery_failed for $messageId")
+                    // If server says delivery_failed, we retry (increment retries) or mark as permanently failed
+                    val reason = json.optString("error", "server_failed")
+                    val pm = pendingQueue.toList().find { it.messageId == messageId }
+                    if (pm != null) {
+                        pm.retries++
+                        if (pm.retries > MAX_RETRIES) {
+                            // give up
+                            try {
+                                dao.delete(pm.messageId)
+                            } catch (e: Exception) {
+                                Log.e("WebSocketManager", "Failed to delete failed message", e)
+                            }
+                            pendingQueue.removeIf { it.messageId == pm.messageId }
+                            withContext(Dispatchers.Main.immediate) {
+                                _events.emit(WebSocketEvent.DeliveryFailed(pm.messageId, reason))
+                            }
+                        } else {
+                            pm.state = MessageState.QUEUED
+                            pm.lastSentAt = 0
+                            try {
+                                dao.upsert(pm.toEntity())
+                            } catch (e: Exception) {
+                                Log.e("WebSocketManager", "Failed to persist retry after delivery_failed", e)
+                            }
+                        }
+                    } else {
+                        Log.w("WebSocketManager", "delivery_failed for unknown messageId: $messageId")
                     }
                 }
 
@@ -472,7 +637,7 @@ object WebSocketManager {
     }
 
     /* ---------------------------------------------------
-       SEND MESSAGE
+       SEND MESSAGE API
     --------------------------------------------------- */
     @RequiresApi(Build.VERSION_CODES.N)
     fun sendChatOpen(peerGmail: String) {
@@ -483,14 +648,24 @@ object WebSocketManager {
             .put("with", peerGmail)
             .toString()
 
-        pendingQueue.add(
-            PendingMessage(
-                "chat_open_${System.currentTimeMillis()}",
-                payload,
-                0,
-                false
-            )
+        val pm = PendingMessage(
+            "chat_open_${System.currentTimeMillis()}",
+            payload,
+            0,
+            MessageState.QUEUED,
+            0L,
+            System.currentTimeMillis()
         )
+
+        pendingQueue.add(pm)
+
+        scope.launch {
+            try {
+                dao.upsert(pm.toEntity())
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to persist chat_open pending message", e)
+            }
+        }
 
         flushPendingQueue()
     }
@@ -508,10 +683,12 @@ object WebSocketManager {
             put("messageId", localId)
         }.toString()
 
-        pendingQueue.add(PendingMessage(localId, payload, 0, false))
+        val pm = PendingMessage(localId, payload, 0, MessageState.QUEUED, 0L, System.currentTimeMillis())
+
+        pendingQueue.add(pm)
         scope.launch {
             try {
-                dao.upsert(PendingMessageEntity(localId, payload, 0, false, System.currentTimeMillis()))
+                dao.upsert(pm.toEntity())
             } catch (e: Exception) {
                 Log.e("WebSocketManager", "Failed to persist pending message", e)
             }
@@ -521,18 +698,35 @@ object WebSocketManager {
 
     /* ---------------------------------------------------
        FLUSH QUEUE
-       Throttle outgoing sends to avoid OEM/kernel buffer overflow and bursts.
+       Only send QUEUED messages. After ws.send succeeds we mark IN_FLIGHT and set lastSentAt.
     --------------------------------------------------- */
     @RequiresApi(Build.VERSION_CODES.N)
     private fun flushPendingQueue() {
         if (!initialized || readyState != ReadyState.READY) return
-        val ws = webSocket ?: return
+
+        // If there is no websocket or it isn't marked CONNECTED, try reconnecting once and abort flush.
+        if (webSocket == null || wsState != WsState.CONNECTED) {
+            Log.w("WebSocketManager", "flushPendingQueue: websocket not connected → scheduling reconnect")
+            scheduleReconnect(++reconnectAttempt)
+            return
+        }
+
+        val ws = webSocket!!
 
         scope.launch {
             for (msg in pendingQueue.toList()) {
-                if (msg.sent) continue
+                if (msg.state != MessageState.QUEUED) continue
                 if (msg.retries >= MAX_RETRIES) {
-                    removeFromQueue(msg.messageId)
+                    // drop if beyond retries (safeguard)
+                    try {
+                        dao.delete(msg.messageId)
+                    } catch (e: Exception) {
+                        Log.e("WebSocketManager", "Failed to delete expired message", e)
+                    }
+                    pendingQueue.removeIf { it.messageId == msg.messageId }
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.DeliveryFailed(msg.messageId, "max_retries_exceeded"))
+                    }
                     continue
                 }
 
@@ -544,28 +738,23 @@ object WebSocketManager {
                 }
 
                 if (!ok) {
-                    msg.retries++
-                    try {
-                        dao.upsert(msg.toEntity())
-                    } catch (e: Exception) {
-                        Log.e("WebSocketManager", "Failed to persist retry", e)
-                    }
+                    // if immediate send failed, schedule reconnect and keep msg QUEUED (do not increment retries yet)
+                    Log.w("WebSocketManager", "ws.send returned false for ${msg.messageId}, scheduling reconnect")
                     scheduleReconnect(++reconnectAttempt)
                     return@launch
                 }
 
-                // Mark sent and persist
-                msg.sent = true
+                // On successful send over wire, mark IN_FLIGHT and set lastSentAt — do NOT mark DELIVERED yet
+                msg.state = MessageState.IN_FLIGHT
+                msg.lastSentAt = System.currentTimeMillis()
                 try {
                     dao.upsert(msg.toEntity())
                 } catch (e: Exception) {
-                    Log.e("WebSocketManager", "Failed to persist sent message", e)
+                    Log.e("WebSocketManager", "Failed to persist in-flight message", e)
                 }
 
-                // Notify UI on Main immediately
-                withContext(Dispatchers.Main.immediate) {
-                    _events.emit(WebSocketEvent.MessageSent(msg.messageId))
-                }
+                // Notify UI that send was attempted (in-flight)
+                // withContext(Dispatchers.Main.immediate) { _events.emit(WebSocketEvent.MessageSentAttempted(msg.messageId)) }
 
                 // Throttle next send slightly to avoid filling kernel buffers
                 delay(OUTGOING_SEND_DELAY_MS)
@@ -575,6 +764,7 @@ object WebSocketManager {
 
     /* ---------------------------------------------------
        REMOVE MESSAGE
+       Only remove on delivery_ack or when permanently failed
     --------------------------------------------------- */
     @RequiresApi(Build.VERSION_CODES.N)
     private fun removeFromQueue(messageId: String) {
@@ -655,6 +845,7 @@ object WebSocketManager {
         stopHeartbeat()
         stopReadyHandshake()
         stopLivenessMonitor()
+        stopAckMonitor()
     }
 
     /* ---------------------------------------------------

@@ -263,36 +263,52 @@ fun KeyboardProofScreen(
     LaunchedEffect(Unit) {
         WebSocketManager.events.collect { event ->
             when (event) {
-                is WebSocketEvent.NewMessage -> {
-                    // Filter for this exact conversation
-                    if (event.message.from == matchedUserGmail && event.message.to == localGmail) {
-                        messages.add(event.message.copy(status = MessageStatus.Delivered))
-                    }
-                }
-                is WebSocketEvent.MessageSent -> {
-                    android.util.Log.e("ChatWebSocket!!!!!!!!!!!!!!!!!!!!!", "-> Updated message status to sent.")
 
-                    val index = messages.indexOfFirst { it.id == event.messageId }
-                    if (index != -1) {
-                        messages[index] = messages[index].copy(status = MessageStatus.Sending)
+                is WebSocketEvent.NewMessage -> {
+                    if (event.message.from == matchedUserGmail &&
+                        event.message.to == localGmail
+                    ) {
+                        messages.add(
+                            event.message.copy(status = MessageStatus.Delivered)
+                        )
                     }
                 }
+                is WebSocketEvent.MessageSentAck -> {
+                    val index = messages.indexOfFirst { it.id == event.messageId }
+                    if (index != -1) {
+                        val current = messages[index].status
+                        // DO NOT downgrade Delivered → Sending
+                        if (current == MessageStatus.Pending) {
+                            messages[index] =
+                                messages[index].copy(status = MessageStatus.Sending)
+                        }
+                    }
+                }
+
+
                 is WebSocketEvent.DeliveryAck -> {
-                    android.util.Log.e("ChatWebSocket!!!!!!!!!!!", "-> Updated message status to Delivered.")
+                    Log.e("ChatWebSocket", "-> Message delivered")
                     val index = messages.indexOfFirst { it.id == event.messageId }
+                    Log.e("ChatWebSocket", "-> Message delivered $index")
+
                     if (index != -1) {
-                        messages[index] = messages[index].copy(status = MessageStatus.Delivered)
+                        messages[index] =
+                            messages[index].copy(status = MessageStatus.Delivered)
                     }
                 }
+
                 is WebSocketEvent.DeliveryFailed -> {
+                    Log.e("ChatWebSocket", "-> Message failed")
                     val index = messages.indexOfFirst { it.id == event.messageId }
                     if (index != -1) {
-                        messages[index] = messages[index].copy(status = MessageStatus.Failed)
+                        messages[index] =
+                            messages[index].copy(status = MessageStatus.Failed)
                     }
                 }
             }
         }
     }
+
 
     /* ---------------- UI ---------------- */
     Box(Modifier.fillMaxSize()) {
