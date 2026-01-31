@@ -22,6 +22,7 @@ import android.content.pm.ServiceInfo
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import com.example.anonychat.network.WebSocketManager.reconnectIfNeeded
+import com.example.anonychat.AppVisibility
 
 class ChatSocketService : Service() {
 
@@ -33,13 +34,14 @@ class ChatSocketService : Service() {
                 // App moved to foreground
 
                 Log.e("APP TO FORGROUND!!!!!!!!!!!", "ONLINE")
+                AppVisibility.onAppStarted()
                 WebSocketManager.reconnectIfNeeded(applicationContext)
                 WebSocketManager.sendPresence("online")
             }
 
             Lifecycle.Event.ON_STOP -> {
                 Log.e("APP TO BACKD=GROUND!!!!!!!!!!!", "OFFLINE")
-
+                AppVisibility.onAppStopped()
                 // App moved to background
                 WebSocketManager.sendPresence("offline")
             }

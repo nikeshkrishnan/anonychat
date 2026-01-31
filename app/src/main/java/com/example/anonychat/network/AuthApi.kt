@@ -129,7 +129,7 @@ interface AuthApiService {
 
 // --- NETWORK CLIENT (SINGLETON) ---
 object NetworkClient {
-    private const val BASE_URL = "http://192.168.1.66:8080/"
+    private const val BASE_URL = "http://192.168.1.90:8080/"
     private lateinit var retrofit: Retrofit
 
     // Lazily initialize the api service after `initialize` has been called

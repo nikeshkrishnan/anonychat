@@ -8,21 +8,30 @@ import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.room.*
-
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.anonychat.AppVisibility
 import com.example.anonychat.ui.ChatMessage
+import java.io.File
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.pow
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import okhttp3.*
-import org.json.JSONObject
-import java.util.concurrent.ConcurrentLinkedQueue
-import kotlin.math.pow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.withTimeout
+import okhttp3.*
+import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
+import okio.BufferedSink
+import okio.sink
+import okio.source
+import org.json.JSONObject
 
 /* ---------------------------------------------------
    ROOM – ENTITY
@@ -30,12 +39,12 @@ import java.util.concurrent.TimeUnit
 --------------------------------------------------- */
 @Entity(tableName = "pending_messages")
 data class PendingMessageEntity(
-    @PrimaryKey val messageId: String,
-    val payload: String,
-    val retries: Int,
-    val state: String,       // QUEUED | IN_FLIGHT | DELIVERED | FAILED
-    val lastSentAt: Long,    // epoch millis when sent (for IN_FLIGHT)
-    val timestamp: Long
+        @PrimaryKey val messageId: String,
+        val payload: String,
+        val retries: Int,
+        val state: String, // QUEUED | IN_FLIGHT | DELIVERED | FAILED
+        val lastSentAt: Long, // epoch millis when sent (for IN_FLIGHT)
+        val timestamp: Long
 )
 
 /* ---------------------------------------------------
@@ -47,34 +56,33 @@ interface PendingMessageDao {
     @Query("SELECT * FROM pending_messages ORDER BY timestamp ASC")
     suspend fun getAll(): List<PendingMessageEntity>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(msg: PendingMessageEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(msg: PendingMessageEntity)
 
-    @Query("DELETE FROM pending_messages WHERE messageId = :id")
-    suspend fun delete(id: String)
+    @Query("DELETE FROM pending_messages WHERE messageId = :id") suspend fun delete(id: String)
 }
 
 /* ---------------------------------------------------
    ROOM – DATABASE (version bumped to 2)
    Includes migration 1 -> 2 to add new columns
 --------------------------------------------------- */
-@Database(
-    entities = [PendingMessageEntity::class],
-    version = 2,
-    exportSchema = false
-)
+@Database(entities = [PendingMessageEntity::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun pendingMessageDao(): PendingMessageDao
 }
 
 /* Migration from v1 -> v2: add state and lastSentAt columns with defaults */
-val MIGRATION_1_2 = object : Migration(1, 2) {
-    override fun migrate(database: SupportSQLiteDatabase) {
-        // add columns with defaults to avoid losing preexisting rows
-        database.execSQL("ALTER TABLE pending_messages ADD COLUMN state TEXT NOT NULL DEFAULT 'QUEUED'")
-        database.execSQL("ALTER TABLE pending_messages ADD COLUMN lastSentAt INTEGER NOT NULL DEFAULT 0")
-    }
-}
+val MIGRATION_1_2 =
+        object : Migration(1, 2) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // add columns with defaults to avoid losing preexisting rows
+                database.execSQL(
+                        "ALTER TABLE pending_messages ADD COLUMN state TEXT NOT NULL DEFAULT 'QUEUED'"
+                )
+                database.execSQL(
+                        "ALTER TABLE pending_messages ADD COLUMN lastSentAt INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
 
 /* ---------------------------------------------------
    EVENTS
@@ -97,12 +105,12 @@ private enum class MessageState {
 }
 
 private data class PendingMessage(
-    val messageId: String,
-    val payload: String,
-    var retries: Int,
-    var state: MessageState,
-    var lastSentAt: Long,
-    val timestamp: Long
+        val messageId: String,
+        val payload: String,
+        var retries: Int,
+        var state: MessageState,
+        var lastSentAt: Long,
+        val timestamp: Long
 )
 
 private enum class WsState {
@@ -119,23 +127,136 @@ private enum class ReadyState {
 
 private val connectMutex = Mutex()
 
-@Volatile
-private var wsState: WsState = WsState.DISCONNECTED
+@Volatile private var wsState: WsState = WsState.DISCONNECTED
 
-@Volatile
-private var readyState: ReadyState = ReadyState.NOT_READY
+@Volatile private var readyState: ReadyState = ReadyState.NOT_READY
+
+// Media endpoints
+private const val MEDIA_UPLOAD = "http://192.168.1.90:8080/media/upload"
+private const val MEDIA_DOWNLOAD_ACK = "http://192.168.1.90:8080/media/download/ack"
+
+private lateinit var appContext: Context
 
 /* ---------------------------------------------------
    WEBSOCKET MANAGER
 --------------------------------------------------- */
 object WebSocketManager {
 
+    private fun getEventListener(requestId: String): EventListener {
+        return object : EventListener() {
+            var start = 0L
+
+            override fun callStart(call: Call) {
+                start = System.currentTimeMillis()
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) Call started at $start")
+            }
+
+            override fun dnsStart(call: Call, domainName: String) {
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) DNS start: $domainName")
+            }
+
+            override fun dnsEnd(
+                    call: Call,
+                    domainName: String,
+                    inetAddressList: List<java.net.InetAddress>
+            ) {
+                val duration = System.currentTimeMillis() - start
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) DNS end: ${duration}ms")
+            }
+
+            override fun connectStart(
+                    call: Call,
+                    inetSocketAddress: java.net.InetSocketAddress,
+                    proxy: java.net.Proxy
+            ) {
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) Connect start")
+            }
+
+            override fun connectEnd(
+                    call: Call,
+                    inetSocketAddress: java.net.InetSocketAddress,
+                    proxy: java.net.Proxy,
+                    protocol: Protocol?
+            ) {
+                val duration = System.currentTimeMillis() - start
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Connect end: ${duration}ms, Protocol: $protocol"
+                )
+            }
+
+            override fun requestHeadersStart(call: Call) {
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) Request Headers start")
+            }
+
+            override fun requestHeadersEnd(call: Call, request: Request) {
+                val duration = System.currentTimeMillis() - start
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Request Headers end: ${duration}ms"
+                )
+            }
+
+            override fun requestBodyStart(call: Call) {
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Request Body start (Uploading...)"
+                )
+            }
+
+            override fun requestBodyEnd(call: Call, byteCount: Long) {
+                val duration = System.currentTimeMillis() - start
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Request Body end: ${duration}ms, bytes: $byteCount"
+                )
+            }
+
+            override fun responseHeadersStart(call: Call) {
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Response Headers start (Waiting for server processing...)"
+                )
+            }
+
+            override fun responseHeadersEnd(call: Call, response: Response) {
+                val duration = System.currentTimeMillis() - start
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Response Headers end: ${duration}ms, code: ${response.code}"
+                )
+            }
+
+            override fun responseBodyStart(call: Call) {
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Response Body start (Downloading response...)"
+                )
+            }
+
+            override fun responseBodyEnd(call: Call, byteCount: Long) {
+                val duration = System.currentTimeMillis() - start
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE-HTTP] ($requestId) Response Body end: ${duration}ms, bytes: $byteCount"
+                )
+            }
+
+            override fun callEnd(call: Call) {
+                val duration = System.currentTimeMillis() - start
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) Call end: ${duration}ms")
+            }
+
+            override fun callFailed(call: Call, ioe: java.io.IOException) {
+                Log.e("WebSocketManager", "[TRACE-HTTP] ($requestId) Call failed: $ioe")
+            }
+        }
+    }
+
     /* ---------------------------------------------------
        OKHTTP (with ping)
     --------------------------------------------------- */
-    private val client = OkHttpClient.Builder()
-        .retryOnConnectionFailure(true)
-        .build()
+    private val client = OkHttpClient.Builder().retryOnConnectionFailure(true).build()
 
     private var webSocket: WebSocket? = null
 
@@ -162,15 +283,24 @@ object WebSocketManager {
     private var readyJob: Job? = null
     private var ackMonitorJob: Job? = null
 
-    private fun PendingMessage.toEntity() =
-        PendingMessageEntity(messageId, payload, retries, state.name, lastSentAt, timestamp)
+    private fun PendingMessage.toEntity(): PendingMessageEntity {
+        Log.e(
+                "WebSocketManager",
+                "[TRACE] toEntity() ENTRY → messageId=$messageId, retries=$retries, state=${state.name}, lastSentAt=$lastSentAt"
+        )
+        val entity =
+                PendingMessageEntity(messageId, payload, retries, state.name, lastSentAt, timestamp)
+        Log.e("WebSocketManager", "[TRACE] toEntity() EXIT → entity created")
+        return entity
+    }
 
     // Backpressure-safe SharedFlow for UI-level events
-    private val _events = MutableSharedFlow<WebSocketEvent>(
-        replay = 0,
-        extraBufferCapacity = 64,
-        onBufferOverflow = BufferOverflow.SUSPEND
-    )
+    private val _events =
+            MutableSharedFlow<WebSocketEvent>(
+                    replay = 0,
+                    extraBufferCapacity = 64,
+                    onBufferOverflow = BufferOverflow.SUSPEND
+            )
     val events = _events.asSharedFlow()
 
     /* ---------------------------------------------------
@@ -180,24 +310,24 @@ object WebSocketManager {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private const val SERVER_LIVENESS_TIMEOUT_MS = 45_000L
-    @Volatile
-    private var lastServerMessageAt: Long = 0
+    @Volatile private var lastServerMessageAt: Long = 0
     private var livenessJob: Job? = null
 
     private fun startLivenessMonitor() {
         livenessJob?.cancel()
-        livenessJob = scope.launch {
-            while (isActive) {
-                delay(10_000)
-                val now = System.currentTimeMillis()
-                if (now - lastServerMessageAt > SERVER_LIVENESS_TIMEOUT_MS) {
-                    Log.e("WebSocketManager", "Server silent → force reconnect")
-                    forceCloseSocket()
-                    scheduleReconnect(++reconnectAttempt)
-                    return@launch
+        livenessJob =
+                scope.launch {
+                    while (isActive) {
+                        delay(10_000)
+                        val now = System.currentTimeMillis()
+                        if (now - lastServerMessageAt > SERVER_LIVENESS_TIMEOUT_MS) {
+                            Log.e("WebSocketManager", "Server silent → force reconnect")
+                            forceCloseSocket()
+                            scheduleReconnect(++reconnectAttempt)
+                            return@launch
+                        }
+                    }
                 }
-            }
-        }
     }
 
     private fun stopLivenessMonitor() {
@@ -205,23 +335,29 @@ object WebSocketManager {
         livenessJob = null
     }
 
+    @RequiresApi(Build.VERSION_CODES.N)
     fun registerNetworkCallback(context: Context) {
         try {
             connectivityManager =
-                context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                    context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-            networkCallback = object : ConnectivityManager.NetworkCallback() {
+            networkCallback =
+                    object : ConnectivityManager.NetworkCallback() {
 
-                override fun onAvailable(network: Network) {
-                    Log.e("WebSocketManager", "Network AVAILABLE → reconnect")
-                    reconnectIfNeeded(context)
-                }
+                        override fun onAvailable(network: Network) {
+                            Log.e("WebSocketManager", "Network AVAILABLE → reconnect")
+                            reconnectIfNeeded(context)
+                            if (!AppVisibility.isForeground) {
 
-                override fun onLost(network: Network) {
-                    Log.e("WebSocketManager", "Network LOST → force close socket")
-                    forceCloseSocket()
-                }
-            }
+                                sendPresence("offline")
+                            }
+                        }
+
+                        override fun onLost(network: Network) {
+                            Log.e("WebSocketManager", "Network LOST → force close socket")
+                            forceCloseSocket()
+                        }
+                    }
 
             connectivityManager.registerDefaultNetworkCallback(networkCallback!!)
         } catch (e: Exception) {
@@ -231,9 +367,7 @@ object WebSocketManager {
 
     fun unregisterNetworkCallback() {
         try {
-            networkCallback?.let {
-                connectivityManager.unregisterNetworkCallback(it)
-            }
+            networkCallback?.let { connectivityManager.unregisterNetworkCallback(it) }
             networkCallback = null
         } catch (e: Exception) {
             Log.e("WebSocketManager", "Failed to unregister network callback", e)
@@ -243,35 +377,37 @@ object WebSocketManager {
     /* ---------------------------------------------------
        INIT
     --------------------------------------------------- */
+    @RequiresApi(Build.VERSION_CODES.N)
     suspend fun init(context: Context) {
         if (initialized) return
+        appContext = context.applicationContext
 
-        val db = Room.databaseBuilder(
-            context.applicationContext,
-            AppDatabase::class.java,
-            "anonychat.db"
-        )
-            .fallbackToDestructiveMigration()
-            .build()
+        val db =
+                Room.databaseBuilder(
+                                context.applicationContext,
+                                AppDatabase::class.java,
+                                "anonychat.db"
+                        )
+                        .fallbackToDestructiveMigration()
+                        .build()
 
         dao = db.pendingMessageDao()
 
         pendingQueue.addAll(
-            dao.getAll().map {
-                val st = runCatching {
-                    MessageState.valueOf(it.state)
-                }.getOrElse {
-                    MessageState.QUEUED
+                dao.getAll().map {
+                    val st =
+                            runCatching { MessageState.valueOf(it.state) }.getOrElse {
+                                MessageState.QUEUED
+                            }
+                    PendingMessage(
+                            it.messageId,
+                            it.payload,
+                            it.retries,
+                            st,
+                            it.lastSentAt,
+                            it.timestamp
+                    )
                 }
-                PendingMessage(
-                    it.messageId,
-                    it.payload,
-                    it.retries,
-                    st,
-                    it.lastSentAt,
-                    it.timestamp
-                )
-            }
         )
 
         initialized = true
@@ -284,9 +420,59 @@ object WebSocketManager {
         check(initialized) { "WebSocketManager.init(context) must be called first" }
     }
 
+    private suspend fun downloadMediaAndAck(url: String, mediaId: String) {
+        try {
+            val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            val token = prefs.getString("access_token", null)
+
+            val reqBuilder = Request.Builder().url(url)
+            if (token != null) reqBuilder.header("Authorization", "Bearer $token")
+
+            client.newCall(reqBuilder.build()).execute().use { res ->
+                if (!res.isSuccessful) return
+
+                val filename = url.substringAfterLast('/')
+                val file = File(appContext.filesDir, filename)
+
+                res.body?.byteStream()?.use { input ->
+                    file.outputStream().use { output -> input.copyTo(output) }
+                }
+
+                sendMediaDownloadAck(mediaId)
+            }
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Media download failed", e)
+        }
+    }
+
+    private fun sendMediaDownloadAck(mediaId: String) {
+        try {
+            val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            val token = prefs.getString("access_token", null)
+
+            val json = JSONObject().put("mediaId", mediaId).toString()
+            val body = RequestBody.create("application/json".toMediaTypeOrNull(), json)
+
+            val rb = Request.Builder().url(MEDIA_DOWNLOAD_ACK).post(body)
+
+            if (token != null) rb.header("Authorization", "Bearer $token")
+
+            client.newCall(rb.build()).execute()
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Media ACK failed", e)
+        }
+    }
+
     private fun sendOnlinePresenceIfReady() {
         if (readyState == ReadyState.READY) {
-            sendPresence("online")
+            if (!AppVisibility.isForeground) {
+
+                sendPresence("offline")
+            } else {
+
+                sendPresence("online")
+            }
+
             Log.i("WebSocketManager", "Presence auto-sent: online after reconnect")
         }
     }
@@ -295,10 +481,7 @@ object WebSocketManager {
         // state = "foreground" | "background" | "online" | "offline"
         if (readyState != ReadyState.READY) return
 
-        val payload = JSONObject()
-            .put("type", "presence")
-            .put("state", state)
-            .toString()
+        val payload = JSONObject().put("type", "presence").put("state", state).toString()
 
         try {
             webSocket?.send(payload)
@@ -314,38 +497,471 @@ object WebSocketManager {
     suspend fun connect(context: Context) {
         ensureInit()
         Log.e("WebSocketManager", "Connecting...")
+
+        // 1) Acquire lock only to check & mutate quick state -> don't suspend while holding it
         connectMutex.withLock {
-            Log.e("WebSocketManager", "connect$wsState.")
-
+            Log.e("WebSocketManager", "connect $wsState")
             if (wsState != WsState.DISCONNECTED) return
-            Log.e("WebSocketManager", "con!!!nect: starting coroutine to establish connection.")
-
             wsState = WsState.CONNECTING
+        }
 
-            suspendCancellableCoroutine<Unit> { cont ->
-                Log.e("WebSocketManager", "connect: starting coroutine to establish connection.")
-                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                val token = prefs.getString("access_token", null)
-                val email = prefs.getString("user_email", null)
-                curruser = email
+        // 2) Now do the long-running suspend outside the lock.
+        // Optional: wrap in timeout to avoid waiting forever (recommended).
+        try {
+            withTimeout(15_000L) { // adjust timeout as needed
+                suspendCancellableCoroutine<Unit> { cont ->
+                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                    val token = prefs.getString("access_token", null)
+                    val email = prefs.getString("user_email", null)
+                    curruser = email
 
-                Log.i("WebSocketManager", "connect: Retrieved from prefs -> email: $email, token exists: ${token != null}")
+                    Log.i(
+                            "WebSocketManager",
+                            "connect: Retrieved from prefs -> email: $email, token exists: ${token != null}"
+                    )
 
-                if (token == null || email == null) {
-                    wsState = WsState.DISCONNECTED
-                    cont.resumeWith(Result.failure(IllegalStateException("Auth missing")))
-                    return@suspendCancellableCoroutine
+                    if (token == null || email == null) {
+                        // quick state reset under lock
+                        scope.launch { connectMutex.withLock { wsState = WsState.DISCONNECTED } }
+                        cont.resumeWith(Result.failure(IllegalStateException("Auth missing")))
+                        return@suspendCancellableCoroutine
+                    }
+
+                    wsUrl =
+                            "ws://192.168.1.90:8080/?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
+                    Log.i("WebSocketManager", "connect: Constructed WS URL: $wsUrl")
+
+                    // Atomic boolean to ensure we resume the continuation exactly once
+                    val resumed = AtomicBoolean(false)
+
+                    val listener = createListener(cont, resumed)
+
+                    // newWebSocket returns a WebSocket instance; keep reference for cancellation
+                    val ws = client.newWebSocket(Request.Builder().url(wsUrl!!).build(), listener)
+
+                    // If the coroutine is cancelled (timeout or external), close socket & reset
+                    // state
+                    cont.invokeOnCancellation {
+                        if (resumed.compareAndSet(false, true)) {
+                            try {
+                                ws.close(1001, "Cancelled")
+                            } catch (e: Exception) {
+                                Log.e(
+                                        "WebSocketManager",
+                                        "Failed to close websocket on cancellation",
+                                        e
+                                )
+                            }
+                            scope.launch {
+                                connectMutex.withLock { wsState = WsState.DISCONNECTED }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // On timeout or other failure, ensure state is DISCONNECTED so future connects can try
+            // again.
+            Log.e("WebSocketManager", "connect failed or timed out", e)
+            connectMutex.withLock { wsState = WsState.DISCONNECTED }
+            throw e
+        }
+    }
+
+    fun downloadMediaManually(url: String, mediaId: String) {
+        scope.launch { downloadMediaAndAck(url, mediaId) }
+    }
+
+    /**
+     * Compresses an image if it exceeds 2MB. Returns the URI of the compressed image (or original
+     * if no compression needed).
+     */
+    private suspend fun compressImageIfNeeded(fileUri: Uri, contentType: String): Uri {
+        val startTime = System.currentTimeMillis()
+        Log.e("WebSocketManager", "[TRACE] compressImageIfNeeded() START")
+
+        // Only compress images
+        if (!contentType.startsWith("image/") ||
+                        contentType == "image/gif" ||
+                        contentType == "image/webp"
+        ) {
+            return fileUri
+        }
+
+        return withContext(Dispatchers.IO) {
+            try {
+                // Check file size
+                val inputStream = appContext.contentResolver.openInputStream(fileUri)
+                val fileSize = inputStream?.available()?.toLong() ?: 0L
+                inputStream?.close()
+
+                val maxSizeBytes = 3 * 1024 * 1024L // 2MB
+
+                Log.e(
+                        "WebSocketManager",
+                        "[COMPRESS] Image size: ${fileSize / 1024}KB, max: ${maxSizeBytes / 1024}KB"
+                )
+
+                if (fileSize <= maxSizeBytes) {
+                    Log.e(
+                            "WebSocketManager",
+                            "[COMPRESS] Image is under 2MB, no compression needed"
+                    )
+                    return@withContext fileUri
                 }
 
-                wsUrl =
-                    "ws://192.168.1.66:8080/?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
-                Log.i("WebSocketManager", "connect: Constructed WS URL: $wsUrl")
+                Log.e("WebSocketManager", "[COMPRESS] Image exceeds 2MB, compressing...")
 
-                client.newWebSocket(
-                    Request.Builder().url(wsUrl!!).build(),
-                    createListener(cont)
+                // Decode the bitmap
+                val originalBitmap =
+                        appContext.contentResolver.openInputStream(fileUri)?.use { input ->
+                            android.graphics.BitmapFactory.decodeStream(input)
+                        }
+                                ?: return@withContext fileUri
+
+                // Create a temporary file for the compressed image
+                val compressedFile =
+                        File(appContext.cacheDir, "compressed_${System.currentTimeMillis()}.jpg")
+
+                // Try different quality levels until we get under 2MB
+                var quality = 90
+                var compressedSize = Long.MAX_VALUE
+
+                while (quality >= 10 && compressedSize > maxSizeBytes) {
+                    compressedFile.outputStream().use { output ->
+                        originalBitmap.compress(
+                                android.graphics.Bitmap.CompressFormat.JPEG,
+                                quality,
+                                output
+                        )
+                    }
+                    compressedSize = compressedFile.length()
+                    Log.e(
+                            "WebSocketManager",
+                            "[COMPRESS] Quality: $quality%, Size: ${compressedSize / 1024}KB"
+                    )
+
+                    if (compressedSize > maxSizeBytes) {
+                        quality -= 10
+                    }
+                }
+
+                // If still too large, try scaling down the image
+                if (compressedSize > maxSizeBytes) {
+                    Log.e("WebSocketManager", "[COMPRESS] Still too large, scaling down image...")
+                    var scaleFactor = 0.9f
+
+                    while (scaleFactor >= 0.3f && compressedSize > maxSizeBytes) {
+                        val scaledWidth = (originalBitmap.width * scaleFactor).toInt()
+                        val scaledHeight = (originalBitmap.height * scaleFactor).toInt()
+
+                        val scaledBitmap =
+                                android.graphics.Bitmap.createScaledBitmap(
+                                        originalBitmap,
+                                        scaledWidth,
+                                        scaledHeight,
+                                        true
+                                )
+
+                        compressedFile.outputStream().use { output ->
+                            scaledBitmap.compress(
+                                    android.graphics.Bitmap.CompressFormat.JPEG,
+                                    85,
+                                    output
+                            )
+                        }
+
+                        scaledBitmap.recycle()
+                        compressedSize = compressedFile.length()
+                        Log.e(
+                                "WebSocketManager",
+                                "[COMPRESS] Scale: ${(scaleFactor * 100).toInt()}%, Size: ${compressedSize / 1024}KB"
+                        )
+
+                        if (compressedSize > maxSizeBytes) {
+                            scaleFactor -= 0.1f
+                        }
+                    }
+                }
+
+                originalBitmap.recycle()
+
+                Log.e(
+                        "WebSocketManager",
+                        "[COMPRESS] ✅ Compression complete! Original: ${fileSize / 1024}KB → Final: ${compressedSize / 1024}KB (saved ${(fileSize - compressedSize) / 1024}KB)"
                 )
+
+                val duration = System.currentTimeMillis() - startTime
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] compressImageIfNeeded() END → Duration: ${duration}ms"
+                )
+                // Return URI of compressed file
+                Uri.fromFile(compressedFile)
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "[COMPRESS] Compression failed, using original", e)
+                fileUri
             }
+        }
+    }
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendMedia(toEmail: String, fileUri: Uri, contentType: String, localId: String) {
+        Log.e(
+                "WebSocketManager",
+                "[TRACE] sendMedia() ENTRY → toEmail=$toEmail, fileUri=$fileUri, contentType=$contentType, localId=$localId"
+        )
+        ensureInit()
+        Log.e("WebSocketManager", "[TRACE] sendMedia() ensureInit() completed")
+
+        scope.launch {
+            val totalStart = System.currentTimeMillis()
+            Log.e("WebSocketManager", "[TRACE] sendMedia() coroutine launched at $totalStart")
+
+            var retryCount = 0
+            var uploadSuccessful = false
+
+            // Compress image if needed (before retry loop to avoid re-compressing on each retry)
+            val compressStart = System.currentTimeMillis()
+            val actualFileUri = compressImageIfNeeded(fileUri, contentType)
+            Log.e(
+                    "WebSocketManager",
+                    "[TRACE] Compression took ${System.currentTimeMillis() - compressStart}ms"
+            )
+
+            while (!uploadSuccessful && retryCount <= MAX_RETRIES) {
+                try {
+                    if (retryCount > 0) {
+                        val delayMs = (2.0.pow(retryCount - 1) * 1000).toLong().coerceAtMost(30000L)
+                        Log.e(
+                                "WebSocketManager",
+                                "[RETRY] Attempt $retryCount after ${delayMs}ms delay"
+                        )
+                        delay(delayMs)
+                    }
+
+                    Log.e("WebSocketManager", "[TRACE] sendMedia() retrieving SharedPreferences")
+                    val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                    val token = prefs.getString("access_token", null)
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() token retrieved, exists=${token != null}"
+                    )
+
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() opening input stream for fileUri=$actualFileUri"
+                    )
+                    val input = appContext.contentResolver.openInputStream(actualFileUri)
+                    if (input == null) {
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() input stream is NULL, returning early"
+                        )
+                        return@launch
+                    }
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() input stream opened successfully. Reading stream..."
+                    )
+
+                    Log.e("WebSocketManager", "[TRACE] sendMedia() creating RequestBody")
+                    val bodyStart = System.currentTimeMillis()
+                    val requestBody =
+                            object : RequestBody() {
+                                override fun contentType(): MediaType? {
+                                    Log.e(
+                                            "WebSocketManager",
+                                            "[TRACE] sendMedia.RequestBody.contentType() called → $contentType"
+                                    )
+                                    return contentType.toMediaTypeOrNull()
+                                }
+                                override fun writeTo(sink: BufferedSink) {
+                                    val writeStart = System.currentTimeMillis()
+                                    Log.e(
+                                            "WebSocketManager",
+                                            "[TRACE] sendMedia.RequestBody.writeTo() ENTRY - starting actual bytes transfer"
+                                    )
+                                    appContext.contentResolver.openInputStream(actualFileUri)
+                                            ?.use { input ->
+                                                val inputStart = System.currentTimeMillis()
+                                                Log.e(
+                                                        "WebSocketManager",
+                                                        "[TRACE] sendMedia.RequestBody.writeTo() openedInputStream in ${inputStart - writeStart}ms"
+                                                )
+                                                sink.writeAll(input.source())
+                                                Log.e(
+                                                        "WebSocketManager",
+                                                        "[TRACE] sendMedia.RequestBody.writeTo() writeAll completed"
+                                                )
+                                            }
+                                    val writeDuration = System.currentTimeMillis() - writeStart
+                                    Log.e(
+                                            "WebSocketManager",
+                                            "[TRACE] sendMedia.RequestBody.writeTo() EXIT - Transfer took ${writeDuration}ms"
+                                    )
+                                }
+                            }
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() RequestBody created in ${System.currentTimeMillis() - bodyStart}ms"
+                    )
+
+                    val extension = when {
+                        contentType.contains("gif") -> "gif"
+                        contentType.contains("webp") -> "webp"
+                        contentType.contains("png") -> "png"
+                        contentType.contains("video") -> "mp4"
+                        else -> "jpg"
+                    }
+                    val fileName = "upload_${System.currentTimeMillis()}.$extension"
+                    Log.e("WebSocketManager", "[TRACE] sendMedia() fileName=$fileName")
+
+                    Log.e("WebSocketManager", "[TRACE] sendMedia() building multipart request")
+                    val multipart =
+                            MultipartBody.Builder()
+                                    .setType(MultipartBody.FORM)
+                                    .addFormDataPart("file", fileName, requestBody)
+                                    .build()
+                    Log.e("WebSocketManager", "[TRACE] sendMedia() multipart built")
+
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() building HTTP request to $MEDIA_UPLOAD"
+                    )
+                    val reqBuilder = Request.Builder().url(MEDIA_UPLOAD).post(multipart)
+
+                    if (token != null) {
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() adding Authorization header")
+                        reqBuilder.header("Authorization", "Bearer $token")
+                    }
+                    Log.e("WebSocketManager", "[TRACE] sendMedia() HTTP request built")
+
+                    val requestId = "req_${System.currentTimeMillis()}"
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() executing HTTP request with requestId=$requestId"
+                    )
+                    val httpStart = System.currentTimeMillis()
+
+                    // Use a custom client for this request to attach the event listener
+                    val customClient =
+                            client.newBuilder().eventListener(getEventListener(requestId)).build()
+
+                    customClient.newCall(reqBuilder.build()).execute().use { res ->
+                        val httpDuration = System.currentTimeMillis() - httpStart
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() HTTP request took ${httpDuration}ms. Response received, isSuccessful=${res.isSuccessful}, code=${res.code}"
+                        )
+                        if (!res.isSuccessful) {
+                            Log.e(
+                                    "WebSocketManager",
+                                    "[TRACE] sendMedia() HTTP request failed with code=${res.code}, will retry"
+                            )
+                            throw Exception("HTTP request failed with code ${res.code}")
+                        }
+
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() parsing response JSON")
+                        val responseJson = JSONObject(res.body!!.string())
+                        val mediaId = responseJson.getString("mediaId")
+                        val url = responseJson.getString("url")
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() response parsed → mediaId=$mediaId, url=$url"
+                        )
+
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() building WebSocket payload")
+                        val payload =
+                                JSONObject()
+                                        .apply {
+                                            put("type", "media")
+                                            put("to", toEmail)
+                                            put("from", curruser)
+                                            put("id", localId)
+                                            put("messageId", localId)
+                                            put("mediaId", mediaId)
+                                            put("url", url)
+                                            put("contentType", contentType)
+                                        }
+                                        .toString()
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() payload created → $payload")
+
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() creating PendingMessage")
+                        val pm =
+                                PendingMessage(
+                                        localId,
+                                        payload,
+                                        0,
+                                        MessageState.QUEUED,
+                                        0L,
+                                        System.currentTimeMillis()
+                                )
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() PendingMessage created → messageId=${pm.messageId}, state=${pm.state}"
+                        )
+
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() adding to pendingQueue (current size=${pendingQueue.size})"
+                        )
+                        pendingQueue.add(pm)
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() added to pendingQueue (new size=${pendingQueue.size})"
+                        )
+
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() calling dao.upsert() with entity"
+                        )
+                        dao.upsert(pm.toEntity())
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() dao.upsert() completed")
+
+                        Log.e("WebSocketManager", "[TRACE] sendMedia() calling flushPendingQueue()")
+                        flushPendingQueue()
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() flushPendingQueue() returned"
+                        )
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] sendMedia() TOTAL SUCCESS DURATION: ${System.currentTimeMillis() - totalStart}ms"
+                        )
+                    }
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() HTTP request completed successfully"
+                    )
+                    uploadSuccessful = true
+                } catch (e: Exception) {
+                    retryCount++
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] sendMedia() EXCEPTION caught: ${e.message} (Attempt $retryCount/$MAX_RETRIES)",
+                            e
+                    )
+
+                    if (retryCount > MAX_RETRIES) {
+                        Log.e("WebSocketManager", "Media send failed after $MAX_RETRIES retries", e)
+                        // Optionally emit a failure event to UI
+                        withContext(Dispatchers.Main.immediate) {
+                            _events.emit(
+                                    WebSocketEvent.DeliveryFailed(
+                                            localId,
+                                            "upload_failed_after_retries"
+                                    )
+                            )
+                        }
+                    } else {
+                        Log.e(
+                                "WebSocketManager",
+                                "Media send failed, will retry (${retryCount}/$MAX_RETRIES)"
+                        )
+                    }
+                }
+            }
+            Log.e("WebSocketManager", "[TRACE] sendMedia() EXIT")
         }
     }
 
@@ -356,16 +972,17 @@ object WebSocketManager {
         readyJob?.cancel()
         readyState = ReadyState.WAITING_ACK
 
-        readyJob = scope.launch {
-            while (isActive && readyState != ReadyState.READY) {
-                try {
-                    webSocket?.send(JSONObject().put("type", "is_ready").toString())
-                } catch (e: Exception) {
-                    Log.e("WebSocketManager", "ready handshake send failed", e)
+        readyJob =
+                scope.launch {
+                    while (isActive && readyState != ReadyState.READY) {
+                        try {
+                            webSocket?.send(JSONObject().put("type", "is_ready").toString())
+                        } catch (e: Exception) {
+                            Log.e("WebSocketManager", "ready handshake send failed", e)
+                        }
+                        delay(READY_RETRY_INTERVAL_MS)
+                    }
                 }
-                delay(READY_RETRY_INTERVAL_MS)
-            }
-        }
     }
 
     private fun stopReadyHandshake() {
@@ -376,49 +993,67 @@ object WebSocketManager {
     /* ---------------------------------------------------
        ACK MONITOR (retries on ack-timeout)
     --------------------------------------------------- */
+    @RequiresApi(Build.VERSION_CODES.N)
     private fun startAckMonitor() {
         ackMonitorJob?.cancel()
-        ackMonitorJob = scope.launch {
-            while (isActive) {
-                try {
-                    val now = System.currentTimeMillis()
-                    for (msg in pendingQueue.toList()) {
-                        if (msg.state == MessageState.IN_FLIGHT) {
-                            if (now - msg.lastSentAt > ACK_TIMEOUT_MS) {
-                                // timed out waiting for delivery_ack
-                                Log.w("WebSocketManager", "Ack timeout for ${msg.messageId}")
-                                msg.retries++
-                                if (msg.retries > MAX_RETRIES) {
-                                    // permanently failed
-                                    msg.state = MessageState.FAILED
-                                    try {
-                                        dao.delete(msg.messageId)
-                                    } catch (e: Exception) {
-                                        Log.e("WebSocketManager", "Failed to delete failed message", e)
-                                    }
-                                    pendingQueue.removeIf { it.messageId == msg.messageId }
-                                    withContext(Dispatchers.Main.immediate) {
-                                        _events.emit(WebSocketEvent.DeliveryFailed(msg.messageId, "ack_timeout"))
-                                    }
-                                } else {
-                                    // requeue for send
-                                    msg.state = MessageState.QUEUED
-                                    msg.lastSentAt = 0
-                                    try {
-                                        dao.upsert(msg.toEntity())
-                                    } catch (e: Exception) {
-                                        Log.e("WebSocketManager", "Failed to persist retry after ack timeout", e)
+        ackMonitorJob =
+                scope.launch {
+                    while (isActive) {
+                        try {
+                            val now = System.currentTimeMillis()
+                            for (msg in pendingQueue.toList()) {
+                                if (msg.state == MessageState.IN_FLIGHT) {
+                                    if (now - msg.lastSentAt > ACK_TIMEOUT_MS) {
+                                        // timed out waiting for delivery_ack
+                                        Log.w(
+                                                "WebSocketManager",
+                                                "Ack timeout for ${msg.messageId}"
+                                        )
+                                        msg.retries++
+                                        if (msg.retries > MAX_RETRIES) {
+                                            // permanently failed
+                                            msg.state = MessageState.FAILED
+                                            try {
+                                                dao.delete(msg.messageId)
+                                            } catch (e: Exception) {
+                                                Log.e(
+                                                        "WebSocketManager",
+                                                        "Failed to delete failed message",
+                                                        e
+                                                )
+                                            }
+                                            pendingQueue.removeIf { it.messageId == msg.messageId }
+                                            withContext(Dispatchers.Main.immediate) {
+                                                _events.emit(
+                                                        WebSocketEvent.DeliveryFailed(
+                                                                msg.messageId,
+                                                                "ack_timeout"
+                                                        )
+                                                )
+                                            }
+                                        } else {
+                                            // requeue for send
+                                            msg.state = MessageState.QUEUED
+                                            msg.lastSentAt = 0
+                                            try {
+                                                dao.upsert(msg.toEntity())
+                                            } catch (e: Exception) {
+                                                Log.e(
+                                                        "WebSocketManager",
+                                                        "Failed to persist retry after ack timeout",
+                                                        e
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
+                        } catch (e: Exception) {
+                            Log.e("WebSocketManager", "Ack monitor error", e)
                         }
+                        delay(1000)
                     }
-                } catch (e: Exception) {
-                    Log.e("WebSocketManager", "Ack monitor error", e)
                 }
-                delay(1000)
-            }
-        }
     }
 
     private fun stopAckMonitor() {
@@ -430,11 +1065,13 @@ object WebSocketManager {
        LISTENER
     --------------------------------------------------- */
     private fun createListener(
-        continuation: CancellableContinuation<Unit>? = null
+            continuation: CancellableContinuation<Unit>? = null,
+            resumed: AtomicBoolean? = null
     ): WebSocketListener {
 
         return object : WebSocketListener() {
 
+            @RequiresApi(Build.VERSION_CODES.N)
             override fun onOpen(ws: WebSocket, response: Response) {
                 webSocket = ws
                 wsState = WsState.CONNECTED
@@ -446,21 +1083,25 @@ object WebSocketManager {
                 // reset liveness timestamp and start monitors
                 lastServerMessageAt = System.currentTimeMillis()
                 startReadyHandshake()
-            //    startLivenessMonitor()
+                // startLivenessMonitor() // if you want
                 startHeartbeat()
                 startAckMonitor()
 
-                continuation?.resumeWith(Result.success(Unit))
+                // resume connect() once (if provided)
+                try {
+                    if (continuation != null && resumed?.compareAndSet(false, true) == true) {
+                        continuation.resumeWith(Result.success(Unit))
+                    }
+                } catch (e: Exception) {
+                    Log.w("WebSocketManager", "continuation resume onOpen failed", e)
+                }
             }
 
             @RequiresApi(Build.VERSION_CODES.N)
             override fun onMessage(ws: WebSocket, text: String) {
-                // Offload processing immediately to avoid blocking OkHttp callback thread
                 lastServerMessageAt = System.currentTimeMillis()
                 try {
-                    scope.launch {
-                        handleIncoming(ws, text)
-                    }
+                    scope.launch { handleIncoming(ws, text) }
                 } catch (e: Exception) {
                     Log.e("WebSocketManager", "Failed to launch message handler", e)
                 }
@@ -468,6 +1109,17 @@ object WebSocketManager {
 
             override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
                 Log.e("WebSocketManager", "WebSocket FAILURE", t)
+
+                // If connect() is still waiting, resume it with exception (exactly once)
+                try {
+                    if (continuation != null && resumed?.compareAndSet(false, true) == true) {
+                        continuation.resumeWith(Result.failure(t))
+                    }
+                } catch (e: Exception) {
+                    Log.w("WebSocketManager", "continuation resume onFailure failed", e)
+                }
+
+                // Clean up and schedule reconnect as before
                 forceCloseSocket()
                 readyState = ReadyState.NOT_READY
                 scheduleReconnect(++reconnectAttempt)
@@ -475,20 +1127,36 @@ object WebSocketManager {
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.w("WebSocketManager", "WebSocket CLOSED: $code $reason")
+
+                // If connect() is still waiting, signal closed as failure
+                try {
+                    if (continuation != null && resumed?.compareAndSet(false, true) == true) {
+                        continuation.resumeWith(
+                                Result.failure(
+                                        IllegalStateException("WebSocket closed: $code $reason")
+                                )
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.w("WebSocketManager", "continuation resume onClosed failed", e)
+                }
+
                 forceCloseSocket()
                 readyState = ReadyState.NOT_READY
                 scheduleReconnect(++reconnectAttempt)
             }
         }
     }
+
     private fun sendMessageReceivedAck(messageId: String, senderGmail: String) {
         if (readyState != ReadyState.READY) return
 
-        val payload = JSONObject()
-            .put("type", "message_received_ack")
-            .put("messageId", messageId)
-            .put("to", senderGmail)   // 👈 original sender
-            .toString()
+        val payload =
+                JSONObject()
+                        .put("type", "message_received_ack")
+                        .put("messageId", messageId)
+                        .put("to", senderGmail) // 👈 original sender
+                        .toString()
 
         try {
             webSocket?.send(payload)
@@ -521,7 +1189,11 @@ object WebSocketManager {
                             try {
                                 dao.upsert(msg.toEntity())
                             } catch (e: Exception) {
-                                Log.e("WebSocketManager", "Failed to persist reset of in-flight on ready", e)
+                                Log.e(
+                                        "WebSocketManager",
+                                        "Failed to persist reset of in-flight on ready",
+                                        e
+                                )
                             }
                         }
                     }
@@ -530,17 +1202,47 @@ object WebSocketManager {
                     // flush pending outgoing
                     flushPendingQueue()
                 }
+                "media" -> {
+                    val localEmail = ws.request().url.queryParameter("gmail") ?: ""
+                    val mediaId = json.getString("mediaId")
+                    val url = json.getString("url")
+                    val contentType = json.optString("contentType") // image/jpeg, audio/mpeg, etc.
 
+                    val chatMessage =
+                            ChatMessage(
+                                    id = messageId,
+                                    from = json.getString("from"),
+                                    to = localEmail,
+                                    text = url,
+                                    timestamp = json.optLong("timestamp")
+                            )
+
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.NewMessage(chatMessage))
+                    }
+
+                    // ✅ Always send delivery ACK immediately
+                    sendMessageReceivedAck(messageId, json.getString("from"))
+
+                    // 🎵 Auto-download ONLY audio
+                    if (contentType.startsWith("audio")) {
+                        scope.launch { downloadMediaAndAck(url, mediaId) }
+                    }
+                }
                 "chat_message" -> {
                     val localEmail = ws.request().url.queryParameter("gmail") ?: ""
                     Log.i("WebSocketManager", "chat_message received: $json")
-                    val chatMessage = ChatMessage(
-                        id = messageId,
-                        from = json.getString("from"),
-                        to = localEmail,
-                        text = json.getString("content"),
-                        timestamp = json.optLong("timestamp")
-                    )
+                    val chatMessage =
+                            ChatMessage(
+                                    id = messageId,
+                                    from = json.getString("from"),
+                                    to = localEmail,
+                                    text = json.getString("content"),
+                                    timestamp = json.optLong("timestamp")
+                            )
+
+                    // chat_message received:
+                    // {"type":"chat_message","to":"b18559d0aa9a352c:6fb7ba6e-6936-ee64-b93b-9090b139838e@email.com","from":"ws_user1@example.com","messageId":"147575eb-9672-469a-a7de-a0960d74e963","id":"147575eb-9672-469a-a7de-a0960d74e963","fromUserId":"ik1a42oq87hhrsfi8hdz3q:atr7uticpcv","originInstance":"chat-8"}
 
                     // Emit on Main.immediate so UI receives it promptly
                     withContext(Dispatchers.Main.immediate) {
@@ -548,8 +1250,8 @@ object WebSocketManager {
                     }
                     sendMessageReceivedAck(messageId, json.getString("from"))
                 }
-                "message_received_ack" -> {
-                    Log.e("WebSocketManager", "message_received_ack received for $messageId")
+                "message_delivered" -> {
+                    Log.e("WebSocketManager", "message_delivered received for $messageId")
 
                     // This means: peer has RECEIVED the message
                     // UI should show delivered (double tick, etc.)
@@ -557,7 +1259,6 @@ object WebSocketManager {
                         _events.emit(WebSocketEvent.DeliveryAck(messageId))
                     }
                 }
-
                 "delivery_ack" -> {
                     // Message successfully delivered: remove from queue & DB, emit ack event
                     Log.i("WebSocketManager", "delivery_ack for $messageId")
@@ -571,10 +1272,10 @@ object WebSocketManager {
                     lastServerMessageAt = System.currentTimeMillis()
                     return
                 }
-
                 "delivery_failed" -> {
                     Log.w("WebSocketManager", "delivery_failed for $messageId")
-                    // If server says delivery_failed, we retry (increment retries) or mark as permanently failed
+                    // If server says delivery_failed, we retry (increment retries) or mark as
+                    // permanently failed
                     val reason = json.optString("error", "server_failed")
                     val pm = pendingQueue.toList().find { it.messageId == messageId }
                     if (pm != null) {
@@ -596,14 +1297,20 @@ object WebSocketManager {
                             try {
                                 dao.upsert(pm.toEntity())
                             } catch (e: Exception) {
-                                Log.e("WebSocketManager", "Failed to persist retry after delivery_failed", e)
+                                Log.e(
+                                        "WebSocketManager",
+                                        "Failed to persist retry after delivery_failed",
+                                        e
+                                )
                             }
                         }
                     } else {
-                        Log.w("WebSocketManager", "delivery_failed for unknown messageId: $messageId")
+                        Log.w(
+                                "WebSocketManager",
+                                "delivery_failed for unknown messageId: $messageId"
+                        )
                     }
                 }
-
                 else -> {
                     // Unknown type — ignore or log
                     Log.w("WebSocketManager", "Unknown message type: $type")
@@ -619,16 +1326,17 @@ object WebSocketManager {
     --------------------------------------------------- */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
-        heartbeatJob = scope.launch {
-            while (isActive) {
-                delay(HEARTBEAT_INTERVAL_MS)
-                try {
-                    webSocket?.send(JSONObject().put("type", "ping").toString())
-                } catch (e: Exception) {
-                    Log.e("WebSocketManager", "heartbeat send failed", e)
+        heartbeatJob =
+                scope.launch {
+                    while (isActive) {
+                        delay(HEARTBEAT_INTERVAL_MS)
+                        try {
+                            webSocket?.send(JSONObject().put("type", "ping").toString())
+                        } catch (e: Exception) {
+                            Log.e("WebSocketManager", "heartbeat send failed", e)
+                        }
+                    }
                 }
-            }
-        }
     }
 
     private fun stopHeartbeat() {
@@ -643,19 +1351,17 @@ object WebSocketManager {
     fun sendChatOpen(peerGmail: String) {
         ensureInit()
 
-        val payload = JSONObject()
-            .put("type", "chat_open")
-            .put("with", peerGmail)
-            .toString()
+        val payload = JSONObject().put("type", "chat_open").put("with", peerGmail).toString()
 
-        val pm = PendingMessage(
-            "chat_open_${System.currentTimeMillis()}",
-            payload,
-            0,
-            MessageState.QUEUED,
-            0L,
-            System.currentTimeMillis()
-        )
+        val pm =
+                PendingMessage(
+                        "chat_open_${System.currentTimeMillis()}",
+                        payload,
+                        0,
+                        MessageState.QUEUED,
+                        0L,
+                        System.currentTimeMillis()
+                )
 
         pendingQueue.add(pm)
 
@@ -674,16 +1380,27 @@ object WebSocketManager {
     fun sendMessage(toEmail: String, text: String, localId: String) {
         ensureInit()
 
-        val payload = JSONObject().apply {
-            put("type", "chat_message")
-            put("to", toEmail)
-            put("from", curruser)
-            put("content", text)
-            put("id", localId)
-            put("messageId", localId)
-        }.toString()
+        val payload =
+                JSONObject()
+                        .apply {
+                            put("type", "chat_message")
+                            put("to", toEmail)
+                            put("from", curruser)
+                            put("content", text)
+                            put("id", localId)
+                            put("messageId", localId)
+                        }
+                        .toString()
 
-        val pm = PendingMessage(localId, payload, 0, MessageState.QUEUED, 0L, System.currentTimeMillis())
+        val pm =
+                PendingMessage(
+                        localId,
+                        payload,
+                        0,
+                        MessageState.QUEUED,
+                        0L,
+                        System.currentTimeMillis()
+                )
 
         pendingQueue.add(pm)
         scope.launch {
@@ -702,63 +1419,194 @@ object WebSocketManager {
     --------------------------------------------------- */
     @RequiresApi(Build.VERSION_CODES.N)
     private fun flushPendingQueue() {
-        if (!initialized || readyState != ReadyState.READY) return
+        Log.e(
+                "WebSocketManager",
+                "[TRACE] flushPendingQueue() ENTRY → initialized=$initialized, readyState=$readyState, pendingQueue.size=${pendingQueue.size}"
+        )
 
-        // If there is no websocket or it isn't marked CONNECTED, try reconnecting once and abort flush.
+        if (!initialized || readyState != ReadyState.READY) {
+            Log.e(
+                    "WebSocketManager",
+                    "[TRACE] flushPendingQueue() not ready → initialized=$initialized, readyState=$readyState, returning early"
+            )
+            return
+        }
+
+        // If there is no websocket or it isn't marked CONNECTED, try reconnecting once and abort
+        // flush.
         if (webSocket == null || wsState != WsState.CONNECTED) {
-            Log.w("WebSocketManager", "flushPendingQueue: websocket not connected → scheduling reconnect")
+            Log.e(
+                    "WebSocketManager",
+                    "[TRACE] flushPendingQueue() websocket not connected → wsState=$wsState, webSocket=${webSocket != null}"
+            )
+            Log.w(
+                    "WebSocketManager",
+                    "flushPendingQueue: websocket not connected → scheduling reconnect"
+            )
             scheduleReconnect(++reconnectAttempt)
+            Log.e(
+                    "WebSocketManager",
+                    "[TRACE] flushPendingQueue() reconnect scheduled, returning early"
+            )
             return
         }
 
         val ws = webSocket!!
+        Log.e(
+                "WebSocketManager",
+                "[TRACE] flushPendingQueue() websocket available, launching coroutine"
+        )
 
         scope.launch {
+            Log.e(
+                    "WebSocketManager",
+                    "[TRACE] flushPendingQueue() coroutine started, iterating ${pendingQueue.size} messages"
+            )
+            var processedCount = 0
             for (msg in pendingQueue.toList()) {
-                if (msg.state != MessageState.QUEUED) continue
-                if (msg.retries >= MAX_RETRIES) {
-                    // drop if beyond retries (safeguard)
-                    try {
-                        dao.delete(msg.messageId)
-                    } catch (e: Exception) {
-                        Log.e("WebSocketManager", "Failed to delete expired message", e)
-                    }
-                    pendingQueue.removeIf { it.messageId == msg.messageId }
-                    withContext(Dispatchers.Main.immediate) {
-                        _events.emit(WebSocketEvent.DeliveryFailed(msg.messageId, "max_retries_exceeded"))
-                    }
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] flushPendingQueue() processing message #${++processedCount} → messageId=${msg.messageId}, state=${msg.state}, retries=${msg.retries}"
+                )
+
+                if (msg.state != MessageState.QUEUED) {
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() skipping message ${msg.messageId} → state=${msg.state} (not QUEUED)"
+                    )
                     continue
                 }
 
-                val ok = try {
-                    ws.send(msg.payload)
-                } catch (e: Exception) {
-                    Log.e("WebSocketManager", "send failed", e)
-                    false
+                if (msg.retries >= MAX_RETRIES) {
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() message ${msg.messageId} exceeded MAX_RETRIES ($MAX_RETRIES), dropping"
+                    )
+                    // drop if beyond retries (safeguard)
+                    try {
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] flushPendingQueue() deleting expired message ${msg.messageId} from DB"
+                        )
+                        dao.delete(msg.messageId)
+                        Log.e("WebSocketManager", "[TRACE] flushPendingQueue() deleted from DB")
+                    } catch (e: Exception) {
+                        Log.e(
+                                "WebSocketManager",
+                                "[TRACE] flushPendingQueue() EXCEPTION deleting expired message: ${e.message}",
+                                e
+                        )
+                        Log.e("WebSocketManager", "Failed to delete expired message", e)
+                    }
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() removing ${msg.messageId} from pendingQueue"
+                    )
+                    pendingQueue.removeIf { it.messageId == msg.messageId }
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() emitting DeliveryFailed event"
+                    )
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(
+                                WebSocketEvent.DeliveryFailed(msg.messageId, "max_retries_exceeded")
+                        )
+                    }
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() DeliveryFailed event emitted"
+                    )
+                    continue
                 }
 
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] flushPendingQueue() attempting to send message ${msg.messageId} via WebSocket"
+                )
+                val ok =
+                        try {
+                            val result = ws.send(msg.payload)
+                            Log.e(
+                                    "WebSocketManager",
+                                    "[TRACE] flushPendingQueue() ws.send() returned $result for ${msg.messageId}"
+                            )
+                            result
+                        } catch (e: Exception) {
+                            Log.e(
+                                    "WebSocketManager",
+                                    "[TRACE] flushPendingQueue() EXCEPTION during ws.send(): ${e.message}",
+                                    e
+                            )
+                            Log.e("WebSocketManager", "send failed", e)
+                            false
+                        }
+
                 if (!ok) {
-                    // if immediate send failed, schedule reconnect and keep msg QUEUED (do not increment retries yet)
-                    Log.w("WebSocketManager", "ws.send returned false for ${msg.messageId}, scheduling reconnect")
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() send failed for ${msg.messageId}, scheduling reconnect"
+                    )
+                    // if immediate send failed, schedule reconnect and keep msg QUEUED (do not
+                    // increment retries yet)
+                    Log.w(
+                            "WebSocketManager",
+                            "ws.send returned false for ${msg.messageId}, scheduling reconnect"
+                    )
                     scheduleReconnect(++reconnectAttempt)
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() reconnect scheduled, exiting flush"
+                    )
                     return@launch
                 }
 
-                // On successful send over wire, mark IN_FLIGHT and set lastSentAt — do NOT mark DELIVERED yet
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] flushPendingQueue() message ${msg.messageId} sent successfully, marking IN_FLIGHT"
+                )
+                // On successful send over wire, mark IN_FLIGHT and set lastSentAt — do NOT mark
+                // DELIVERED yet
                 msg.state = MessageState.IN_FLIGHT
                 msg.lastSentAt = System.currentTimeMillis()
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] flushPendingQueue() message ${msg.messageId} state updated → IN_FLIGHT, lastSentAt=${msg.lastSentAt}"
+                )
+
                 try {
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() persisting IN_FLIGHT state for ${msg.messageId}"
+                    )
                     dao.upsert(msg.toEntity())
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() IN_FLIGHT state persisted"
+                    )
                 } catch (e: Exception) {
+                    Log.e(
+                            "WebSocketManager",
+                            "[TRACE] flushPendingQueue() EXCEPTION persisting in-flight message: ${e.message}",
+                            e
+                    )
                     Log.e("WebSocketManager", "Failed to persist in-flight message", e)
                 }
 
                 // Notify UI that send was attempted (in-flight)
-                // withContext(Dispatchers.Main.immediate) { _events.emit(WebSocketEvent.MessageSentAttempted(msg.messageId)) }
+                // withContext(Dispatchers.Main.immediate) {
+                // _events.emit(WebSocketEvent.MessageSentAttempted(msg.messageId)) }
 
                 // Throttle next send slightly to avoid filling kernel buffers
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] flushPendingQueue() delaying ${OUTGOING_SEND_DELAY_MS}ms before next message"
+                )
                 delay(OUTGOING_SEND_DELAY_MS)
             }
+            Log.e(
+                    "WebSocketManager",
+                    "[TRACE] flushPendingQueue() EXIT → processed $processedCount messages"
+            )
         }
     }
 
@@ -768,14 +1616,31 @@ object WebSocketManager {
     --------------------------------------------------- */
     @RequiresApi(Build.VERSION_CODES.N)
     private fun removeFromQueue(messageId: String) {
-        pendingQueue.removeIf { it.messageId == messageId }
+        Log.e(
+                "WebSocketManager",
+                "[TRACE] removeFromQueue() ENTRY → messageId=$messageId, pendingQueue.size=${pendingQueue.size}"
+        )
+        val removed = pendingQueue.removeIf { it.messageId == messageId }
+        Log.e(
+                "WebSocketManager",
+                "[TRACE] removeFromQueue() removed from queue=$removed, new pendingQueue.size=${pendingQueue.size}"
+        )
+
         scope.launch {
             try {
+                Log.e("WebSocketManager", "[TRACE] removeFromQueue() deleting $messageId from DB")
                 dao.delete(messageId)
+                Log.e("WebSocketManager", "[TRACE] removeFromQueue() deleted from DB successfully")
             } catch (e: Exception) {
+                Log.e(
+                        "WebSocketManager",
+                        "[TRACE] removeFromQueue() EXCEPTION deleting from DB: ${e.message}",
+                        e
+                )
                 Log.e("WebSocketManager", "Failed to delete message from DB", e)
             }
         }
+        Log.e("WebSocketManager", "[TRACE] removeFromQueue() EXIT")
     }
 
     /* ---------------------------------------------------
@@ -784,24 +1649,17 @@ object WebSocketManager {
     private fun scheduleReconnect(attempt: Int) {
         if (wsUrl == null || attempt > 10) return
 
-        val delayMs =
-            (1000L * 2.0.pow(attempt - 1)).toLong().coerceAtMost(MAX_RECONNECT_DELAY_MS)
+        val delayMs = (1000L * 2.0.pow(attempt - 1)).toLong().coerceAtMost(MAX_RECONNECT_DELAY_MS)
 
         scope.launch {
             delay(delayMs)
             if (webSocket == null) {
-                client.newWebSocket(
-                    Request.Builder().url(wsUrl!!).build(),
-                    createListener()
-                )
+                client.newWebSocket(Request.Builder().url(wsUrl!!).build(), createListener())
             }
         }
     }
 
-    /**
-     * Ensure manager is initialized and connected.
-     * Safe to call repeatedly (idempotent).
-     */
+    /** Ensure manager is initialized and connected. Safe to call repeatedly (idempotent). */
     fun reconnectIfNeeded(context: Context) {
         scope.launch {
             try {

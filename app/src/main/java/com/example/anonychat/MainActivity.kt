@@ -1,10 +1,10 @@
 package com.example.anonychat
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -13,15 +13,16 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -30,14 +31,16 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
+import com.example.anonychat.network.WebSocketManager
 import com.example.anonychat.ui.BirdBubbleService
 import com.example.anonychat.ui.ChatScreen
+import com.example.anonychat.ui.KeyboardProofScreen
 import com.example.anonychat.ui.LoginScreen
 import com.example.anonychat.ui.ProfileScreen
 import com.example.anonychat.ui.RatingsScreen
-import com.example.anonychat.ui.KeyboardProofScreen
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.gson.Gson
+import java.io.File
 import java.net.URLEncoder
 import java.util.UUID
 
@@ -64,10 +67,10 @@ sealed class Screen(val route: String) {
 
     object DirectChat : Screen("directChat/{currentUser}/{myPrefs}/{matchedUser}/{matchedPrefs}") {
         fun createRoute(
-            currentUser: User,
-            myPrefs: Preferences,
-            matchedUser: User,
-            matchedPrefs: Preferences
+                currentUser: User,
+                myPrefs: Preferences,
+                matchedUser: User,
+                matchedPrefs: Preferences
         ): String {
             val gson = Gson()
             val u1 = URLEncoder.encode(gson.toJson(currentUser), "UTF-8")
@@ -79,52 +82,163 @@ sealed class Screen(val route: String) {
     }
 }
 
+private lateinit var takePictureLauncher: ActivityResultLauncher<Uri>
+private lateinit var pickImageLauncher: ActivityResultLauncher<String>
+private lateinit var requestCameraPermission: ActivityResultLauncher<String>
+private lateinit var requestGalleryPermission: ActivityResultLauncher<Array<String>>
+
+private var tempCameraUri: Uri? = null
+private var currentChatPeer: String? = null
+lateinit var requestAudioPermission: ActivityResultLauncher<String>
+var pendingAudioStart: (() -> Unit)? = null
+var pendingCameraAction: (() -> Unit)? = null
+var pendingGalleryAction: (() -> Unit)? = null
+
 @ExperimentalLayoutApi
 class MainActivity : ComponentActivity() {
 
     private var isChatScreenActive = false
     private var navControllerHolder: androidx.navigation.NavController? = null
+    fun openCamera(peerEmail: String) {
+        currentChatPeer = peerEmail
+        requestCameraPermission.launch(Manifest.permission.CAMERA)
+
+        val file = File.createTempFile("IMG_${System.currentTimeMillis()}", ".jpg", cacheDir)
+        tempCameraUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        takePictureLauncher.launch(tempCameraUri)
+    }
+    fun requestMicPermissionAndRun(action: () -> Unit) {
+        pendingAudioStart = action
+        requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
+    fun requestCameraPermissionAndRun(action: () -> Unit) {
+        pendingCameraAction = action
+        requestCameraPermission.launch(Manifest.permission.CAMERA)
+    }
+
+    fun requestGalleryPermissionAndRun(action: () -> Unit) {
+        pendingGalleryAction = action
+        val permissions =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    if (Build.VERSION.SDK_INT >= 34) {
+                        arrayOf(
+                                Manifest.permission.READ_MEDIA_IMAGES,
+                                Manifest.permission.READ_MEDIA_VIDEO,
+                                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+                        )
+                    } else {
+                        arrayOf(
+                                Manifest.permission.READ_MEDIA_IMAGES,
+                                Manifest.permission.READ_MEDIA_VIDEO
+                        )
+                    }
+                } else {
+                    arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+        requestGalleryPermission.launch(permissions)
+    }
+
+    fun openGallery(peerEmail: String) {
+        currentChatPeer = peerEmail
+        pickImageLauncher.launch("image/*")
+    }
 
     // --- BROADCAST RECEIVER TO HANDLE NAVIGATION FROM SERVICE ---
-    private val navigationReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT") {
-                Log.d("MainActivity", "Received navigation broadcast from service.")
-                val myPrefsJson = intent.getStringExtra("my_prefs_json")
-                val matchedPrefsJson = intent.getStringExtra("matched_prefs_json")
-                val myEmail = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                    .getString("user_email", null)
+    private val navigationReceiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent?.action == "com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT") {
+                        Log.d("MainActivity", "Received navigation broadcast from service.")
+                        val myPrefsJson = intent.getStringExtra("my_prefs_json")
+                        val matchedPrefsJson = intent.getStringExtra("matched_prefs_json")
+                        val myEmail =
+                                getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                        .getString("user_email", null)
 
-                if (myPrefsJson != null && matchedPrefsJson != null && myEmail != null) {
-                    val gson = Gson()
-                    try {
-                        val myPrefsBody = gson.fromJson(myPrefsJson, com.example.anonychat.network.GetPreferencesResponse::class.java)
-                        val matchedPrefsBody = gson.fromJson(matchedPrefsJson, com.example.anonychat.network.GetPreferencesResponse::class.java)
+                        if (myPrefsJson != null && matchedPrefsJson != null && myEmail != null) {
+                            val gson = Gson()
+                            try {
+                                val myPrefsBody =
+                                        gson.fromJson(
+                                                myPrefsJson,
+                                                com.example.anonychat.network
+                                                                .GetPreferencesResponse::class
+                                                        .java
+                                        )
+                                val matchedPrefsBody =
+                                        gson.fromJson(
+                                                matchedPrefsJson,
+                                                com.example.anonychat.network
+                                                                .GetPreferencesResponse::class
+                                                        .java
+                                        )
 
-                        val currentUser = User(id = myEmail, username = myPrefsBody.username ?: myEmail.substringBefore('@'), profilePictureUrl = null)
-                        val matchedUser = User(id = matchedPrefsBody.gmail!!, username = matchedPrefsBody.username ?: matchedPrefsBody.gmail.substringBefore('@'), profilePictureUrl = null)
+                                val currentUser =
+                                        User(
+                                                id = myEmail,
+                                                username = myPrefsBody.username
+                                                                ?: myEmail.substringBefore('@'),
+                                                profilePictureUrl = null
+                                        )
+                                val matchedUser =
+                                        User(
+                                                id = matchedPrefsBody.gmail!!,
+                                                username = matchedPrefsBody.username
+                                                                ?: matchedPrefsBody.gmail
+                                                                        .substringBefore('@'),
+                                                profilePictureUrl = null
+                                        )
 
-                        val myPrefs = Preferences(romanceMin = myPrefsBody.romanceRange?.min?.toFloat() ?: 1f, romanceMax = myPrefsBody.romanceRange?.max?.toFloat() ?: 5f, gender = myPrefsBody.gender ?: "male")
-                        val matchedPrefs = Preferences(romanceMin = matchedPrefsBody.romanceRange?.min?.toFloat() ?: 1f, romanceMax = matchedPrefsBody.romanceRange?.max?.toFloat() ?: 5f, gender = matchedPrefsBody.gender ?: "male")
+                                val myPrefs =
+                                        Preferences(
+                                                romanceMin =
+                                                        myPrefsBody.romanceRange?.min?.toFloat()
+                                                                ?: 1f,
+                                                romanceMax =
+                                                        myPrefsBody.romanceRange?.max?.toFloat()
+                                                                ?: 5f,
+                                                gender = myPrefsBody.gender ?: "male"
+                                        )
+                                val matchedPrefs =
+                                        Preferences(
+                                                romanceMin =
+                                                        matchedPrefsBody.romanceRange?.min
+                                                                ?.toFloat()
+                                                                ?: 1f,
+                                                romanceMax =
+                                                        matchedPrefsBody.romanceRange?.max
+                                                                ?.toFloat()
+                                                                ?: 5f,
+                                                gender = matchedPrefsBody.gender ?: "male"
+                                        )
 
-                        val route = Screen.DirectChat.createRoute(currentUser, myPrefs, matchedUser, matchedPrefs)
+                                val route =
+                                        Screen.DirectChat.createRoute(
+                                                currentUser,
+                                                myPrefs,
+                                                matchedUser,
+                                                matchedPrefs
+                                        )
 
-                        // Relaunch the activity to bring it to the foreground
-                        val launchIntent = Intent(context, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                            action = "NAVIGATE_TO_ROUTE"
-                            data = Uri.parse("anonychat://$route")
+                                // Relaunch the activity to bring it to the foreground
+                                val launchIntent =
+                                        Intent(context, MainActivity::class.java).apply {
+                                            addFlags(
+                                                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                                            )
+                                            action = "NAVIGATE_TO_ROUTE"
+                                            data = Uri.parse("anonychat://$route")
+                                        }
+                                startActivity(launchIntent)
+                            } catch (e: Exception) {
+                                Log.e("MainActivity", "Error processing navigation broadcast", e)
+                            }
                         }
-                        startActivity(launchIntent)
-
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "Error processing navigation broadcast", e)
                     }
                 }
             }
-        }
-    }
-
 
     @RequiresApi(Build.VERSION_CODES.O)
     @OptIn(ExperimentalFoundationApi::class)
@@ -133,25 +247,73 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         enableEdgeToEdge()
         checkOverlayPermission()
+        requestCameraPermission =
+                registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                    if (granted) {
+                        pendingCameraAction?.invoke()
+                        pendingCameraAction = null
+                    }
+                }
+        requestAudioPermission =
+                registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                    if (granted) {
+                        pendingAudioStart?.invoke()
+                        pendingAudioStart = null
+                    }
+                }
+
+        requestGalleryPermission =
+                registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+                        results ->
+                    if (results.values.any { it }) {
+                        pendingGalleryAction?.invoke()
+                        pendingGalleryAction = null
+                    }
+                }
+
+        takePictureLauncher =
+                registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+                    if (success && tempCameraUri != null && currentChatPeer != null) {
+                        val localId = "media-${UUID.randomUUID()}"
+                        WebSocketManager.sendMedia(
+                                currentChatPeer!!,
+                                tempCameraUri!!,
+                                "image/jpeg",
+                                localId
+                        )
+                    }
+                }
+
+        pickImageLauncher =
+                registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+                    if (uri != null && currentChatPeer != null) {
+                        val localId = "media-${UUID.randomUUID()}"
+                        WebSocketManager.sendMedia(currentChatPeer!!, uri, "image/jpeg", localId)
+                    }
+                }
 
         // Register the broadcast receiver
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(navigationReceiver, IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"), RECEIVER_EXPORTED)
+            registerReceiver(
+                    navigationReceiver,
+                    IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"),
+                    RECEIVER_EXPORTED
+            )
         } else {
             registerReceiver(
-                navigationReceiver,
-                IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"),
-                RECEIVER_NOT_EXPORTED // <-- ADD THIS FLAG
-            )        }
-
+                    navigationReceiver,
+                    IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"),
+                    RECEIVER_NOT_EXPORTED // <-- ADD THIS FLAG
+            )
+        }
 
         setContent {
             AnonychatTheme {
                 NavGraph(
-                    intent = intent,
-                    onChatActive = { isChatScreenActive = true },
-                    onChatInactive = { isChatScreenActive = false },
-                    onNavControllerReady = { navControllerHolder = it }
+                        intent = intent,
+                        onChatActive = { isChatScreenActive = true },
+                        onChatInactive = { isChatScreenActive = false },
+                        onNavControllerReady = { navControllerHolder = it }
                 )
             }
         }
@@ -162,7 +324,6 @@ class MainActivity : ComponentActivity() {
         // Handle intents received while the activity is alive
         navControllerHolder?.let { handleIntentNavigation(it, intent) }
     }
-
 
     override fun onDestroy() {
         super.onDestroy()
@@ -188,17 +349,21 @@ class MainActivity : ComponentActivity() {
     private fun checkOverlayPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (!Settings.canDrawOverlays(this)) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                )
+                val intent =
+                        Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                        )
                 startActivity(intent)
             }
         }
     }
 
     // New helper to centralize intent handling
-    private fun handleIntentNavigation(navController: androidx.navigation.NavController, intent: Intent?) {
+    private fun handleIntentNavigation(
+            navController: androidx.navigation.NavController,
+            intent: Intent?
+    ) {
         if (intent?.action == "NAVIGATE_TO_ROUTE" && intent.data != null) {
             val route = intent.data.toString().substringAfter("anonychat://")
             if (route.isNotBlank()) {
@@ -215,98 +380,119 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.N)
     @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
     @Composable
     fun NavGraph(
-        intent: Intent?,
-        onChatActive: () -> Unit,
-        onChatInactive: () -> Unit,
-        onNavControllerReady: (androidx.navigation.NavController) -> Unit
+            intent: Intent?,
+            onChatActive: () -> Unit,
+            onChatInactive: () -> Unit,
+            onNavControllerReady: (androidx.navigation.NavController) -> Unit
     ) {
         val navController = rememberNavController()
 
         // Give the activity a reference to the NavController
-        LaunchedEffect(navController) {
-            onNavControllerReady(navController)
-        }
+        LaunchedEffect(navController) { onNavControllerReady(navController) }
 
         // --- Handle intent from the service to navigate to ChatScreen ---
-        LaunchedEffect(intent) {
-            handleIntentNavigation(navController, intent)
-        }
+        LaunchedEffect(intent) { handleIntentNavigation(navController, intent) }
 
         NavHost(navController = navController, startDestination = Screen.Login.route) {
             composable(Screen.Login.route) {
-                LoginScreen(onLoginClick = { user ->
-                    navController.navigate(Screen.Chat.createRoute(user))
-                })
+                LoginScreen(
+                        onLoginClick = { user ->
+                            navController.navigate(Screen.Chat.createRoute(user))
+                        }
+                )
             }
 
             composable(
-                Screen.Chat.route,
-                arguments = listOf(navArgument("user") { type = NavType.StringType })
+                    Screen.Chat.route,
+                    arguments = listOf(navArgument("user") { type = NavType.StringType })
             ) { backStackEntry ->
                 val userJson = backStackEntry.arguments?.getString("user")
-                val user = try {
-                    if (userJson != null) Gson().fromJson(userJson, User::class.java)
-                    else User("unknown", "Guest", "")
-                } catch (e: Exception) {
-                    User("unknown", "Guest", "")
-                }
+                val user =
+                        try {
+                            if (userJson != null) Gson().fromJson(userJson, User::class.java)
+                            else User("unknown", "Guest", "")
+                        } catch (e: Exception) {
+                            User("unknown", "Guest", "")
+                        }
                 ChatScreen(
-                    user = user,
-                    onChatActive = onChatActive,
-                    onChatInactive = onChatInactive,
-                    onNavigateToProfile = { username ->
-                        navController.navigate(Screen.Profile.createRoute(username))
-                    },
-                    onNavigateToDirectChat = { currentUser, myPrefs, matchedUser, matchedPrefs ->
-                        val route = Screen.DirectChat.createRoute(currentUser, myPrefs, matchedUser, matchedPrefs)
-                        navController.navigate(route)
-                    }
+                        user = user,
+                        onChatActive = onChatActive,
+                        onChatInactive = onChatInactive,
+                        onNavigateToProfile = { username ->
+                            navController.navigate(Screen.Profile.createRoute(username))
+                        },
+                        onNavigateToDirectChat = { currentUser, myPrefs, matchedUser, matchedPrefs
+                            ->
+                            val route =
+                                    Screen.DirectChat.createRoute(
+                                            currentUser,
+                                            myPrefs,
+                                            matchedUser,
+                                            matchedPrefs
+                                    )
+                            navController.navigate(route)
+                        }
                 )
             }
 
             composable(
-                Screen.DirectChat.route,
-                arguments = listOf(
-                    navArgument("currentUser") { type = NavType.StringType },
-                    navArgument("myPrefs") { type = NavType.StringType },
-                    navArgument("matchedUser") { type = NavType.StringType },
-                    navArgument("matchedPrefs") { type = NavType.StringType }
-                )
+                    Screen.DirectChat.route,
+                    arguments =
+                            listOf(
+                                    navArgument("currentUser") { type = NavType.StringType },
+                                    navArgument("myPrefs") { type = NavType.StringType },
+                                    navArgument("matchedUser") { type = NavType.StringType },
+                                    navArgument("matchedPrefs") { type = NavType.StringType }
+                            )
             ) { entry ->
-                val currentUserJson = java.net.URLDecoder.decode(entry.arguments!!.getString("currentUser")!!, "UTF-8")
-                val myPrefsJson = java.net.URLDecoder.decode(entry.arguments!!.getString("myPrefs")!!, "UTF-8")
-                val matchedUserJson = java.net.URLDecoder.decode(entry.arguments!!.getString("matchedUser")!!, "UTF-8")
-                val matchedPrefsJson = java.net.URLDecoder.decode(entry.arguments!!.getString("matchedPrefs")!!, "UTF-8")
+                val currentUserJson =
+                        java.net.URLDecoder.decode(
+                                entry.arguments!!.getString("currentUser")!!,
+                                "UTF-8"
+                        )
+                val myPrefsJson =
+                        java.net.URLDecoder.decode(
+                                entry.arguments!!.getString("myPrefs")!!,
+                                "UTF-8"
+                        )
+                val matchedUserJson =
+                        java.net.URLDecoder.decode(
+                                entry.arguments!!.getString("matchedUser")!!,
+                                "UTF-8"
+                        )
+                val matchedPrefsJson =
+                        java.net.URLDecoder.decode(
+                                entry.arguments!!.getString("matchedPrefs")!!,
+                                "UTF-8"
+                        )
 
                 val gson = Gson()
                 val currentUser = gson.fromJson(currentUserJson, User::class.java)
-                val myPrefs = gson.fromJson(myPrefsJson, Preferences::class.java)
                 val matchedUser = gson.fromJson(matchedUserJson, User::class.java)
                 val matchedPrefs = gson.fromJson(matchedPrefsJson, Preferences::class.java)
 
                 KeyboardProofScreen(
-                    currentUser = currentUser,
-                    matchedUser = matchedUser,
-                    matchedUserPrefs = matchedPrefs,
-                    matchedUserGmail = matchedUser.id,
-                    onBack = { navController.popBackStack() }
+                        currentUser = currentUser,
+                        matchedUser = matchedUser,
+                        matchedUserPrefs = matchedPrefs,
+                        matchedUserGmail = matchedUser.id,
+                        onBack = { navController.popBackStack() }
                 )
             }
 
             composable(
-                Screen.Profile.route,
-                arguments = listOf(navArgument("username") { type = NavType.StringType })
+                    Screen.Profile.route,
+                    arguments = listOf(navArgument("username") { type = NavType.StringType })
             ) { backStackEntry ->
                 val username = backStackEntry.arguments?.getString("username") ?: ""
                 ProfileScreen(navController = navController, initialUsername = username)
             }
 
-            composable(Screen.Ratings.route) {
-                RatingsScreen(navController = navController)
-            }
+            composable(Screen.Ratings.route) { RatingsScreen(navController = navController) }
         }
     }
 }

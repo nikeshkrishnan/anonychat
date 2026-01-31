@@ -78,7 +78,17 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.0") {
         exclude(group = "androidx.media3", module = "media3-ui")
     }
-    implementation ("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation(libs.androidx.foundation)
+
+    // CameraX dependencies
+    val camerax_version = "1.3.4"
+    implementation("androidx.camera:camera-core:${camerax_version}")
+    implementation("androidx.camera:camera-camera2:${camerax_version}")
+    implementation("androidx.camera:camera-lifecycle:${camerax_version}")
+    implementation("androidx.camera:camera-view:${camerax_version}")
+    implementation("androidx.camera:camera-video:${camerax_version}")
+    implementation("androidx.camera:camera-extensions:${camerax_version}")
 
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     implementation ("androidx.room:room-runtime:2.6.1")
@@ -87,6 +97,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.2.0")
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
     implementation("io.coil-kt:coil-gif:2.7.0")
+    implementation("io.coil-kt:coil-video:2.7.0")
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.compose.animation.core)
     implementation(libs.androidx.compose.foundation.layout)
