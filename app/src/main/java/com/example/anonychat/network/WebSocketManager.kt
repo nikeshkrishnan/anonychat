@@ -1,12 +1,15 @@
 package com.example.anonychat.network
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.exifinterface.media.ExifInterface
 import androidx.room.*
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -61,13 +64,75 @@ interface PendingMessageDao {
     @Query("DELETE FROM pending_messages WHERE messageId = :id") suspend fun delete(id: String)
 }
 
+@Entity(tableName = "chat_history")
+data class ChatHistoryEntity(
+        @PrimaryKey val id: String,
+        val fromEmail: String,
+        val toEmail: String,
+        val text: String,
+        val audioUri: String?,
+        val amplitudes: String, // Comma separated
+        val mediaUri: String?,
+        val mediaType: String?,
+        val mediaId: String?,
+        val isDownloading: Boolean,
+        val timestamp: Long,
+        val status: String,
+        val sequence: Long = 0 // Auto-increment field for ordering
+)
+
+@Dao
+interface ChatHistoryDao {
+    @Query(
+            "SELECT * FROM chat_history WHERE (fromEmail = :user1 AND toEmail = :user2) OR (fromEmail = :user2 AND toEmail = :user1) ORDER BY sequence ASC"
+    )
+    suspend fun getConversation(user1: String, user2: String): List<ChatHistoryEntity>
+
+    @Query("SELECT COALESCE(MAX(sequence), 0) + 1 FROM chat_history")
+    suspend fun getNextSequence(): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(msg: ChatHistoryEntity)
+
+    @Query("UPDATE chat_history SET status = :status WHERE id = :messageId")
+    suspend fun updateStatus(messageId: String, status: String)
+
+    @Query(
+            "UPDATE chat_history SET mediaUri = :uri, isDownloading = :isDownloading WHERE id = :messageId"
+    )
+    suspend fun updateMediaDownload(messageId: String, uri: String, isDownloading: Boolean)
+
+    @Query(
+            "UPDATE chat_history SET audioUri = :uri, isDownloading = :isDownloading WHERE id = :messageId"
+    )
+    suspend fun updateAudioDownload(messageId: String, uri: String, isDownloading: Boolean)
+}
+
+class Converters {
+    @TypeConverter
+    fun fromFloatList(value: List<Float>): String {
+        return value.joinToString(",")
+    }
+
+    @TypeConverter
+    fun toFloatList(value: String): List<Float> {
+        if (value.isEmpty()) return emptyList()
+        return value.split(",").mapNotNull { it.toFloatOrNull() }
+    }
+}
+
 /* ---------------------------------------------------
    ROOM – DATABASE (version bumped to 2)
    Includes migration 1 -> 2 to add new columns
 --------------------------------------------------- */
-@Database(entities = [PendingMessageEntity::class], version = 2, exportSchema = false)
+@Database(
+        entities = [PendingMessageEntity::class, ChatHistoryEntity::class],
+        version = 4,
+        exportSchema = false
+)
+@TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun pendingMessageDao(): PendingMessageDao
+    abstract fun chatHistoryDao(): ChatHistoryDao
 }
 
 /* Migration from v1 -> v2: add state and lastSentAt columns with defaults */
@@ -90,8 +155,11 @@ val MIGRATION_1_2 =
 sealed class WebSocketEvent {
     data class NewMessage(val message: ChatMessage) : WebSocketEvent()
     data class DeliveryAck(val messageId: String) : WebSocketEvent()
+    data class MessageReadAck(val messageId: String) : WebSocketEvent()
     data class DeliveryFailed(val messageId: String, val reason: String) : WebSocketEvent()
     data class MessageSentAck(val messageId: String) : WebSocketEvent()
+    data class PeerPresence(val from: String, val status: String, val lastSeen: Long) :
+            WebSocketEvent()
 }
 
 /* ---------------------------------------------------
@@ -132,8 +200,8 @@ private val connectMutex = Mutex()
 @Volatile private var readyState: ReadyState = ReadyState.NOT_READY
 
 // Media endpoints
-private const val MEDIA_UPLOAD = "http://192.168.1.90:8080/media/upload"
-private const val MEDIA_DOWNLOAD_ACK = "http://192.168.1.90:8080/media/download/ack"
+private const val MEDIA_UPLOAD = "http://192.168.1.91:8080/media/upload"
+private const val MEDIA_DOWNLOAD_ACK = "http://192.168.1.91:8080/media/download/ack"
 
 private lateinit var appContext: Context
 
@@ -256,7 +324,54 @@ object WebSocketManager {
     /* ---------------------------------------------------
        OKHTTP (with ping)
     --------------------------------------------------- */
-    private val client = OkHttpClient.Builder().retryOnConnectionFailure(true).build()
+    private val client =
+            OkHttpClient.Builder()
+                    .retryOnConnectionFailure(true)
+                    .addInterceptor { chain ->
+                        val request = chain.request()
+                        Log.e(
+                                "WebSocketManager",
+                                "[APP-INTERCEPTOR] Outgoing request to: ${request.url}"
+                        )
+                        chain.proceed(request)
+                    }
+                    .addNetworkInterceptor { chain ->
+                        val request = chain.request()
+                        Log.e(
+                                "WebSocketManager",
+                                "[NET-INTERCEPTOR] Handshake headers for: ${request.url}"
+                        )
+                        request.headers.forEach { (name, value) ->
+                            Log.e("WebSocketManager", "  $name: $value")
+                        }
+                        chain.proceed(request)
+                    }
+                    .eventListenerFactory { call ->
+                        object : EventListener() {
+                            override fun requestHeadersEnd(call: Call, request: Request) {
+                                Log.e(
+                                        "WebSocketManager",
+                                        "[EVENT-REQ] Headers sent for ${request.url}:"
+                                )
+                                request.headers.forEach { (name, value) ->
+                                    Log.e("WebSocketManager", "  $name: $value")
+                                }
+                            }
+                            override fun connectFailed(
+                                    call: Call,
+                                    inetSocketAddress: java.net.InetSocketAddress,
+                                    proxy: java.net.Proxy,
+                                    protocol: Protocol?,
+                                    ioe: java.io.IOException
+                            ) {
+                                Log.e(
+                                        "WebSocketManager",
+                                        "[EVENT-FAIL] Connection failed: ${ioe.message}"
+                                )
+                            }
+                        }
+                    }
+                    .build()
 
     private var webSocket: WebSocket? = null
 
@@ -269,6 +384,9 @@ object WebSocketManager {
     private var curruser: String? = null
     private var wsUrl: String? = null
     private var reconnectAttempt = 0
+
+    private const val MEDIA_BASE_URL = "http://192.168.1.91:8080"
+    private const val MEDIA_UPLOAD = "$MEDIA_BASE_URL/upload"
 
     private const val MAX_RETRIES = 5
     private const val MAX_RECONNECT_DELAY_MS = 30_000L
@@ -312,6 +430,7 @@ object WebSocketManager {
     private const val SERVER_LIVENESS_TIMEOUT_MS = 45_000L
     @Volatile private var lastServerMessageAt: Long = 0
     private var livenessJob: Job? = null
+    private lateinit var historyDao: ChatHistoryDao
 
     private fun startLivenessMonitor() {
         livenessJob?.cancel()
@@ -392,6 +511,7 @@ object WebSocketManager {
                         .build()
 
         dao = db.pendingMessageDao()
+        historyDao = db.chatHistoryDao()
 
         pendingQueue.addAll(
                 dao.getAll().map {
@@ -420,18 +540,33 @@ object WebSocketManager {
         check(initialized) { "WebSocketManager.init(context) must be called first" }
     }
 
-    private suspend fun downloadMediaAndAck(url: String, mediaId: String) {
+    private suspend fun downloadMediaAndAck(
+            url: String,
+            mediaId: String,
+            chatMessage: ChatMessage? = null
+    ) {
         try {
             val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             val token = prefs.getString("access_token", null)
 
-            val reqBuilder = Request.Builder().url(url)
+            val absoluteUrl = ensureAbsoluteUrl(url)
+            val reqBuilder = Request.Builder().url(absoluteUrl)
             if (token != null) reqBuilder.header("Authorization", "Bearer $token")
 
             client.newCall(reqBuilder.build()).execute().use { res ->
                 if (!res.isSuccessful) return
 
-                val filename = url.substringAfterLast('/')
+                // If a ChatMessage was provided, update it with "Downloading" state
+                if (chatMessage != null) {
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(
+                                WebSocketEvent.NewMessage(chatMessage.copy(isDownloading = true))
+                        )
+                    }
+                }
+
+                val extension = url.substringAfterLast('.', "bin").substringBefore('?')
+                val filename = "media_${mediaId.replace(":", "_")}.${extension}"
                 val file = File(appContext.filesDir, filename)
 
                 res.body?.byteStream()?.use { input ->
@@ -439,6 +574,35 @@ object WebSocketManager {
                 }
 
                 sendMediaDownloadAck(mediaId)
+
+                // If a ChatMessage was provided, update it with the local path and notify UI
+                if (chatMessage != null) {
+                    val localUri = "file://${file.absolutePath}"
+                    val updatedMsg =
+                            when {
+                                chatMessage.audioUri != null ->
+                                        chatMessage.copy(audioUri = localUri, isDownloading = false)
+                                chatMessage.mediaType == "IMAGE" ||
+                                        chatMessage.mediaType == "GIF" ->
+                                        chatMessage.copy(
+                                                mediaUri = localUri,
+                                                isDownloading = false,
+                                                status = com.example.anonychat.ui.MessageStatus.Read
+                                        )
+                                chatMessage.mediaType != null ->
+                                        chatMessage.copy(mediaUri = localUri, isDownloading = false)
+                                else -> chatMessage.copy(isDownloading = false)
+                            }
+                    saveToHistory(updatedMsg)
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.NewMessage(updatedMsg))
+                    }
+
+                    // After download, for IMAGE and GIF, we send MessageReadAck
+                    if (updatedMsg.mediaType == "IMAGE" || updatedMsg.mediaType == "GIF") {
+                        sendMessageReadAck(updatedMsg.id, updatedMsg.from)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e("WebSocketManager", "Media download failed", e)
@@ -528,7 +692,7 @@ object WebSocketManager {
                     }
 
                     wsUrl =
-                            "ws://192.168.1.90:8080/?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
+                            "ws://192.168.1.91:8080/?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
                     Log.i("WebSocketManager", "connect: Constructed WS URL: $wsUrl")
 
                     // Atomic boolean to ensure we resume the continuation exactly once
@@ -536,8 +700,15 @@ object WebSocketManager {
 
                     val listener = createListener(cont, resumed)
 
+                    val request = Request.Builder().url(wsUrl!!).build()
+
+                    Log.e(
+                            "WebSocketManager",
+                            "Initiating WebSocket connection for $email (headers logged by NETWORK/APP interceptors)"
+                    )
+
                     // newWebSocket returns a WebSocket instance; keep reference for cancellation
-                    val ws = client.newWebSocket(Request.Builder().url(wsUrl!!).build(), listener)
+                    val ws = client.newWebSocket(request, listener)
 
                     // If the coroutine is cancelled (timeout or external), close socket & reset
                     // state
@@ -568,8 +739,8 @@ object WebSocketManager {
         }
     }
 
-    fun downloadMediaManually(url: String, mediaId: String) {
-        scope.launch { downloadMediaAndAck(url, mediaId) }
+    fun downloadMediaManually(url: String, mediaId: String, chatMessage: ChatMessage? = null) {
+        scope.launch { downloadMediaAndAck(url, mediaId, chatMessage) }
     }
 
     /**
@@ -612,12 +783,66 @@ object WebSocketManager {
 
                 Log.e("WebSocketManager", "[COMPRESS] Image exceeds 2MB, compressing...")
 
+                // Read orientation before decoding
+                val orientation =
+                        try {
+                            appContext.contentResolver.openInputStream(fileUri)?.use { input ->
+                                ExifInterface(input)
+                                        .getAttributeInt(
+                                                ExifInterface.TAG_ORIENTATION,
+                                                ExifInterface.ORIENTATION_NORMAL
+                                        )
+                            }
+                                    ?: ExifInterface.ORIENTATION_NORMAL
+                        } catch (e: Exception) {
+                            Log.e("WebSocketManager", "[COMPRESS] Failed to read orientation", e)
+                            ExifInterface.ORIENTATION_NORMAL
+                        }
+
                 // Decode the bitmap
-                val originalBitmap =
+                var originalBitmap =
                         appContext.contentResolver.openInputStream(fileUri)?.use { input ->
                             android.graphics.BitmapFactory.decodeStream(input)
                         }
                                 ?: return@withContext fileUri
+
+                // Rotate bitmap if needed
+                if (orientation != ExifInterface.ORIENTATION_NORMAL) {
+                    val matrix = Matrix()
+                    when (orientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                        ExifInterface.ORIENTATION_TRANSPOSE -> {
+                            matrix.postRotate(90f)
+                            matrix.postScale(-1f, 1f)
+                        }
+                        ExifInterface.ORIENTATION_TRANSVERSE -> {
+                            matrix.postRotate(270f)
+                            matrix.postScale(-1f, 1f)
+                        }
+                    }
+                    try {
+                        val rotatedBitmap =
+                                Bitmap.createBitmap(
+                                        originalBitmap,
+                                        0,
+                                        0,
+                                        originalBitmap.width,
+                                        originalBitmap.height,
+                                        matrix,
+                                        true
+                                )
+                        if (rotatedBitmap != originalBitmap) {
+                            originalBitmap.recycle()
+                            originalBitmap = rotatedBitmap
+                        }
+                    } catch (e: Exception) {
+                        Log.e("WebSocketManager", "[COMPRESS] Failed to rotate bitmap", e)
+                    }
+                }
 
                 // Create a temporary file for the compressed image
                 val compressedFile =
@@ -705,13 +930,40 @@ object WebSocketManager {
         }
     }
     @RequiresApi(Build.VERSION_CODES.N)
-    fun sendMedia(toEmail: String, fileUri: Uri, contentType: String, localId: String) {
+    fun sendMedia(
+            toEmail: String,
+            fileUri: Uri,
+            contentType: String,
+            localId: String,
+            amplitudes: List<Float>? = null
+    ) {
         Log.e(
                 "WebSocketManager",
                 "[TRACE] sendMedia() ENTRY → toEmail=$toEmail, fileUri=$fileUri, contentType=$contentType, localId=$localId"
         )
         ensureInit()
         Log.e("WebSocketManager", "[TRACE] sendMedia() ensureInit() completed")
+
+        val chatMessage =
+                ChatMessage(
+                        id = localId,
+                        from = curruser ?: "",
+                        to = toEmail,
+                        text =
+                                if (contentType.startsWith("audio")) "[Audio Message]"
+                                else "[Media Message]",
+                        audioUri =
+                                if (contentType.startsWith("audio")) fileUri.toString() else null,
+                        mediaUri =
+                                if (contentType.startsWith("audio")) null else fileUri.toString(),
+                        mediaType =
+                                if (contentType.startsWith("audio")) null
+                                else if (contentType.startsWith("image")) "IMAGE"
+                                else if (contentType.contains("gif")) "GIF" else "VIDEO",
+                        amplitudes = amplitudes ?: emptyList(),
+                        status = com.example.anonychat.ui.MessageStatus.Sending
+                )
+        saveToHistory(chatMessage)
 
         scope.launch {
             val totalStart = System.currentTimeMillis()
@@ -806,13 +1058,14 @@ object WebSocketManager {
                             "[TRACE] sendMedia() RequestBody created in ${System.currentTimeMillis() - bodyStart}ms"
                     )
 
-                    val extension = when {
-                        contentType.contains("gif") -> "gif"
-                        contentType.contains("webp") -> "webp"
-                        contentType.contains("png") -> "png"
-                        contentType.contains("video") -> "mp4"
-                        else -> "jpg"
-                    }
+                    val extension =
+                            when {
+                                contentType.contains("gif") -> "gif"
+                                contentType.contains("webp") -> "webp"
+                                contentType.contains("png") -> "png"
+                                contentType.contains("video") -> "mp4"
+                                else -> "jpg"
+                            }
                     val fileName = "upload_${System.currentTimeMillis()}.$extension"
                     Log.e("WebSocketManager", "[TRACE] sendMedia() fileName=$fileName")
 
@@ -864,10 +1117,11 @@ object WebSocketManager {
                         Log.e("WebSocketManager", "[TRACE] sendMedia() parsing response JSON")
                         val responseJson = JSONObject(res.body!!.string())
                         val mediaId = responseJson.getString("mediaId")
-                        val url = responseJson.getString("url")
+                        val rawUrl = responseJson.getString("url")
+                        val url = ensureAbsoluteUrl(rawUrl)
                         Log.e(
                                 "WebSocketManager",
-                                "[TRACE] sendMedia() response parsed → mediaId=$mediaId, url=$url"
+                                "[TRACE] sendMedia() response parsed → mediaId=$mediaId, url=$url (raw=$rawUrl)"
                         )
 
                         Log.e("WebSocketManager", "[TRACE] sendMedia() building WebSocket payload")
@@ -882,6 +1136,11 @@ object WebSocketManager {
                                             put("mediaId", mediaId)
                                             put("url", url)
                                             put("contentType", contentType)
+                                            if (amplitudes != null) {
+                                                val ampJson = org.json.JSONArray()
+                                                amplitudes.forEach { ampJson.put(it.toDouble()) }
+                                                put("amplitudes", ampJson)
+                                            }
                                         }
                                         .toString()
                         Log.e("WebSocketManager", "[TRACE] sendMedia() payload created → $payload")
@@ -1080,6 +1339,12 @@ object WebSocketManager {
 
                 Log.i("WebSocketManager", "WebSocket CONNECTED (waiting for ready_ack)")
 
+                // Log response headers
+                Log.e("WebSocketManager", "WebSocket Response Headers:")
+                response.headers.forEach { (name, value) ->
+                    Log.e("WebSocketManager", "  $name: $value")
+                }
+
                 // reset liveness timestamp and start monitors
                 lastServerMessageAt = System.currentTimeMillis()
                 startReadyHandshake()
@@ -1166,6 +1431,26 @@ object WebSocketManager {
         }
     }
 
+    fun sendMessageReadAck(messageId: String, senderGmail: String) {
+        if (readyState != ReadyState.READY) return
+
+        val payload =
+                JSONObject()
+                        .apply {
+                            put("type", "message_read_ack")
+                            put("messageId", messageId)
+                            put("to", senderGmail)
+                        }
+                        .toString()
+
+        try {
+            webSocket?.send(payload)
+            Log.i("WebSocketManager", "message_read_ack sent for $messageId to=$senderGmail")
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Read Ack send failed", e)
+        }
+    }
+
     /**
      * Handle incoming message in coroutine context (IO), parse and emit to UI on Main.immediate.
      */
@@ -1205,28 +1490,99 @@ object WebSocketManager {
                 "media" -> {
                     val localEmail = ws.request().url.queryParameter("gmail") ?: ""
                     val mediaId = json.getString("mediaId")
-                    val url = json.getString("url")
+                    val rawUrl = json.getString("url")
+                    val url = ensureAbsoluteUrl(rawUrl)
                     val contentType = json.optString("contentType") // image/jpeg, audio/mpeg, etc.
 
                     val chatMessage =
-                            ChatMessage(
-                                    id = messageId,
-                                    from = json.getString("from"),
-                                    to = localEmail,
-                                    text = url,
-                                    timestamp = json.optLong("timestamp")
-                            )
+                            when {
+                                contentType.startsWith("audio") -> {
+                                    ChatMessage(
+                                            id = messageId,
+                                            from = json.getString("from"),
+                                            to = localEmail,
+                                            text = "[Audio Message]",
+                                            audioUri = url,
+                                            amplitudes =
+                                                    json.optJSONArray("amplitudes")?.let { arr ->
+                                                        List(arr.length()) { i ->
+                                                            arr.getDouble(i).toFloat()
+                                                        }
+                                                    }
+                                                            ?: emptyList(),
+                                            mediaId = mediaId,
+                                            timestamp = json.optLong("timestamp")
+                                    )
+                                }
+                                contentType == "image/gif" -> {
+                                    ChatMessage(
+                                            id = messageId,
+                                            from = json.getString("from"),
+                                            to = localEmail,
+                                            text = "[GIF]",
+                                            mediaUri = url,
+                                            mediaType = "GIF",
+                                            mediaId = mediaId,
+                                            timestamp = json.optLong("timestamp")
+                                    )
+                                }
+                                contentType.startsWith("image") -> {
+                                    ChatMessage(
+                                            id = messageId,
+                                            from = json.getString("from"),
+                                            to = localEmail,
+                                            text = "[Image]",
+                                            mediaUri = url,
+                                            mediaType = "IMAGE",
+                                            mediaId = mediaId,
+                                            timestamp = json.optLong("timestamp")
+                                    )
+                                }
+                                contentType.startsWith("video") -> {
+                                    ChatMessage(
+                                            id = messageId,
+                                            from = json.getString("from"),
+                                            to = localEmail,
+                                            text = "[Video]",
+                                            mediaUri = url,
+                                            mediaType = "VIDEO",
+                                            mediaId = mediaId,
+                                            timestamp = json.optLong("timestamp")
+                                    )
+                                }
+                                else -> {
+                                    ChatMessage(
+                                            id = messageId,
+                                            from = json.getString("from"),
+                                            to = localEmail,
+                                            text = url,
+                                            mediaId = mediaId,
+                                            timestamp = json.optLong("timestamp")
+                                    )
+                                }
+                            }
 
+                    saveToHistory(chatMessage)
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.NewMessage(chatMessage))
                     }
 
-                    // ✅ Always send delivery ACK immediately
-                    sendMessageReceivedAck(messageId, json.getString("from"))
+                    val shouldAutoDownload =
+                            contentType.startsWith("audio") || contentType == "image/gif"
 
-                    // 🎵 Auto-download ONLY audio
-                    if (contentType.startsWith("audio")) {
-                        scope.launch { downloadMediaAndAck(url, mediaId) }
+                    if (shouldAutoDownload) {
+                        val downloadingMsg = chatMessage.copy(isDownloading = true)
+                        saveToHistory(downloadingMsg)
+                        withContext(Dispatchers.Main.immediate) {
+                            _events.emit(WebSocketEvent.NewMessage(downloadingMsg))
+                        }
+                        scope.launch {
+                            downloadMediaAndAck(url, mediaId, downloadingMsg)
+                            sendMessageReceivedAck(messageId, json.getString("from"))
+                        }
+                    } else {
+                        // Image/Video: Ack immediately, download will be manual via UI
+                        sendMessageReceivedAck(messageId, json.getString("from"))
                     }
                 }
                 "chat_message" -> {
@@ -1245,6 +1601,7 @@ object WebSocketManager {
                     // {"type":"chat_message","to":"b18559d0aa9a352c:6fb7ba6e-6936-ee64-b93b-9090b139838e@email.com","from":"ws_user1@example.com","messageId":"147575eb-9672-469a-a7de-a0960d74e963","id":"147575eb-9672-469a-a7de-a0960d74e963","fromUserId":"ik1a42oq87hhrsfi8hdz3q:atr7uticpcv","originInstance":"chat-8"}
 
                     // Emit on Main.immediate so UI receives it promptly
+                    saveToHistory(chatMessage)
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.NewMessage(chatMessage))
                     }
@@ -1255,8 +1612,26 @@ object WebSocketManager {
 
                     // This means: peer has RECEIVED the message
                     // UI should show delivered (double tick, etc.)
+                    scope.launch {
+                        historyDao.updateStatus(
+                                messageId,
+                                com.example.anonychat.ui.MessageStatus.Delivered.name
+                        )
+                    }
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.DeliveryAck(messageId))
+                    }
+                }
+                "message_read_ack" -> {
+                    Log.e("WebSocketManager", "message_read_ack received for $messageId")
+                    scope.launch {
+                        historyDao.updateStatus(
+                                messageId,
+                                com.example.anonychat.ui.MessageStatus.Read.name
+                        )
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.MessageReadAck(messageId))
                     }
                 }
                 "delivery_ack" -> {
@@ -1309,6 +1684,18 @@ object WebSocketManager {
                                 "WebSocketManager",
                                 "delivery_failed for unknown messageId: $messageId"
                         )
+                    }
+                }
+                "peer_presence" -> {
+                    val from = json.getString("from")
+                    val status = json.getString("status")
+                    val lastSeen = json.optLong("lastSeen", 0L)
+                    Log.i(
+                            "WebSocketManager",
+                            "peer_presence: $from is $status (lastSeen: $lastSeen)"
+                    )
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.PeerPresence(from, status, lastSeen))
                     }
                 }
                 else -> {
@@ -1378,6 +1765,16 @@ object WebSocketManager {
 
     @RequiresApi(Build.VERSION_CODES.N)
     fun sendMessage(toEmail: String, text: String, localId: String) {
+        val chatMessage =
+                ChatMessage(
+                        id = localId,
+                        from = curruser ?: "",
+                        to = toEmail,
+                        text = text,
+                        status = com.example.anonychat.ui.MessageStatus.Sending
+                )
+        saveToHistory(chatMessage)
+
         ensureInit()
 
         val payload =
@@ -1659,6 +2056,14 @@ object WebSocketManager {
         }
     }
 
+    private fun ensureAbsoluteUrl(url: String): String {
+        return if (url.startsWith("/")) {
+            "$MEDIA_BASE_URL$url"
+        } else {
+            url
+        }
+    }
+
     /** Ensure manager is initialized and connected. Safe to call repeatedly (idempotent). */
     fun reconnectIfNeeded(context: Context) {
         scope.launch {
@@ -1721,5 +2126,71 @@ object WebSocketManager {
             // Unregister network callback to avoid leaks when explicitly stopping
             unregisterNetworkCallback()
         }
+    }
+
+    fun updateMessageStatus(messageId: String, status: com.example.anonychat.ui.MessageStatus) {
+        scope.launch { historyDao.updateStatus(messageId, status.name) }
+    }
+
+    fun getChatHistory(
+            user1: String,
+            user2: String
+    ): kotlinx.coroutines.flow.Flow<List<ChatMessage>> =
+            kotlinx.coroutines.flow.flow {
+                val history = historyDao.getConversation(user1, user2)
+                emit(history.map { it.toModel() })
+            }
+
+    private fun saveToHistory(message: ChatMessage) {
+        scope.launch {
+            try {
+                val nextSeq = historyDao.getNextSequence()
+                historyDao.upsert(message.toHistoryEntity(nextSeq))
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to save message to history", e)
+            }
+        }
+    }
+
+    private fun ChatMessage.toHistoryEntity(sequence: Long = 0): ChatHistoryEntity {
+        return ChatHistoryEntity(
+                id = id,
+                fromEmail = from,
+                toEmail = to,
+                text = text,
+                audioUri = audioUri,
+                amplitudes = amplitudes.joinToString(","),
+                mediaUri = mediaUri,
+                mediaType = mediaType,
+                mediaId = mediaId,
+                isDownloading = isDownloading,
+                timestamp = timestamp,
+                status = status.name,
+                sequence = sequence
+        )
+    }
+
+    private fun ChatHistoryEntity.toModel(): ChatMessage {
+        // Fix for legacy audio messages that were saved as VIDEO with [Audio Message] text
+        val isLegacyAudio = mediaType == "VIDEO" && text == "[Audio Message]" && audioUri == null
+
+        return ChatMessage(
+                id = id,
+                from = fromEmail,
+                to = toEmail,
+                text = text,
+                audioUri = if (isLegacyAudio) mediaUri else audioUri,
+                amplitudes =
+                        if (amplitudes.isEmpty()) emptyList()
+                        else amplitudes.split(",").map { it.toFloat() },
+                mediaUri = if (isLegacyAudio) null else mediaUri,
+                mediaType = if (isLegacyAudio) null else mediaType,
+                mediaId = mediaId,
+                isDownloading = isDownloading,
+                timestamp = timestamp,
+                status =
+                        runCatching { com.example.anonychat.ui.MessageStatus.valueOf(status) }
+                                .getOrElse { com.example.anonychat.ui.MessageStatus.Delivered }
+        )
     }
 }

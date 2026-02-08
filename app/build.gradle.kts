@@ -98,6 +98,7 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("io.coil-kt:coil-video:2.7.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.compose.animation.core)
     implementation(libs.androidx.compose.foundation.layout)

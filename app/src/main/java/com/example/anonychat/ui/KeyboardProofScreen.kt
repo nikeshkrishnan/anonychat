@@ -13,27 +13,20 @@ import android.net.Uri
 import android.os.Build
 import android.os.Build.VERSION.SDK_INT
 import android.provider.MediaStore
-import android.util.Log
-import android.view.ViewTreeObserver
-import android.widget.Toast
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.appcompat.widget.AppCompatEditText
-import androidx.core.view.ViewCompat
-import androidx.core.view.ContentInfoCompat
-import androidx.core.view.inputmethod.EditorInfoCompat
-import androidx.core.view.inputmethod.InputConnectionCompat
-import android.view.inputmethod.EditorInfo
-import android.text.TextWatcher
 import android.text.Editable
-import androidx.compose.ui.graphics.toArgb
+import android.text.TextWatcher
+import android.util.Log
 import android.util.TypedValue
-import android.view.Gravity
+import android.view.ViewTreeObserver
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.annotation.RequiresApi
+import androidx.appcompat.widget.AppCompatEditText
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -44,12 +37,14 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.*
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -64,8 +59,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
@@ -74,6 +67,7 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.KeyboardVoice
@@ -94,8 +88,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -103,27 +97,28 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ContentInfoCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.inputmethod.EditorInfoCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import coil.compose.rememberAsyncImagePainter
-import coil.compose.LocalImageLoader
 import coil.ImageLoader
+import coil.compose.LocalImageLoader
+import coil.compose.rememberAsyncImagePainter
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import com.example.anonychat.MainActivity
@@ -135,6 +130,8 @@ import com.example.anonychat.network.WebSocketManager
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
@@ -148,6 +145,7 @@ enum class MessageStatus {
     Pending,
     Sending,
     Delivered,
+    Read,
     Failed
 }
 
@@ -162,6 +160,8 @@ data class ChatMessage(
         val amplitudes: List<Float> = emptyList(), // Amplitude data for waveforms
         val mediaUri: String? = null, // URI for photo/video
         val mediaType: String? = null, // "IMAGE" or "VIDEO"
+        val mediaId: String? = null, // Server-side media ID
+        val isDownloading: Boolean = false, // True when media is being fetched
         val timestamp: Long = System.currentTimeMillis(),
         val status: MessageStatus = MessageStatus.Delivered
 )
@@ -193,7 +193,7 @@ private fun stopRecordingAndSend(
         amplitudes: List<Float>
 ) {
     try {
-        
+
         mediaRecorder?.stop()
     } catch (e: RuntimeException) {
         Log.e("AudioRecorder", "Stop failed: likely too short", e)
@@ -230,7 +230,7 @@ private fun stopRecordingAndSend(
                         // events
                         )
         messages.upsert(newMsg)
-        WebSocketManager.sendMedia(peerEmail, uri, "audio/m4a", localId)
+        WebSocketManager.sendMedia(peerEmail, uri, "audio/m4a", localId, amplitudes)
     }
 }
 
@@ -276,6 +276,7 @@ private fun rememberKeyboardVisible(): State<Boolean> {
 
 /* ---------------- SCREEN ---------------- */
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @RequiresApi(Build.VERSION_CODES.N)
 @OptIn(
         ExperimentalMaterial3Api::class,
@@ -303,14 +304,14 @@ fun KeyboardProofScreen(
 
     val imageLoader = remember {
         ImageLoader.Builder(context)
-            .components {
-                if (SDK_INT >= 28) {
-                    add(ImageDecoderDecoder.Factory())
-                } else {
-                    add(GifDecoder.Factory())
+                .components {
+                    if (SDK_INT >= 28) {
+                        add(ImageDecoderDecoder.Factory())
+                    } else {
+                        add(GifDecoder.Factory())
+                    }
                 }
-            }
-            .build()
+                .build()
     }
 
     val staticImageLoader = remember { ImageLoader(context) }
@@ -326,7 +327,18 @@ fun KeyboardProofScreen(
     var showFullScreenCamera by remember { mutableStateOf(false) }
     var capturedImageUri by remember { mutableStateOf<Uri?>(null) }
     var showAdvancedMediaPicker by remember { mutableStateOf(false) }
+
     val messages = remember { mutableStateListOf<ChatMessage>().apply { addAll(initialMessages) } }
+
+    var presenceStatus by remember {
+        mutableStateOf(if (matchedUserPrefs.isOnline) "online" else "offline")
+    }
+    var lastSeenTime by remember { mutableStateOf(matchedUserPrefs.lastSeen) }
+    Log.e(
+            "KeyboardProofScreen",
+            "DEBUG: Initialized with isOnline=${matchedUserPrefs.isOnline}, lastSeen=${matchedUserPrefs.lastSeen}"
+    )
+
     Log.e("KeyboardProofScreen", "start → $matchedUserGmail")
 
     var recordingDuration by remember { mutableStateOf(0L) }
@@ -356,6 +368,12 @@ fun KeyboardProofScreen(
         if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
             Log.e("ChatLifecycle", "CHAT OPENED → me: $localGmail  ↔  partner: $matchedUserGmail")
             WebSocketManager.sendChatOpen(matchedUserGmail)
+
+            // Load History - clear and reload to preserve chronological order
+            WebSocketManager.getChatHistory(localGmail, matchedUserGmail).collect { history ->
+                messages.clear()
+                messages.addAll(history)
+            }
         }
     }
 
@@ -519,7 +537,17 @@ fun KeyboardProofScreen(
                     Log.e("ChatWebSocket", "-> Message delivered $index")
 
                     if (index != -1) {
-                        messages[index] = messages[index].copy(status = MessageStatus.Delivered)
+                        // Only update to Delivered if it's not already Read
+                        if (messages[index].status != MessageStatus.Read) {
+                            messages[index] = messages[index].copy(status = MessageStatus.Delivered)
+                        }
+                    }
+                }
+                is WebSocketEvent.MessageReadAck -> {
+                    Log.e("ChatWebSocket", "-> Message read")
+                    val index = messages.indexOfFirst { it.id == event.messageId }
+                    if (index != -1) {
+                        messages[index] = messages[index].copy(status = MessageStatus.Read)
                     }
                 }
                 is WebSocketEvent.DeliveryFailed -> {
@@ -527,6 +555,12 @@ fun KeyboardProofScreen(
                     val index = messages.indexOfFirst { it.id == event.messageId }
                     if (index != -1) {
                         messages[index] = messages[index].copy(status = MessageStatus.Failed)
+                    }
+                }
+                is WebSocketEvent.PeerPresence -> {
+                    if (event.from == matchedUserGmail) {
+                        presenceStatus = event.status
+                        lastSeenTime = event.lastSeen
                     }
                 }
             }
@@ -709,459 +743,717 @@ fun KeyboardProofScreen(
     /* ---------------- UI ---------------- */
     CompositionLocalProvider(LocalImageLoader provides imageLoader) {
         Box(Modifier.fillMaxSize()) {
-        if (!isMediaOverlayActive) {
-            AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = {
-                        PlayerView(it).apply {
-                            player = exoPlayer
-                            useController = false
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                            setShutterBackgroundColor(AndroidColor.TRANSPARENT)
+            if (!isMediaOverlayActive) {
+                AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = {
+                            PlayerView(it).apply {
+                                player = exoPlayer
+                                useController = false
+                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                setShutterBackgroundColor(AndroidColor.TRANSPARENT)
+                            }
                         }
-                    }
-            )
-        } else {
-            // Shielding layer to ensure background is strictly black during camera load
-            Box(Modifier.fillMaxSize().background(Color.Black))
-        }
+                )
+            } else {
+                // Shielding layer to ensure background is strictly black during camera load
+                Box(Modifier.fillMaxSize().background(Color.Black))
+            }
 
-        Scaffold(
-                modifier = Modifier.fillMaxSize().imePadding(),
-                containerColor = Color.Transparent,
-                topBar = {
-                    Surface(
-                            modifier = Modifier.fillMaxWidth().statusBarsPadding().zIndex(1f),
-                            color = Color.Transparent
-                    ) {
-                        Row(
-                                modifier =
-                                        Modifier.fillMaxWidth()
-                                                .height(56.dp)
-                                                .padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
+            Scaffold(
+                    modifier = Modifier.fillMaxSize().imePadding(),
+                    containerColor = Color.Transparent,
+                    topBar = {
+                        Surface(
+                                modifier = Modifier.fillMaxWidth().statusBarsPadding().zIndex(1f),
+                                color = Color.Transparent
                         ) {
-                            IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
-                                Icon(Icons.Default.ArrowBack, "Back", tint = headerContentColor)
-                            }
-                            Spacer(Modifier.width(8.dp))
-
-                            Surface(
-                                    shape = CircleShape,
-                                    color = avatarRingColor,
-                                    border = BorderStroke(2.dp, Color.White),
-                                    modifier = Modifier.size(46.dp)
-                            ) {
-                                Image(
-                                        painter = rememberAsyncImagePainter(avatarUri, imageLoader = staticImageLoader),
-                                        contentDescription = null,
-                                        modifier = Modifier.padding(2.dp).clip(CircleShape),
-                                        contentScale = ContentScale.Crop
-                                )
-                            }
-
-                            Spacer(Modifier.width(12.dp))
-                            Text(
-                                    text = matchedUser.username,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 16.sp,
-                                    color = headerContentColor
-                            )
-                        }
-                    }
-                }
-        ) { padding ->
-            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                LazyColumn(
-                        state = listState,
-                        reverseLayout = true,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-                        contentPadding = PaddingValues(bottom = 60.dp, top = 8.dp)
-                ) {
-                    // In reverse layout, item 0 is at the bottom.
-                    // We want the newest message (last in the list) to be at the bottom (index 0).
-                    items(
-                            count = messages.size,
-                            key = { index -> messages[messages.size - 1 - index].id }
-                    ) { index ->
-                        val msg = messages[messages.size - 1 - index]
-                        KeyboardMessageBubble(
-                                message = msg,
-                                isMe = msg.from == localGmail,
-                                incomingBubbleColor = incomingBubbleColor,
-                                outgoingBubbleColor = outgoingBubbleColor,
-                                messageTextColor = messageTextColor,
-                                onVideoClick = { fullScreenVideoUri = it },
-                                onImageClick = { fullScreenImageUri = it }
-                        )
-                    }
-                }
-
-                LaunchedEffect(messages.size) {
-                    if (messages.isNotEmpty()) {
-                        // With reverseLayout, the "bottom" is index 0.
-                        // We scroll to 0 to show the newest message.
-                        listState.animateScrollToItem(0)
-                    }
-                }
-
-                Row(
-                        modifier =
-                                Modifier.align(Alignment.BottomCenter)
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                        verticalAlignment = Alignment.Bottom
-                ) {
-                    Surface(
-                            modifier = Modifier.weight(1f).heightIn(54.dp, 220.dp),
-                            shape = RoundedCornerShape(24.dp),
-                            color = inputBackgroundColor,
-                            border = BorderStroke(1.dp, inputBorderColor)
-                    ) {
-                        if (isRecording) {
                             Row(
                                     modifier =
                                             Modifier.fillMaxWidth()
-                                                    .height(54.dp)
-                                                    .padding(horizontal = 16.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.End
-                            ) {
-                                // Timer text during recording inside the input bar
-                                val minutes = recordingDuration / 60
-                                val seconds = recordingDuration % 60
-                                val timeString = String.format("%02d:%02d", minutes, seconds)
-
-                                Text(
-                                        text = "$timeString   Slide to cancel <<< ",
-                                        color = messageTextColor,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Medium
-                                )
-                            }
-                        } else {
-                            // Replaced BasicTextField with AndroidView backed EditText for GIF support
-                            Row(
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+                                                    .height(56.dp)
+                                                    .padding(horizontal = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                             ) {
-                                IconButton(
-                                        onClick = {
-                                            keyboardController?.hide()
-                                            focusManager.clearFocus()
-                                            showAdvancedMediaPicker = true
-                                        },
-                                        modifier = Modifier.size(24.dp)
+                                IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
+                                    Icon(Icons.Default.ArrowBack, "Back", tint = headerContentColor)
+                                }
+                                Spacer(Modifier.width(8.dp))
+
+                                Surface(
+                                        shape = CircleShape,
+                                        color = avatarRingColor,
+                                        border = BorderStroke(2.dp, Color.White),
+                                        modifier = Modifier.size(46.dp)
                                 ) {
-                                    Icon(
-                                            Icons.Default.AttachFile,
-                                            contentDescription = "Attach",
-                                            tint = Color.Gray
+                                    Image(
+                                            painter =
+                                                    rememberAsyncImagePainter(
+                                                            avatarUri,
+                                                            imageLoader = staticImageLoader
+                                                    ),
+                                            contentDescription = null,
+                                            modifier = Modifier.padding(2.dp).clip(CircleShape),
+                                            contentScale = ContentScale.Crop
                                     )
                                 }
 
-                                Spacer(Modifier.width(8.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                            text = matchedUser.username,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 16.sp,
+                                            color = headerContentColor
+                                    )
+                                    val presenceText =
+                                            if (presenceStatus == "online") "Online"
+                                            else if (lastSeenTime > 0)
+                                                    "Last seen ${
+                                            SimpleDateFormat("HH:mm", Locale.getDefault())
+                                                .format(Date(lastSeenTime))
+                                        }"
+                                            else "Offline"
+                                    Text(
+                                            text = presenceText,
+                                            fontWeight = FontWeight.Normal,
+                                            fontSize = 12.sp,
+                                            color = headerContentColor.copy(alpha = 0.7f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+            ) { padding ->
+                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    LazyColumn(
+                            state = listState,
+                            reverseLayout = true,
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                            contentPadding = PaddingValues(bottom = 60.dp, top = 8.dp)
+                    ) {
+                        // In reverse layout, item 0 is at the bottom.
+                        // We want the newest message (last in the list) to be at the bottom (index
+                        // 0).
+                        items(
+                                count = messages.size,
+                                key = { index -> messages[messages.size - 1 - index].id }
+                        ) { index ->
+                            val msg = messages[messages.size - 1 - index]
+                            KeyboardMessageBubble(
+                                    message = msg,
+                                    isMe = msg.from == localGmail,
+                                    incomingBubbleColor = incomingBubbleColor,
+                                    outgoingBubbleColor = outgoingBubbleColor,
+                                    messageTextColor = messageTextColor,
+                                    onVideoClick = { fullScreenVideoUri = it },
+                                    onImageClick = { fullScreenImageUri = it },
+                                    onStatusUpdate = { id, status ->
+                                        val idx = messages.indexOfFirst { it.id == id }
+                                        if (idx != -1) {
+                                            messages[idx] = messages[idx].copy(status = status)
+                                        }
+                                        WebSocketManager.updateMessageStatus(id, status)
+                                    }
+                            )
+                        }
+                    }
 
-                                AndroidView(
-                                        factory = { ctx ->
-                                            object : AppCompatEditText(ctx) {
-                                                override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
-                                                    val ic = super.onCreateInputConnection(outAttrs)
-                                                    EditorInfoCompat.setContentMimeTypes(outAttrs, arrayOf("image/gif", "image/png", "image/webp", "video/mp4", "image/jpeg"))
-                                                    return ic
-                                                }
-                                            }.apply {
-                                                setBackground(null)
-                                                setHint("Message")
-                                                setHintTextColor(android.graphics.Color.GRAY)
-                                                setTextColor(messageTextColor.toArgb())
-                                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                                                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                                                maxLines = 6
-                                                
-                                                addTextChangedListener(object : TextWatcher {
-                                                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                                                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                                                    override fun afterTextChanged(s: Editable?) {
-                                                        val newText = s?.toString() ?: ""
-                                                        if (newText != input) {
-                                                            input = newText
+                    LaunchedEffect(messages.size) {
+                        if (messages.isNotEmpty()) {
+                            // With reverseLayout, the "bottom" is index 0.
+                            // We scroll to 0 to show the newest message.
+                            listState.animateScrollToItem(0)
+                        }
+                    }
+
+                    Row(
+                            modifier =
+                                    Modifier.align(Alignment.BottomCenter)
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                            verticalAlignment = Alignment.Bottom
+                    ) {
+                        Surface(
+                                modifier = Modifier.weight(1f).heightIn(54.dp, 220.dp),
+                                shape = RoundedCornerShape(24.dp),
+                                color = inputBackgroundColor,
+                                border = BorderStroke(1.dp, inputBorderColor)
+                        ) {
+                            if (isRecording) {
+                                Row(
+                                        modifier =
+                                                Modifier.fillMaxWidth()
+                                                        .height(54.dp)
+                                                        .padding(horizontal = 16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.End
+                                ) {
+                                    // Timer text during recording inside the input bar
+                                    val minutes = recordingDuration / 60
+                                    val seconds = recordingDuration % 60
+                                    val timeString = String.format("%02d:%02d", minutes, seconds)
+
+                                    Text(
+                                            text = "$timeString   Slide to cancel <<< ",
+                                            color = messageTextColor,
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            } else {
+                                // Replaced BasicTextField with AndroidView backed EditText for GIF
+                                // support
+                                Row(
+                                        modifier =
+                                                Modifier.fillMaxWidth()
+                                                        .padding(
+                                                                horizontal = 14.dp,
+                                                                vertical = 6.dp
+                                                        ),
+                                        verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    IconButton(
+                                            onClick = {
+                                                keyboardController?.hide()
+                                                focusManager.clearFocus()
+                                                showAdvancedMediaPicker = true
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                                Icons.Default.AttachFile,
+                                                contentDescription = "Attach",
+                                                tint = Color.Gray
+                                        )
+                                    }
+
+                                    Spacer(Modifier.width(8.dp))
+
+                                    AndroidView(
+                                            factory = { ctx ->
+                                                object : AppCompatEditText(ctx) {
+                                                            override fun onCreateInputConnection(
+                                                                    outAttrs: EditorInfo
+                                                            ): InputConnection? {
+                                                                val ic =
+                                                                        super.onCreateInputConnection(
+                                                                                outAttrs
+                                                                        )
+                                                                EditorInfoCompat
+                                                                        .setContentMimeTypes(
+                                                                                outAttrs,
+                                                                                arrayOf(
+                                                                                        "image/gif",
+                                                                                        "image/png",
+                                                                                        "image/webp",
+                                                                                        "video/mp4",
+                                                                                        "image/jpeg"
+                                                                                )
+                                                                        )
+                                                                return ic
+                                                            }
                                                         }
-                                                    }
-                                                })
+                                                        .apply {
+                                                            setBackground(null)
+                                                            setHint("Message")
+                                                            setHintTextColor(
+                                                                    android.graphics.Color.GRAY
+                                                            )
+                                                            setTextColor(messageTextColor.toArgb())
+                                                            setTextSize(
+                                                                    TypedValue.COMPLEX_UNIT_SP,
+                                                                    16f
+                                                            )
+                                                            inputType =
+                                                                    android.text.InputType
+                                                                            .TYPE_CLASS_TEXT or
+                                                                            android.text.InputType
+                                                                                    .TYPE_TEXT_FLAG_MULTI_LINE or
+                                                                            android.text.InputType
+                                                                                    .TYPE_TEXT_FLAG_CAP_SENTENCES
+                                                            maxLines = 6
 
-                                                ViewCompat.setOnReceiveContentListener(this, arrayOf("image/gif", "image/png", "image/webp", "video/mp4", "image/jpeg"), object : androidx.core.view.OnReceiveContentListener {
-                                                    override fun onReceiveContent(view: android.view.View, payload: ContentInfoCompat): ContentInfoCompat? {
-                                                        val split = payload.partition { item -> item.uri != null }
-                                                        val uriContent = split.first
-                                                        
-                                                        if (uriContent != null) {
-                                                            for (i in 0 until uriContent.clip.itemCount) {
-                                                                val item = uriContent.clip.getItemAt(i)
-                                                                val uri = item.uri
-                                                                if (uri != null) {
-                                                                    val mimeType = context.contentResolver.getType(uri)
-                                                                    if (mimeType != null) {
-                                                                        val type = when {
-                                                                            mimeType == "image/gif" -> "GIF"
-                                                                            mimeType.startsWith("image/") -> "IMAGE"
-                                                                            mimeType.startsWith("video/") -> "VIDEO"
-                                                                            else -> null
-                                                                        }
-
-                                                                        if (type != null) {
-                                                                            val localId = "media-${java.util.UUID.randomUUID()}"
-                                                                            val newMsg = ChatMessage(
-                                                                                id = localId,
-                                                                                from = localGmail,
-                                                                                to = matchedUserGmail,
-                                                                                text = when (type) {
-                                                                                    "VIDEO" -> "[Video Message]"
-                                                                                    "GIF" -> "[GIF Message]"
-                                                                                    else -> "[Photo Message]"
-                                                                                },
-                                                                                mediaUri = uri.toString(),
-                                                                                mediaType = type,
-                                                                                status = MessageStatus.Pending
-                                                                            )
-                                                                            messages.upsert(newMsg)
-                                                                            WebSocketManager.sendMedia(matchedUserGmail, uri, mimeType, localId)
+                                                            addTextChangedListener(
+                                                                    object : TextWatcher {
+                                                                        override fun beforeTextChanged(
+                                                                                s: CharSequence?,
+                                                                                start: Int,
+                                                                                count: Int,
+                                                                                after: Int
+                                                                        ) {}
+                                                                        override fun onTextChanged(
+                                                                                s: CharSequence?,
+                                                                                start: Int,
+                                                                                before: Int,
+                                                                                count: Int
+                                                                        ) {}
+                                                                        override fun afterTextChanged(
+                                                                                s: Editable?
+                                                                        ) {
+                                                                            val newText =
+                                                                                    s?.toString()
+                                                                                            ?: ""
+                                                                            if (newText != input) {
+                                                                                input = newText
+                                                                            }
                                                                         }
                                                                     }
-                                                                }
-                                                            }
-                                                        }
-                                                        return split.second
-                                                    }
-                                                })
-                                            }
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        update = { view ->
-                                            if (view.text.toString() != input) {
-                                                view.setText(input)
-                                                view.setSelection(view.text?.length ?: 0)
-                                            }
-                                        }
-                                )
-                            }
-
-                            // Removed old showAttachmentChoices Row
-                        }
-                    }
-
-                    val sendMessage = {
-                        val text = input.trim()
-                        if (text.isNotBlank() &&
-                                        localGmail.isNotEmpty() &&
-                                        matchedUserGmail.isNotEmpty()
-                        ) {
-                            val localId = UUID.randomUUID().toString()
-                            val newMsg =
-                                    ChatMessage(
-                                            id = localId,
-                                            from = localGmail,
-                                            to = matchedUserGmail,
-                                            text = text,
-                                            status = MessageStatus.Pending
-                                    )
-                            messages.upsert(newMsg)
-                            input = ""
-                            Log.e("from to!!!!!!!!!!!!", "${localGmail} to ${matchedUserGmail}")
-
-                            WebSocketManager.sendMessage(matchedUserGmail, text, localId)
-                        }
-                    }
-
-                    Spacer(Modifier.width(8.dp))
-                    val activity = context as MainActivity
-
-                    val micScale by
-                            androidx.compose.animation.core.animateFloatAsState(
-                                    targetValue = if (isRecording) 2.0f else 1.0f,
-                                    label = "micScale"
-                            )
-
-                    if (input.isNotBlank()) {
-                        Surface(
-                                modifier = Modifier.size(44.dp),
-                                shape = CircleShape,
-                                color = sendButtonColor
-                        ) {
-                            IconButton(onClick = sendMessage) {
-                                Icon(Icons.Default.Send, null, tint = Color.White)
-                            }
-                        }
-                    } else {
-                        Box(
-                                modifier =
-                                        Modifier.size(48.dp).pointerInput(Unit) {
-                                            awaitPointerEventScope {
-                                                while (true) {
-                                                    val down =
-                                                            awaitFirstDown(
-                                                                    requireUnconsumed = false
                                                             )
-                                                    // 1) ACTION DOWN: Start Recording
-                                                    startX = down.position.x
-                                                    cancelRecording = false
 
-                                                    val hasPermission =
-                                                            ContextCompat.checkSelfPermission(
-                                                                    context,
-                                                                    Manifest.permission.RECORD_AUDIO
-                                                            ) == PackageManager.PERMISSION_GRANTED
+                                                            ViewCompat.setOnReceiveContentListener(
+                                                                    this,
+                                                                    arrayOf(
+                                                                            "image/gif",
+                                                                            "image/png",
+                                                                            "image/webp",
+                                                                            "video/mp4",
+                                                                            "image/jpeg"
+                                                                    ),
+                                                                    object :
+                                                                            androidx.core.view.OnReceiveContentListener {
+                                                                        override fun onReceiveContent(
+                                                                                view:
+                                                                                        android.view.View,
+                                                                                payload:
+                                                                                        ContentInfoCompat
+                                                                        ): ContentInfoCompat? {
+                                                                            val split =
+                                                                                    payload
+                                                                                            .partition {
+                                                                                                    item
+                                                                                                ->
+                                                                                                item.uri !=
+                                                                                                        null
+                                                                                            }
+                                                                            val uriContent =
+                                                                                    split.first
 
-                                                    if (hasPermission) {
-                                                        startRecording(context)
-                                                        isRecording = true
-                                                    } else {
-                                                        activity.requestMicPermissionAndRun {
-                                                            startRecording(context)
-                                                            isRecording = true
-                                                        }
-                                                    }
+                                                                            if (uriContent != null
+                                                                            ) {
+                                                                                for (i in
+                                                                                        0 until
+                                                                                                uriContent
+                                                                                                        .clip
+                                                                                                        .itemCount) {
+                                                                                    val item =
+                                                                                            uriContent
+                                                                                                    .clip
+                                                                                                    .getItemAt(
+                                                                                                            i
+                                                                                                    )
+                                                                                    val uri =
+                                                                                            item.uri
+                                                                                    if (uri != null
+                                                                                    ) {
+                                                                                        val mimeType =
+                                                                                                context.contentResolver
+                                                                                                        .getType(
+                                                                                                                uri
+                                                                                                        )
+                                                                                        if (mimeType !=
+                                                                                                        null
+                                                                                        ) {
+                                                                                            val type =
+                                                                                                    when {
+                                                                                                        mimeType ==
+                                                                                                                "image/gif" ->
+                                                                                                                "GIF"
+                                                                                                        mimeType.startsWith(
+                                                                                                                "image/"
+                                                                                                        ) ->
+                                                                                                                "IMAGE"
+                                                                                                        mimeType.startsWith(
+                                                                                                                "video/"
+                                                                                                        ) ->
+                                                                                                                "VIDEO"
+                                                                                                        else ->
+                                                                                                                null
+                                                                                                    }
 
-                                                    var change = down
-                                                    // 2) ACTION MOVE / DRAG
-                                                    while (change.pressed && change.id == down.id) {
-                                                        val currentX = change.position.x
-                                                        // Check Swipe Left (threshold: 100px)
-                                                        if (startX - currentX > 100) {
-                                                            cancelRecording = true
-                                                        } else {
-                                                            cancelRecording = false
-                                                        }
-
-                                                        val event = awaitPointerEvent()
-                                                        val nextChange =
-                                                                event.changes.firstOrNull {
-                                                                    it.id == down.id
-                                                                }
-                                                        if (nextChange != null) {
-                                                            change = nextChange
-                                                        } else {
-                                                            break
-                                                        }
-                                                    }
-
-                                                    // 3) ACTION UP (Released)
-                                                    if (isRecording) {
-                                                        if (cancelRecording) {
-                                                            // Cancelled
-                                                            try {
-                                                                mediaRecorder?.stop()
-                                                            } catch (e: RuntimeException) {
-                                                                Log.e(
-                                                                        "AudioRecorder",
-                                                                        "Stop failed",
-                                                                        e
-                                                                )
-                                                            }
-                                                            mediaRecorder?.release()
-                                                            mediaRecorder = null
-                                                            currentAudioFile?.delete()
-                                                            recordingAmplitudes.clear()
-                                                        } else {
-                                                            // Send
-                                                            stopRecordingAndSend(
-                                                                    context,
-                                                                    matchedUserGmail,
-                                                                    messages,
-                                                                    recordingAmplitudes.toList()
+                                                                                            if (type !=
+                                                                                                            null
+                                                                                            ) {
+                                                                                                val localId =
+                                                                                                        "media-${java.util.UUID.randomUUID()}"
+                                                                                                val newMsg =
+                                                                                                        ChatMessage(
+                                                                                                                id =
+                                                                                                                        localId,
+                                                                                                                from =
+                                                                                                                        localGmail,
+                                                                                                                to =
+                                                                                                                        matchedUserGmail,
+                                                                                                                text =
+                                                                                                                        when (type
+                                                                                                                        ) {
+                                                                                                                            "VIDEO" ->
+                                                                                                                                    "[Video Message]"
+                                                                                                                            "GIF" ->
+                                                                                                                                    "[GIF Message]"
+                                                                                                                            else ->
+                                                                                                                                    "[Photo Message]"
+                                                                                                                        },
+                                                                                                                mediaUri =
+                                                                                                                        uri.toString(),
+                                                                                                                mediaType =
+                                                                                                                        type,
+                                                                                                                status =
+                                                                                                                        MessageStatus
+                                                                                                                                .Pending
+                                                                                                        )
+                                                                                                messages.upsert(
+                                                                                                        newMsg
+                                                                                                )
+                                                                                                WebSocketManager
+                                                                                                        .sendMedia(
+                                                                                                                matchedUserGmail,
+                                                                                                                uri,
+                                                                                                                mimeType,
+                                                                                                                localId
+                                                                                                        )
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            return split.second
+                                                                        }
+                                                                    }
                                                             )
-                                                            recordingAmplitudes.clear()
                                                         }
-                                                    }
-                                                    isRecording = false
-                                                    cancelRecording = false
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            update = { view ->
+                                                if (view.text.toString() != input) {
+                                                    view.setText(input)
+                                                    view.setSelection(view.text?.length ?: 0)
                                                 }
                                             }
-                                        },
-                                contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                    imageVector = Icons.Default.KeyboardVoice,
-                                    contentDescription = "Record",
-                                    tint =
-                                            when {
-                                                cancelRecording -> Color.Red
-                                                isRecording -> Color(0xFFFF9800)
-                                                else -> sendButtonColor
+                                    )
+                                }
+
+                                // Removed old showAttachmentChoices Row
+                            }
+                        }
+
+                        val sendMessage = {
+                            val text = input.trim()
+                            if (text.isNotBlank() &&
+                                            localGmail.isNotEmpty() &&
+                                            matchedUserGmail.isNotEmpty()
+                            ) {
+                                val localId = UUID.randomUUID().toString()
+                                val newMsg =
+                                        ChatMessage(
+                                                id = localId,
+                                                from = localGmail,
+                                                to = matchedUserGmail,
+                                                text = text,
+                                                status = MessageStatus.Pending
+                                        )
+                                messages.upsert(newMsg)
+                                input = ""
+                                Log.e("from to!!!!!!!!!!!!", "${localGmail} to ${matchedUserGmail}")
+
+                                WebSocketManager.sendMessage(matchedUserGmail, text, localId)
+                            }
+                        }
+
+                        Spacer(Modifier.width(8.dp))
+                        val activity = context as MainActivity
+
+                        val micScale by
+                                androidx.compose.animation.core.animateFloatAsState(
+                                        targetValue = if (isRecording) 2.0f else 1.0f,
+                                        label = "micScale"
+                                )
+
+                        if (input.isNotBlank()) {
+                            Surface(
+                                    modifier = Modifier.size(44.dp),
+                                    shape = CircleShape,
+                                    color = sendButtonColor
+                            ) {
+                                IconButton(onClick = sendMessage) {
+                                    Icon(Icons.Default.Send, null, tint = Color.White)
+                                }
+                            }
+                        } else {
+                            Box(
+                                    modifier =
+                                            Modifier.size(48.dp).pointerInput(Unit) {
+                                                awaitPointerEventScope {
+                                                    while (true) {
+                                                        val down =
+                                                                awaitFirstDown(
+                                                                        requireUnconsumed = false
+                                                                )
+                                                        // 1) ACTION DOWN: Start Recording
+                                                        startX = down.position.x
+                                                        cancelRecording = false
+
+                                                        val hasPermission =
+                                                                ContextCompat.checkSelfPermission(
+                                                                        context,
+                                                                        Manifest.permission
+                                                                                .RECORD_AUDIO
+                                                                ) ==
+                                                                        PackageManager
+                                                                                .PERMISSION_GRANTED
+
+                                                        if (hasPermission) {
+                                                            startRecording(context)
+                                                            isRecording = true
+                                                        } else {
+                                                            activity.requestMicPermissionAndRun {
+                                                                startRecording(context)
+                                                                isRecording = true
+                                                            }
+                                                        }
+
+                                                        var change = down
+                                                        // 2) ACTION MOVE / DRAG
+                                                        while (change.pressed &&
+                                                                change.id == down.id) {
+                                                            val currentX = change.position.x
+                                                            // Check Swipe Left (threshold: 100px)
+                                                            if (startX - currentX > 100) {
+                                                                cancelRecording = true
+                                                            } else {
+                                                                cancelRecording = false
+                                                            }
+
+                                                            val event = awaitPointerEvent()
+                                                            val nextChange =
+                                                                    event.changes.firstOrNull {
+                                                                        it.id == down.id
+                                                                    }
+                                                            if (nextChange != null) {
+                                                                change = nextChange
+                                                            } else {
+                                                                break
+                                                            }
+                                                        }
+
+                                                        // 3) ACTION UP (Released)
+                                                        if (isRecording) {
+                                                            if (cancelRecording) {
+                                                                // Cancelled
+                                                                try {
+                                                                    mediaRecorder?.stop()
+                                                                } catch (e: RuntimeException) {
+                                                                    Log.e(
+                                                                            "AudioRecorder",
+                                                                            "Stop failed",
+                                                                            e
+                                                                    )
+                                                                }
+                                                                mediaRecorder?.release()
+                                                                mediaRecorder = null
+                                                                currentAudioFile?.delete()
+                                                                recordingAmplitudes.clear()
+                                                            } else {
+                                                                // Send
+                                                                stopRecordingAndSend(
+                                                                        context,
+                                                                        matchedUserGmail,
+                                                                        messages,
+                                                                        recordingAmplitudes.toList()
+                                                                )
+                                                                recordingAmplitudes.clear()
+                                                            }
+                                                        }
+                                                        isRecording = false
+                                                        cancelRecording = false
+                                                    }
+                                                }
                                             },
-                                    modifier = Modifier.scale(micScale)
-                            )
+                                    contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                        imageVector = Icons.Default.KeyboardVoice,
+                                        contentDescription = "Record",
+                                        tint =
+                                                when {
+                                                    cancelRecording -> Color.Red
+                                                    isRecording -> Color(0xFFFF9800)
+                                                    else -> sendButtonColor
+                                                },
+                                        modifier = Modifier.scale(micScale)
+                                )
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if (isMediaProcessing) {
-            ProcessingOverlay()
-        }
+            if (isMediaProcessing) {
+                ProcessingOverlay()
+            }
 
-        if (showAdvancedMediaPicker) {
-            MediaPickerScreen(
-                    galleryImages = galleryImages,
-                    selectedImages = selectedGalleryImages.toSet(),
-                    onClose = {
-                        showAdvancedMediaPicker = false
-                        selectedGalleryImages.clear()
-                    },
-                    onImageToggle = { uri ->
-                        val isVideo = uri.toString().contains("video")
-                        var isLong = false
+            if (showAdvancedMediaPicker) {
+                MediaPickerScreen(
+                        galleryImages = galleryImages,
+                        selectedImages = selectedGalleryImages.toSet(),
+                        onClose = {
+                            showAdvancedMediaPicker = false
+                            selectedGalleryImages.clear()
+                        },
+                        onImageToggle = { uri ->
+                            val isVideo = uri.toString().contains("video")
+                            var isLong = false
 
-                        if (isVideo) {
-                            try {
-                                context.contentResolver.query(
-                                                uri,
-                                                arrayOf(MediaStore.Video.Media.DURATION),
-                                                null,
-                                                null,
-                                                null
-                                        )
-                                        ?.use { cursor ->
-                                            if (cursor.moveToFirst()) {
-                                                val duration = cursor.getLong(0)
-                                                if (duration > 5500) { // 5s + small buffer
-                                                    isLong = true
+                            if (isVideo) {
+                                try {
+                                    context.contentResolver.query(
+                                                    uri,
+                                                    arrayOf(MediaStore.Video.Media.DURATION),
+                                                    null,
+                                                    null,
+                                                    null
+                                            )
+                                            ?.use { cursor ->
+                                                if (cursor.moveToFirst()) {
+                                                    val duration = cursor.getLong(0)
+                                                    if (duration > 5500) { // 5s + small buffer
+                                                        isLong = true
+                                                    }
                                                 }
                                             }
-                                        }
-                            } catch (e: Exception) {
-                                Log.e("MediaPicker", "Error checking duration", e)
+                                } catch (e: Exception) {
+                                    Log.e("MediaPicker", "Error checking duration", e)
+                                }
                             }
-                        }
 
-                        if (isLong) {
-                            Toast.makeText(
-                                            context,
-                                            "Video must be less than 5 seconds",
-                                            Toast.LENGTH_SHORT
-                                    )
-                                    .show()
-                        } else {
-                            if (selectedGalleryImages.contains(uri)) {
-                                selectedGalleryImages.remove(uri)
+                            if (isLong) {
+                                Toast.makeText(
+                                                context,
+                                                "Video must be less than 5 seconds",
+                                                Toast.LENGTH_SHORT
+                                        )
+                                        .show()
                             } else {
-                                selectedGalleryImages.add(uri)
+                                if (selectedGalleryImages.contains(uri)) {
+                                    selectedGalleryImages.remove(uri)
+                                } else {
+                                    selectedGalleryImages.add(uri)
+                                }
                             }
-                        }
-                    },
-                    onSend = {
-                        Log.e(
-                                "MediaSending",
-                                "[TRACE] AdvancedMediaPicker onSend() ENTRY → selectedGalleryImages.size=${selectedGalleryImages.size}"
-                        )
-                        isMediaProcessing = true
-                        selectedGalleryImages.forEachIndexed { index, uri ->
+                        },
+                        onSend = {
                             Log.e(
                                     "MediaSending",
-                                    "[TRACE] Processing image #${index + 1}/${selectedGalleryImages.size} → uri=$uri"
+                                    "[TRACE] AdvancedMediaPicker onSend() ENTRY → selectedGalleryImages.size=${selectedGalleryImages.size}"
                             )
-                            val isVid = uri.toString().contains("video")
+                            isMediaProcessing = true
+                            selectedGalleryImages.forEachIndexed { index, uri ->
+                                Log.e(
+                                        "MediaSending",
+                                        "[TRACE] Processing image #${index + 1}/${selectedGalleryImages.size} → uri=$uri"
+                                )
+                                val isVid = uri.toString().contains("video")
+                                Log.e(
+                                        "MediaSending",
+                                        "[TRACE] Detected media type → isVideo=$isVid"
+                                )
+
+                                val localId = "media-${UUID.randomUUID()}"
+                                Log.e("MediaSending", "[TRACE] Generated localId=$localId")
+
+                                val contentType = if (isVid) "video/mp4" else "image/jpeg"
+                                Log.e("MediaSending", "[TRACE] Content type=$contentType")
+
+                                val newMsg =
+                                        ChatMessage(
+                                                id = localId,
+                                                from = localGmail,
+                                                to = matchedUserGmail,
+                                                text =
+                                                        if (isVid) "[Video Message]"
+                                                        else "[Photo Message]",
+                                                mediaUri = uri.toString(),
+                                                mediaType = if (isVid) "VIDEO" else "IMAGE",
+                                                status = MessageStatus.Pending
+                                        )
+                                Log.e(
+                                        "MediaSending",
+                                        "[TRACE] Created ChatMessage → id=$localId, type=${newMsg.mediaType}, status=${newMsg.status}"
+                                )
+
+                                messages.upsert(newMsg)
+                                Log.e("MediaSending", "[TRACE] Message upserted to UI")
+
+                                Log.e(
+                                        "MediaSending",
+                                        "[TRACE] Calling WebSocketManager.sendMedia() → toEmail=$matchedUserGmail, uri=$uri, contentType=$contentType, localId=$localId"
+                                )
+                                WebSocketManager.sendMedia(
+                                        matchedUserGmail,
+                                        uri,
+                                        contentType,
+                                        localId
+                                )
+                                Log.e("MediaSending", "[TRACE] WebSocketManager.sendMedia() called")
+                            }
+                            Log.e(
+                                    "MediaSending",
+                                    "[TRACE] All images processed, clearing selection"
+                            )
+                            isMediaProcessing = false
+                            selectedGalleryImages.clear()
+                            showAdvancedMediaPicker = false
+                            Log.e("MediaSending", "[TRACE] AdvancedMediaPicker onSend() EXIT")
+                        },
+                        onCameraClick = {
+                            focusManager.clearFocus()
+                            val hasPermission =
+                                    ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.CAMERA
+                                    ) == PackageManager.PERMISSION_GRANTED
+
+                            if (hasPermission) {
+                                showFullScreenCamera = true
+                                showAdvancedMediaPicker = false
+                            } else {
+                                (context as MainActivity).requestCameraPermissionAndRun {
+                                    showFullScreenCamera = true
+                                    showAdvancedMediaPicker = false
+                                }
+                            }
+                        }
+                )
+            }
+
+            if (showFullScreenCamera) {
+                FullScreenCameraScreen(
+                        onClose = { showFullScreenCamera = false },
+                        onCaptured = { uri ->
+                            capturedImageUri = uri
+                            showFullScreenCamera = false
+                        },
+                        isProcessing = isMediaProcessing,
+                        setProcessing = { isMediaProcessing = it }
+                )
+            }
+
+            capturedImageUri?.let { uri ->
+                CameraConfirmationScreen(
+                        imageUri = uri,
+                        onRetake = {
+                            capturedImageUri = null
+                            showFullScreenCamera = true
+                        },
+                        onConfirm = {
+                            Log.e(
+                                    "MediaSending",
+                                    "[TRACE] CameraConfirmationScreen onConfirm() ENTRY → uri=$uri"
+                            )
+                            val isVid =
+                                    uri.toString().contains("VID") ||
+                                            uri.toString().contains("video")
                             Log.e("MediaSending", "[TRACE] Detected media type → isVideo=$isVid")
 
                             val localId = "media-${UUID.randomUUID()}"
@@ -1196,112 +1488,55 @@ fun KeyboardProofScreen(
                             )
                             WebSocketManager.sendMedia(matchedUserGmail, uri, contentType, localId)
                             Log.e("MediaSending", "[TRACE] WebSocketManager.sendMedia() called")
-                        }
-                        Log.e("MediaSending", "[TRACE] All images processed, clearing selection")
-                        isMediaProcessing = false
-                        selectedGalleryImages.clear()
-                        showAdvancedMediaPicker = false
-                        Log.e("MediaSending", "[TRACE] AdvancedMediaPicker onSend() EXIT")
-                    },
-                    onCameraClick = {
-                        focusManager.clearFocus()
-                        val hasPermission =
-                                ContextCompat.checkSelfPermission(
-                                        context,
-                                        Manifest.permission.CAMERA
-                                ) == PackageManager.PERMISSION_GRANTED
 
-                        if (hasPermission) {
-                            showFullScreenCamera = true
-                            showAdvancedMediaPicker = false
-                        } else {
-                            (context as MainActivity).requestCameraPermissionAndRun {
-                                showFullScreenCamera = true
-                                showAdvancedMediaPicker = false
-                            }
-                        }
-                    }
-            )
-        }
+                            capturedImageUri = null
+                            Log.e(
+                                    "MediaSending",
+                                    "[TRACE] CameraConfirmationScreen onConfirm() EXIT"
+                            )
+                        },
+                        onClose = { capturedImageUri = null }
+                )
+            }
 
-        if (showFullScreenCamera) {
-            FullScreenCameraScreen(
-                    onClose = { showFullScreenCamera = false },
-                    onCaptured = { uri ->
-                        capturedImageUri = uri
-                        showFullScreenCamera = false
-                    },
-                    isProcessing = isMediaProcessing,
-                    setProcessing = { isMediaProcessing = it }
-            )
-        }
+            fullScreenVideoUri?.let { uri ->
+                FullScreenVideoPlayer(videoUri = uri, onClose = { fullScreenVideoUri = null })
+            }
 
-        capturedImageUri?.let { uri ->
-            CameraConfirmationScreen(
-                    imageUri = uri,
-                    onRetake = {
-                        capturedImageUri = null
-                        showFullScreenCamera = true
-                    },
-                    onConfirm = {
-                        Log.e(
-                                "MediaSending",
-                                "[TRACE] CameraConfirmationScreen onConfirm() ENTRY → uri=$uri"
-                        )
-                        val isVid =
-                                uri.toString().contains("VID") || uri.toString().contains("video")
-                        Log.e("MediaSending", "[TRACE] Detected media type → isVideo=$isVid")
-
-                        val localId = "media-${UUID.randomUUID()}"
-                        Log.e("MediaSending", "[TRACE] Generated localId=$localId")
-
-                        val contentType = if (isVid) "video/mp4" else "image/jpeg"
-                        Log.e("MediaSending", "[TRACE] Content type=$contentType")
-
-                        val newMsg =
-                                ChatMessage(
-                                        id = localId,
-                                        from = localGmail,
-                                        to = matchedUserGmail,
-                                        text = if (isVid) "[Video Message]" else "[Photo Message]",
-                                        mediaUri = uri.toString(),
-                                        mediaType = if (isVid) "VIDEO" else "IMAGE",
-                                        status = MessageStatus.Pending
-                                )
-                        Log.e(
-                                "MediaSending",
-                                "[TRACE] Created ChatMessage → id=$localId, type=${newMsg.mediaType}, status=${newMsg.status}"
-                        )
-
-                        messages.upsert(newMsg)
-                        Log.e("MediaSending", "[TRACE] Message upserted to UI")
-
-                        Log.e(
-                                "MediaSending",
-                                "[TRACE] Calling WebSocketManager.sendMedia() → toEmail=$matchedUserGmail, uri=$uri, contentType=$contentType, localId=$localId"
-                        )
-                        WebSocketManager.sendMedia(matchedUserGmail, uri, contentType, localId)
-                        Log.e("MediaSending", "[TRACE] WebSocketManager.sendMedia() called")
-
-                        capturedImageUri = null
-                        Log.e("MediaSending", "[TRACE] CameraConfirmationScreen onConfirm() EXIT")
-                    },
-                    onClose = { capturedImageUri = null }
-            )
-        }
-
-        fullScreenVideoUri?.let { uri ->
-            FullScreenVideoPlayer(videoUri = uri, onClose = { fullScreenVideoUri = null })
-        }
-
-        fullScreenImageUri?.let { uri ->
-            FullScreenImagePlayer(imageUri = uri, onClose = { fullScreenImageUri = null })
-        }
+            fullScreenImageUri?.let { uri ->
+                FullScreenImagePlayer(imageUri = uri, onClose = { fullScreenImageUri = null })
+            }
         }
     }
 }
 
 /* ---------------- MESSAGE BUBBLE WITH STATUS ICONS ---------------- */
+
+@Composable
+private fun DownloadOverlay(
+        isDownloading: Boolean = false,
+        modifier: Modifier = Modifier,
+        onDownload: () -> Unit
+) {
+    Box(
+            modifier =
+                    modifier.background(Color.Black.copy(alpha = 0.7f)).clickable {
+                        if (!isDownloading) onDownload()
+                    },
+            contentAlignment = Alignment.Center
+    ) {
+        if (isDownloading) {
+            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
+        } else {
+            Icon(
+                    imageVector = Icons.Default.FileDownload,
+                    contentDescription = "Download",
+                    tint = Color.White,
+                    modifier = Modifier.size(48.dp)
+            )
+        }
+    }
+}
 
 @Composable
 private fun KeyboardMessageBubble(
@@ -1311,21 +1546,26 @@ private fun KeyboardMessageBubble(
         outgoingBubbleColor: Color,
         messageTextColor: Color,
         onVideoClick: (String) -> Unit,
-        onImageClick: (String) -> Unit = {}
+        onImageClick: (String) -> Unit = {},
+        onStatusUpdate: (String, MessageStatus) -> Unit
 ) {
     val time =
             remember(message.timestamp) {
                 SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(message.timestamp))
             }
 
-    val isMedia = message.mediaType == "IMAGE" || message.mediaType == "GIF"
+    val isTransparentMedia = message.mediaType == "GIF"
+    val isAnyMedia =
+            isTransparentMedia || message.mediaType == "IMAGE" || message.mediaType == "VIDEO"
     Column(
             Modifier.fillMaxWidth().padding(vertical = 4.dp),
             horizontalAlignment = if (isMe) Alignment.End else Alignment.Start
     ) {
         Surface(
                 shape = RoundedCornerShape(12.dp),
-                color = if (isMedia) Color.Transparent else (if (isMe) outgoingBubbleColor else incomingBubbleColor),
+                color =
+                        if (isAnyMedia) Color.Transparent
+                        else (if (isMe) outgoingBubbleColor else incomingBubbleColor),
                 modifier = Modifier.widthIn(max = 280.dp)
         ) {
             when {
@@ -1333,38 +1573,136 @@ private fun KeyboardMessageBubble(
                     AudioPlayerBubble(
                             audioUri = message.audioUri,
                             amplitudes = message.amplitudes,
-                            contentColor = messageTextColor
+                            contentColor = messageTextColor,
+                            onPlayAcknowledged = {
+                                if (!isMe && message.status != MessageStatus.Read) {
+                                    WebSocketManager.sendMessageReadAck(message.id, message.from)
+                                    onStatusUpdate(message.id, MessageStatus.Read)
+                                }
+                            }
                     )
                 }
                 message.mediaType == "IMAGE" -> {
-                    Image(
-                            painter = rememberAsyncImagePainter(message.mediaUri),
-                            contentDescription = null,
+                    val isRemote = message.mediaUri?.startsWith("http") == true
+                    Box(
+                            contentAlignment = Alignment.Center,
                             modifier =
                                     Modifier.fillMaxWidth()
                                             .heightIn(max = 300.dp)
-                                            .clickable { onImageClick(message.mediaUri ?: "") },
-                            contentScale = ContentScale.Fit
-                    )
+                                            .clip(RoundedCornerShape(12.dp))
+                    ) {
+                        Image(
+                                painter = rememberAsyncImagePainter(message.mediaUri),
+                                contentDescription = null,
+                                modifier =
+                                        Modifier.fillMaxWidth().clickable {
+                                            if (!isRemote) onImageClick(message.mediaUri ?: "")
+                                        },
+                                contentScale = ContentScale.FillWidth,
+                                alpha = if (isRemote) 0.5f else 1f
+                        )
+                        androidx.compose.animation.AnimatedVisibility(
+                                visible = isRemote,
+                                enter = fadeIn(),
+                                exit = fadeOut()
+                        ) {
+                            DownloadOverlay(
+                                    isDownloading = message.isDownloading,
+                                    modifier = Modifier.matchParentSize()
+                            ) {
+                                WebSocketManager.downloadMediaManually(
+                                        message.mediaUri!!,
+                                        message.mediaId!!,
+                                        message
+                                )
+                            }
+                        }
+                    }
                 }
                 message.mediaType == "GIF" -> {
-                    Image(
-                            painter = rememberAsyncImagePainter(message.mediaUri),
-                            contentDescription = null,
+                    val isRemote = message.mediaUri?.startsWith("http") == true
+                    Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
+                    ) {
+                        Image(
+                                painter = rememberAsyncImagePainter(message.mediaUri),
+                                contentDescription = null,
+                                modifier =
+                                        Modifier.fillMaxWidth().clickable {
+                                            if (!isRemote) onImageClick(message.mediaUri ?: "")
+                                        },
+                                contentScale = ContentScale.FillWidth,
+                                alpha = if (isRemote) 0.5f else 1f
+                        )
+                        androidx.compose.animation.AnimatedVisibility(
+                                visible = isRemote,
+                                enter = fadeIn(),
+                                exit = fadeOut()
+                        ) {
+                            DownloadOverlay(
+                                    isDownloading = message.isDownloading,
+                                    modifier = Modifier.matchParentSize()
+                            ) {
+                                WebSocketManager.downloadMediaManually(
+                                        message.mediaUri!!,
+                                        message.mediaId!!,
+                                        message
+                                )
+                            }
+                        }
+                    }
+                }
+                message.mediaType == "VIDEO" -> {
+                    val isRemote = message.mediaUri?.startsWith("http") == true
+                    Box(
+                            contentAlignment = Alignment.Center,
                             modifier =
                                     Modifier.fillMaxWidth()
                                             .heightIn(max = 300.dp)
-                                            .clickable { onImageClick(message.mediaUri ?: "") },
-                            contentScale = ContentScale.Fit
-                    )
-                }
-                message.mediaType == "VIDEO" -> {
-                    VideoMessageBubble(
-                            videoUri = message.mediaUri ?: "",
-                            onPlayClick = { onVideoClick(message.mediaUri ?: "") }
-                    )
+                                            .clip(RoundedCornerShape(12.dp))
+                    ) {
+                        VideoMessageBubble(
+                                videoUri = if (isRemote) "" else (message.mediaUri ?: ""),
+                                showPlayButton = !isRemote,
+                                onPlayClick = {
+                                    if (!isRemote) {
+                                        onVideoClick(message.mediaUri ?: "")
+                                        if (message.status != MessageStatus.Read && !isMe) {
+                                            WebSocketManager.sendMessageReadAck(
+                                                    message.id,
+                                                    message.from
+                                            )
+                                            onStatusUpdate(message.id, MessageStatus.Read)
+                                        }
+                                    }
+                                }
+                        )
+                        androidx.compose.animation.AnimatedVisibility(
+                                visible = isRemote,
+                                enter = fadeIn(),
+                                exit = fadeOut()
+                        ) {
+                            DownloadOverlay(
+                                    isDownloading = message.isDownloading,
+                                    modifier = Modifier.matchParentSize()
+                            ) {
+                                WebSocketManager.downloadMediaManually(
+                                        message.mediaUri!!,
+                                        message.mediaId!!,
+                                        message
+                                )
+                            }
+                        }
+                    }
                 }
                 else -> {
+                    LaunchedEffect(Unit) {
+                        if (!isMe && message.status != MessageStatus.Read) {
+                            WebSocketManager.sendMessageReadAck(message.id, message.from)
+                            onStatusUpdate(message.id, MessageStatus.Read)
+                        }
+                    }
                     Text(message.text, Modifier.padding(12.dp), color = messageTextColor)
                 }
             }
@@ -1402,6 +1740,13 @@ private fun KeyboardMessageBubble(
                             Icon(
                                     Icons.Default.DoneAll,
                                     null,
+                                    tint = Color.Gray,
+                                    modifier = Modifier.size(16.dp)
+                            )
+                    MessageStatus.Read ->
+                            Icon(
+                                    Icons.Default.DoneAll,
+                                    null,
                                     tint = Color.Green,
                                     modifier = Modifier.size(16.dp)
                             )
@@ -1421,33 +1766,65 @@ private fun KeyboardMessageBubble(
 /* ---------------- AUDIO PLAYER BUBBLE ---------------- */
 
 @Composable
-fun AudioPlayerBubble(audioUri: String, amplitudes: List<Float>, contentColor: Color) {
+fun AudioPlayerBubble(
+        audioUri: String,
+        amplitudes: List<Float>,
+        contentColor: Color,
+        onPlayAcknowledged: () -> Unit = {}
+) {
     val context = LocalContext.current
     var isPlaying by remember { mutableStateOf(false) }
+    var isPrepared by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf(0f) }
     var duration by remember { mutableStateOf(1f) }
 
-    val mediaPlayer = remember {
-        android.media.MediaPlayer().apply {
-            setDataSource(context, Uri.parse(audioUri))
-            prepareAsync()
-        }
-    }
+    val mediaPlayer = remember(audioUri) { android.media.MediaPlayer() }
 
-    DisposableEffect(Unit) {
-        mediaPlayer.setOnPreparedListener { duration = it.duration.toFloat() }
+    DisposableEffect(audioUri) {
+        mediaPlayer.setOnPreparedListener {
+            duration = it.duration.toFloat()
+            isPrepared = true
+            Log.i("AudioPlayer", "Media prepared: $audioUri, duration: $duration")
+        }
         mediaPlayer.setOnCompletionListener {
             isPlaying = false
             progress = 0f
             mediaPlayer.seekTo(0)
         }
-        onDispose { mediaPlayer.release() }
+        mediaPlayer.setOnErrorListener { mp, what, extra ->
+            Log.e("AudioPlayer", "Error playing $audioUri: what=$what, extra=$extra")
+            true
+        }
+
+        try {
+            mediaPlayer.setDataSource(context, Uri.parse(audioUri))
+            mediaPlayer.prepareAsync()
+        } catch (e: Exception) {
+            Log.e("AudioPlayer", "Failed to set data source: $audioUri", e)
+        }
+
+        onDispose {
+            try {
+                if (mediaPlayer.isPlaying) {
+                    mediaPlayer.stop()
+                }
+                mediaPlayer.release()
+            } catch (e: Exception) {
+                Log.e("AudioPlayer", "Error releasing player", e)
+            }
+        }
     }
 
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             while (isPlaying) {
-                progress = mediaPlayer.currentPosition.toFloat()
+                try {
+                    if (mediaPlayer.isPlaying) {
+                        progress = mediaPlayer.currentPosition.toFloat()
+                    }
+                } catch (e: Exception) {
+                    // Handle potential race where player is released but loop runs once more
+                }
                 delay(100)
             }
         }
@@ -1459,20 +1836,39 @@ fun AudioPlayerBubble(audioUri: String, amplitudes: List<Float>, contentColor: C
     ) {
         IconButton(
                 onClick = {
-                    if (isPlaying) {
-                        mediaPlayer.pause()
-                    } else {
-                        mediaPlayer.start()
+                    if (isPrepared) {
+                        if (isPlaying) {
+                            try {
+                                mediaPlayer.pause()
+                            } catch (e: Exception) {
+                                Log.e("AudioPlayer", "Error pausing", e)
+                            }
+                        } else {
+                            try {
+                                mediaPlayer.start()
+                                onPlayAcknowledged()
+                            } catch (e: Exception) {
+                                Log.e("AudioPlayer", "Error starting", e)
+                            }
+                        }
+                        isPlaying = !isPlaying
                     }
-                    isPlaying = !isPlaying
                 },
                 modifier = Modifier.size(36.dp)
         ) {
-            Icon(
-                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = contentColor
-            )
+            if (!isPrepared) {
+                CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = contentColor,
+                        strokeWidth = 2.dp
+                )
+            } else {
+                Icon(
+                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        tint = contentColor
+                )
+            }
         }
 
         Spacer(Modifier.width(4.dp))
@@ -1480,7 +1876,7 @@ fun AudioPlayerBubble(audioUri: String, amplitudes: List<Float>, contentColor: C
         // --- NEW: Audio Waveform ---
         AudioWaveform(
                 amplitudes = amplitudes,
-                progress = progress / duration.coerceAtLeast(1f),
+                progress = if (duration > 0) progress / duration else 0f,
                 modifier = Modifier.weight(1f).height(32.dp),
                 color = contentColor
         )
@@ -1543,7 +1939,7 @@ fun AudioWaveform(
 }
 
 @Composable
-fun VideoMessageBubble(videoUri: String, onPlayClick: () -> Unit) {
+fun VideoMessageBubble(videoUri: String, showPlayButton: Boolean, onPlayClick: () -> Unit) {
     val context = LocalContext.current
     val imageLoader =
             remember(context) {
@@ -1556,8 +1952,7 @@ fun VideoMessageBubble(videoUri: String, onPlayClick: () -> Unit) {
             modifier =
                     Modifier.fillMaxWidth() // Fill width
                             .wrapContentHeight() // Auto-height based on aspect ratio
-                            .padding(4.dp)
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .clickable { onPlayClick() },
             contentAlignment = Alignment.Center
     ) {
@@ -1571,16 +1966,15 @@ fun VideoMessageBubble(videoUri: String, onPlayClick: () -> Unit) {
                 contentScale = ContentScale.FillWidth, // ensure it scales to width, height adapts
         )
 
-        // Slight dark overlay to make play button pop
-        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.2f)))
-
-        IconButton(onClick = onPlayClick, modifier = Modifier.size(64.dp)) {
-            Icon(
-                    Icons.Default.PlayCircle,
-                    contentDescription = "Play Video",
-                    tint = Color.White,
-                    modifier = Modifier.size(64.dp)
-            )
+        if (showPlayButton) {
+            IconButton(onClick = onPlayClick, modifier = Modifier.size(64.dp)) {
+                Icon(
+                        Icons.Default.PlayCircle,
+                        contentDescription = "Play Video",
+                        tint = Color.White,
+                        modifier = Modifier.size(64.dp)
+                )
+            }
         }
     }
 }

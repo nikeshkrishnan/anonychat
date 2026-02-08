@@ -152,6 +152,7 @@ class MainActivity : ComponentActivity() {
                         Log.d("MainActivity", "Received navigation broadcast from service.")
                         val myPrefsJson = intent.getStringExtra("my_prefs_json")
                         val matchedPrefsJson = intent.getStringExtra("matched_prefs_json")
+                        Log.e("MainActivity", "DEBUG: Received matchedPrefsJson: $matchedPrefsJson")
                         val myEmail =
                                 getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
                                         .getString("user_email", null)
@@ -173,6 +174,10 @@ class MainActivity : ComponentActivity() {
                                                                 .GetPreferencesResponse::class
                                                         .java
                                         )
+                                Log.e(
+                                        "MainActivity",
+                                        "DEBUG: deserialized body -> isOnline=${matchedPrefsBody?.isOnline}, lastOnline=${matchedPrefsBody?.lastOnline}"
+                                )
 
                                 val currentUser =
                                         User(
@@ -210,7 +215,9 @@ class MainActivity : ComponentActivity() {
                                                         matchedPrefsBody.romanceRange?.max
                                                                 ?.toFloat()
                                                                 ?: 5f,
-                                                gender = matchedPrefsBody.gender ?: "male"
+                                                gender = matchedPrefsBody.gender ?: "male",
+                                                isOnline = matchedPrefsBody.isOnline ?: false,
+                                                lastSeen = matchedPrefsBody.lastOnline ?: 0L
                                         )
 
                                 val route =
