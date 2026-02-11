@@ -88,6 +88,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -165,6 +166,42 @@ data class ChatMessage(
         val timestamp: Long = System.currentTimeMillis(),
         val status: MessageStatus = MessageStatus.Delivered
 )
+
+sealed class ChatHistoryItem {
+    data class Message(val message: ChatMessage) : ChatHistoryItem()
+    data class DateHeader(val date: String, val timestamp: Long) : ChatHistoryItem()
+}
+
+private fun getFormattedDate(timestamp: Long): String {
+    val now = Calendar.getInstance()
+    val time = Calendar.getInstance().apply { timeInMillis = timestamp }
+
+    return when {
+        isSameDay(now, time) -> "Today"
+        isYesterday(now, time) -> "Yesterday"
+        now.get(Calendar.YEAR) == time.get(Calendar.YEAR) -> {
+            SimpleDateFormat("d MMMM", Locale.getDefault()).format(Date(timestamp))
+        }
+        else -> {
+            SimpleDateFormat("d MMMM yyyy", Locale.getDefault()).format(Date(timestamp))
+        }
+    }
+}
+
+private fun isSameDay(cal1: Calendar, cal2: Calendar): Boolean {
+    return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
+            cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+}
+
+private fun isYesterday(now: Calendar, then: Calendar): Boolean {
+    val yesterday =
+            Calendar.getInstance().apply {
+                timeInMillis = now.timeInMillis
+                add(Calendar.DAY_OF_YEAR, -1)
+            }
+    return yesterday.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
+            yesterday.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
+}
 
 private var mediaRecorder: MediaRecorder? = null
 private var currentAudioFile: File? = null
@@ -330,6 +367,59 @@ fun KeyboardProofScreen(
 
     val messages = remember { mutableStateListOf<ChatMessage>().apply { addAll(initialMessages) } }
 
+    val chatItems by remember {
+        derivedStateOf {
+            val items = mutableListOf<ChatHistoryItem>()
+            val grouped =
+                    messages.groupBy {
+                        val cal = Calendar.getInstance().apply { timeInMillis = it.timestamp }
+                        cal.set(Calendar.HOUR_OF_DAY, 0)
+                        cal.set(Calendar.MINUTE, 0)
+                        cal.set(Calendar.SECOND, 0)
+                        cal.set(Calendar.MILLISECOND, 0)
+                        cal.timeInMillis
+                    }
+
+            val sortedDates = grouped.keys.sortedDescending()
+            for (date in sortedDates) {
+                val dayMessages = grouped[date]?.sortedByDescending { it.timestamp } ?: emptyList()
+                dayMessages.forEach { items.add(ChatHistoryItem.Message(it)) }
+                items.add(ChatHistoryItem.DateHeader(getFormattedDate(date), date))
+            }
+            items
+        }
+    }
+
+    val floatingDate by remember {
+        derivedStateOf {
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            if (visibleItems.isEmpty()) return@derivedStateOf null
+
+            val topItemInfo = visibleItems.maxByOrNull { it.index }
+            val index = topItemInfo?.index ?: return@derivedStateOf null
+
+            if (index < chatItems.size) {
+                val item = chatItems[index]
+                val timestamp =
+                        when (item) {
+                            is ChatHistoryItem.Message -> item.message.timestamp
+                            is ChatHistoryItem.DateHeader -> item.timestamp
+                        }
+                getFormattedDate(timestamp)
+            } else null
+        }
+    }
+
+    var showFloatingDateBanner by remember { mutableStateOf(false) }
+
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            showFloatingDateBanner = true
+        } else {
+            delay(1500)
+            showFloatingDateBanner = false
+        }
+    }
     var presenceStatus by remember {
         mutableStateOf(if (matchedUserPrefs.isOnline) "online" else "offline")
     }
@@ -479,6 +569,8 @@ fun KeyboardProofScreen(
     LaunchedEffect(isMediaOverlayActive) {
         if (isMediaOverlayActive) {
             exoPlayer.pause()
+            // Hide keyboard when entering fullscreen media mode
+            keyboardController?.hide()
         } else {
             exoPlayer.play()
         }
@@ -571,6 +663,44 @@ fun KeyboardProofScreen(
         val ids = messages.map { it.id }
         if (ids.size != ids.distinct().size) {
             Log.e("ChatBUG", "DUPLICATE MESSAGE IDS DETECTED: $ids")
+        }
+    }
+
+    // Visibility-based read acknowledgements
+    // Sends read acks for incoming TEXT messages when they become visible on screen
+    // Works across app restarts because message status is persisted in Room DB
+    // NOTE: Pauses during fullscreen media viewing - acks sent when exiting fullscreen
+    // NOTE: Skips audio/image/video/gif - those get read acks on play/download complete
+    LaunchedEffect(listState, messages.size, isMediaOverlayActive) {
+        // Skip read acks while in fullscreen media mode
+        if (isMediaOverlayActive) return@LaunchedEffect
+
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo }.collect { visibleItems ->
+            visibleItems.forEach { visibleItem ->
+                // Convert from lazy list index to actual message index
+                // In reverseLayout, item at visibleItem.index maps to messages[messages.size - 1 -
+                // index]
+                val messageIndex = messages.size - 1 - visibleItem.index
+                if (messageIndex in messages.indices) {
+                    val msg = messages[messageIndex]
+                    // Only process incoming TEXT messages that haven't been read yet
+                    // Skip audio (read ack on play), image/video/gif (read ack on download
+                    // complete)
+                    val isMediaMessage = msg.audioUri != null || msg.mediaType != null
+                    if (msg.from != localGmail &&
+                                    msg.status != MessageStatus.Read &&
+                                    !isMediaMessage
+                    ) {
+                        Log.d("ReadAck", "Sending read ack for visible text message: ${msg.id}")
+                        // Send read ack to server
+                        WebSocketManager.sendMessageReadAck(msg.id, msg.from)
+                        // Update local state
+                        messages[messageIndex] = msg.copy(status = MessageStatus.Read)
+                        // Persist to Room DB
+                        WebSocketManager.updateMessageStatus(msg.id, MessageStatus.Read)
+                    }
+                }
+            }
         }
     }
 
@@ -808,13 +938,21 @@ fun KeyboardProofScreen(
                                             color = headerContentColor
                                     )
                                     val presenceText =
-                                            if (presenceStatus == "online") "Online"
-                                            else if (lastSeenTime > 0)
-                                                    "Last seen ${
-                                            SimpleDateFormat("HH:mm", Locale.getDefault())
-                                                .format(Date(lastSeenTime))
-                                        }"
-                                            else "Offline"
+                                            if (presenceStatus == "online") {
+                                                "Online"
+                                            } else if (lastSeenTime > 0) {
+                                                val now = System.currentTimeMillis()
+                                                val diffMillis = now - lastSeenTime
+                                                val diffDays = diffMillis / (1000 * 60 * 60 * 24)
+
+                                                if (diffDays >= 1) {
+                                                    "Last seen $diffDays day${if (diffDays > 1L) "s" else ""} ago"
+                                                } else {
+                                                    "Last seen ${SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(lastSeenTime))}"
+                                                }
+                                            } else {
+                                                "Offline"
+                                            }
                                     Text(
                                             text = presenceText,
                                             fontWeight = FontWeight.Normal,
@@ -833,30 +971,109 @@ fun KeyboardProofScreen(
                             modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                             contentPadding = PaddingValues(bottom = 60.dp, top = 8.dp)
                     ) {
-                        // In reverse layout, item 0 is at the bottom.
-                        // We want the newest message (last in the list) to be at the bottom (index
-                        // 0).
                         items(
-                                count = messages.size,
-                                key = { index -> messages[messages.size - 1 - index].id }
-                        ) { index ->
-                            val msg = messages[messages.size - 1 - index]
-                            KeyboardMessageBubble(
-                                    message = msg,
-                                    isMe = msg.from == localGmail,
-                                    incomingBubbleColor = incomingBubbleColor,
-                                    outgoingBubbleColor = outgoingBubbleColor,
-                                    messageTextColor = messageTextColor,
-                                    onVideoClick = { fullScreenVideoUri = it },
-                                    onImageClick = { fullScreenImageUri = it },
-                                    onStatusUpdate = { id, status ->
-                                        val idx = messages.indexOfFirst { it.id == id }
-                                        if (idx != -1) {
-                                            messages[idx] = messages[idx].copy(status = status)
-                                        }
-                                        WebSocketManager.updateMessageStatus(id, status)
+                                count = chatItems.size,
+                                key = { index ->
+                                    when (val item = chatItems[index]) {
+                                        is ChatHistoryItem.Message -> item.message.id
+                                        is ChatHistoryItem.DateHeader -> "header_${item.timestamp}"
                                     }
-                            )
+                                }
+                        ) { index ->
+                            when (val item = chatItems[index]) {
+                                is ChatHistoryItem.Message -> {
+                                    val msg = item.message
+                                    KeyboardMessageBubble(
+                                            message = msg,
+                                            isMe = msg.from == localGmail,
+                                            incomingBubbleColor = incomingBubbleColor,
+                                            outgoingBubbleColor = outgoingBubbleColor,
+                                            messageTextColor = messageTextColor,
+                                            onVideoClick = { fullScreenVideoUri = it },
+                                            onImageClick = { fullScreenImageUri = it },
+                                            onStatusUpdate = { id, status ->
+                                                val idx = messages.indexOfFirst { it.id == id }
+                                                if (idx != -1) {
+                                                    messages[idx] =
+                                                            messages[idx].copy(status = status)
+                                                }
+                                                WebSocketManager.updateMessageStatus(id, status)
+                                            }
+                                    )
+                                }
+                                is ChatHistoryItem.DateHeader -> {
+                                    Box(
+                                            modifier =
+                                                    Modifier.fillMaxWidth()
+                                                            .padding(vertical = 12.dp),
+                                            contentAlignment = Alignment.Center
+                                    ) {
+                                        Surface(
+                                                color =
+                                                        Color(0x33000000)
+                                                                .compositeOver(
+                                                                        Color.Gray.copy(
+                                                                                alpha = 0.1f
+                                                                        )
+                                                                ),
+                                                shape = RoundedCornerShape(12.dp),
+                                                modifier =
+                                                        Modifier.padding(
+                                                                horizontal = 16.dp,
+                                                                vertical = 4.dp
+                                                        )
+                                        ) {
+                                            Text(
+                                                    text = item.date,
+                                                    color = messageTextColor.copy(alpha = 0.8f),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    modifier =
+                                                            Modifier.padding(
+                                                                    horizontal = 12.dp,
+                                                                    vertical = 6.dp
+                                                            )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Floating Date Banner
+                    AnimatedVisibility(
+                            visible = showFloatingDateBanner && floatingDate != null,
+                            enter = fadeIn(),
+                            exit = fadeOut(),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp).zIndex(1f)
+                    ) {
+                        Box(contentAlignment = Alignment.TopCenter) {
+                            floatingDate?.let { date ->
+                                Surface(
+                                        color =
+                                                Color(0xCC000000)
+                                                        .compositeOver(
+                                                                Color.Gray.copy(alpha = 0.2f)
+                                                        ),
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier =
+                                                Modifier.padding(
+                                                        horizontal = 16.dp,
+                                                        vertical = 4.dp
+                                                )
+                                ) {
+                                    Text(
+                                            text = date,
+                                            color = messageTextColor.copy(alpha = 0.9f),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            modifier =
+                                                    Modifier.padding(
+                                                            horizontal = 12.dp,
+                                                            vertical = 6.dp
+                                                    )
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -1518,14 +1735,24 @@ private fun DownloadOverlay(
         modifier: Modifier = Modifier,
         onDownload: () -> Unit
 ) {
+    // Track if download was initiated to show buffering immediately
+    var downloadInitiated by remember { mutableStateOf(false) }
+    val showBuffering = isDownloading || downloadInitiated
+
+    // Reset downloadInitiated when isDownloading becomes true (actual download started)
+    LaunchedEffect(isDownloading) { if (isDownloading) downloadInitiated = false }
+
     Box(
             modifier =
                     modifier.background(Color.Black.copy(alpha = 0.7f)).clickable {
-                        if (!isDownloading) onDownload()
+                        if (!showBuffering) {
+                            downloadInitiated = true
+                            onDownload()
+                        }
                     },
             contentAlignment = Alignment.Center
     ) {
-        if (isDownloading) {
+        if (showBuffering) {
             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
         } else {
             Icon(
@@ -1697,12 +1924,6 @@ private fun KeyboardMessageBubble(
                     }
                 }
                 else -> {
-                    LaunchedEffect(Unit) {
-                        if (!isMe && message.status != MessageStatus.Read) {
-                            WebSocketManager.sendMessageReadAck(message.id, message.from)
-                            onStatusUpdate(message.id, MessageStatus.Read)
-                        }
-                    }
                     Text(message.text, Modifier.padding(12.dp), color = messageTextColor)
                 }
             }

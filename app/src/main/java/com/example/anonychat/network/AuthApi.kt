@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.google.gson.annotations.SerializedName
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import okhttp3.Call
 import okhttp3.EventListener
@@ -22,6 +23,54 @@ import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
 
+class RetryInterceptor(private val maxRetries: Int = 3) : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
+                var request = chain.request()
+                var response: okhttp3.Response? = null
+                var exception: IOException? = null
+                var tryCount = 0
+
+                while (tryCount < maxRetries && response == null) {
+                        try {
+                                if (tryCount > 0) {
+                                        // Simple exponential backoff: 200ms, 400ms, 800ms
+                                        val sleepTime = 200L * (1 shl (tryCount - 1))
+                                        Thread.sleep(sleepTime)
+                                        Log.d(
+                                                "RetryInterceptor",
+                                                "Retrying request ($tryCount) for: ${request.url}"
+                                        )
+                                }
+                                response = chain.proceed(request)
+                                if (!response.isSuccessful && shouldRetry(response.code)) {
+                                        response.close()
+                                        response = null
+                                }
+                        } catch (e: IOException) {
+                                exception = e
+                                Log.e(
+                                        "RetryInterceptor",
+                                        "Request failed ($tryCount): ${e.message}"
+                                )
+                        }
+                        tryCount++
+                }
+
+                // If we have a response, return it
+                if (response != null) {
+                        return response
+                }
+
+                // Otherwise throw the last exception
+                throw exception ?: IOException("Request failed after $maxRetries retries")
+        }
+
+        private fun shouldRetry(code: Int): Boolean {
+                // Retry on server errors (5xx) or request timeout (408)
+                return code >= 500 || code == 408
+        }
+}
+
 // This interceptor adds the auth token to requests
 class AuthInterceptor(context: Context) : Interceptor {
         private val sharedPreferences: SharedPreferences =
@@ -37,14 +86,15 @@ class AuthInterceptor(context: Context) : Interceptor {
                 val requestBuilder = originalRequest.newBuilder()
 
                 token?.let {
-                        requestBuilder.addHeader("Authorization", "Bearer $it")
-                        Log.d(
-                                "AuthInterceptor",
-                                "Token added to header for URL: ${originalRequest.url}"
-                        )
+                        // Skip adding token for login and register endpoints
+                        val url = originalRequest.url.toString()
+                        if (!url.contains("auth/login") && !url.contains("auth/register")) {
+                                requestBuilder.addHeader("Authorization", "Bearer $it")
+                                Log.d("AuthInterceptor", "Token added to header for URL: $url")
+                        }
                 }
 
-                val request = requestBuilder.addHeader("Connection", "close").build()
+                val request = requestBuilder.build()
                 return chain.proceed(request)
         }
 }
@@ -102,7 +152,21 @@ data class UserResetPasswordRequest(
         val newPassword: String
 )
 
-data class MatchResponse(val match: String?)
+data class MatchResponse(
+        val username: String?,
+        val gmail: String?,
+        val age: Int?,
+        val gender: String?,
+        val preferredGender: String?,
+        val romanceRange: RomanceRange?,
+        val random: Boolean?,
+        val preferredAgeRange: AgeRange?,
+        val pickBestflag: Boolean?,
+        @SerializedName("isOnline") val isOnline: Boolean?,
+        @SerializedName("lastOnline") val lastOnline: Long?,
+        val match: String? // Keep match for backward compatibility if it's still being sent as the
+// primary identifier
+)
 
 // --- API INTERFACE ---
 interface AuthApiService {
@@ -130,7 +194,7 @@ interface AuthApiService {
 
 // --- NETWORK CLIENT (SINGLETON) ---
 object NetworkClient {
-        private const val BASE_URL = "http://192.168.1.91:8080/"
+        private const val BASE_URL = NetworkConfig.BASE_URL
         private lateinit var retrofit: Retrofit
 
         // Lazily initialize the api service after `initialize` has been called
@@ -210,7 +274,19 @@ object NetworkClient {
 
         // This function must be called from AnonychatApp.kt
         fun initialize(context: Context) {
-                if (::retrofit.isInitialized) return
+                // FORCE IPv4 to avoid IPv6 timeouts/stale socket issues on some devices
+                System.setProperty("java.net.preferIPv4Stack", "true")
+
+                // If already initialized, try to clean up stale connections before returning
+                if (::retrofit.isInitialized) {
+                        try {
+                                val client = retrofit.callFactory() as? OkHttpClient
+                                client?.connectionPool?.evictAll()
+                                client?.dispatcher?.executorService?.shutdown()
+                        } catch (e: Exception) {
+                                Log.e("NetworkClient", "Failed to cleanup stale connections", e)
+                        }
+                }
 
                 val loggingInterceptor =
                         HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BODY }
@@ -218,18 +294,33 @@ object NetworkClient {
                 // Create an instance of our custom interceptor
                 val authInterceptor = AuthInterceptor(context)
 
+                // Use a custom ConnectionPool that we can explicitly clear if needed
+                val connectionPool = okhttp3.ConnectionPool()
+
                 val httpClient =
                         OkHttpClient.Builder()
                                 .eventListenerFactory { getTracingEventListener() }
                                 .protocols(listOf(Protocol.HTTP_1_1))
+                                .connectionPool(connectionPool)
                                 .retryOnConnectionFailure(true)
-                                .addInterceptor(
-                                        authInterceptor
-                                ) // Add the authentication interceptor here
-                                .connectTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                                .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                                .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                                .addInterceptor(RetryInterceptor()) // Add retry logic
+                                .addInterceptor(authInterceptor)
+                                .addInterceptor(loggingInterceptor)
+                                .addInterceptor { chain ->
+                                        val request =
+                                                chain.request()
+                                                        .newBuilder()
+                                                        .header("Connection", "close")
+                                                        .build()
+                                        chain.proceed(request)
+                                }
+                                .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                                .writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
                                 .build()
+
+                // Aggressively evict any potential stale connections from the pool on startup
+                connectionPool.evictAll()
 
                 retrofit =
                         Retrofit.Builder()

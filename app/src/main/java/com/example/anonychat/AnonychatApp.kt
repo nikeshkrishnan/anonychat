@@ -7,6 +7,10 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketManager
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+
 class AnonychatApp : Application() {
 
     override fun onCreate() {
@@ -14,7 +18,10 @@ class AnonychatApp : Application() {
 
         NetworkClient.initialize(this)
 
-
+        // Initialize WebSocketManager in background to avoid blocking main thread
+        CoroutineScope(Dispatchers.IO).launch {
+            WebSocketManager.init(applicationContext)
+        }
     }
 }
 

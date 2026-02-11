@@ -23,6 +23,7 @@ import androidx.core.app.NotificationCompat
 import com.example.anonychat.R
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
+import com.example.anonychat.network.GetPreferencesResponse
 import com.example.anonychat.network.NetworkClient
 import kotlinx.coroutines.*
 
@@ -256,7 +257,8 @@ class BirdBubbleService : Service() {
                     }
 
             // --- Robust null check: API returns JSON like {"match":"..."} or {"match":null}
-            val matchedEmail = matchResponse?.takeIf { it.isSuccessful }?.body()?.match
+            val matchObj = matchResponse?.takeIf { it.isSuccessful }?.body()
+            val matchedEmail = matchObj?.gmail ?: matchObj?.match
 
             if (matchedEmail.isNullOrBlank()) {
                 Log.w(TAG, "No match found in API response. Reverting to bird.")
@@ -265,33 +267,47 @@ class BirdBubbleService : Service() {
                 return@launch
             }
 
-            Log.d(TAG, "Match found: $matchedEmail. Fetching preferences...")
+            Log.d(TAG, "Match found: $matchedEmail. Saving preferences...")
             try {
-                val myPrefsDeferred =
-                        async(Dispatchers.IO) { NetworkClient.api.getPreferences(email) }
-                val matchedPrefsDeferred =
-                        async(Dispatchers.IO) { NetworkClient.api.getPreferences(matchedEmail) }
+                // We still fetch our own preferences if needed, but matched user's prefs are
+                // already in matchObj
+                val myPrefsResponse =
+                        withContext(Dispatchers.IO) { NetworkClient.api.getPreferences(email) }
 
-                val myPrefsResponse = myPrefsDeferred.await()
-                val matchedPrefsResponse = matchedPrefsDeferred.await()
-
-                // Stop vibration only after all network calls are complete
+                // Stop vibration only after network call is complete
                 stopVibration()
 
-                if (!myPrefsResponse.isSuccessful || !matchedPrefsResponse.isSuccessful) {
-                    Log.e(TAG, "Failed to fetch preferences for one or both users.")
+                if (!myPrefsResponse.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch preferences for current user.")
                     revertToBird()
                     return@launch
                 }
 
                 // 4️⃣ Store all necessary data in SharedPreferences for the tap handler
-                val matchedBody = matchedPrefsResponse.body()
                 val gson = com.google.gson.Gson()
                 val myPrefsJson = gson.toJson(myPrefsResponse.body())
-                val matchedPrefsJson = gson.toJson(matchedBody)
+
+                // Convert matchObj (which has the matched user's prefs) to the format expected by
+                // the app
+                val match = matchObj!!
+                val matchedPrefsData =
+                        GetPreferencesResponse(
+                                username = match.username,
+                                gmail = match.gmail,
+                                age = match.age,
+                                gender = match.gender,
+                                preferredGender = match.preferredGender,
+                                romanceRange = match.romanceRange,
+                                preferredAgeRange = match.preferredAgeRange,
+                                random = match.random,
+                                isOnline = match.isOnline,
+                                lastOnline = match.lastOnline
+                        )
+                val matchedPrefsJson = gson.toJson(matchedPrefsData)
+
                 Log.e(
                         TAG,
-                        "DEBUG: matchedBody fields -> isOnline=${matchedBody?.isOnline}, lastOnline=${matchedBody?.lastOnline}"
+                        "DEBUG: matchObj fields -> isOnline=${matchObj?.isOnline}, lastOnline=${matchObj?.lastOnline}"
                 )
                 Log.e(TAG, "DEBUG: Saving matchedPrefsJson: $matchedPrefsJson")
                 with(userPrefs.edit()) {

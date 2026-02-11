@@ -23,6 +23,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -31,6 +32,7 @@ import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
+import okhttp3.logging.HttpLoggingInterceptor
 import okio.BufferedSink
 import okio.sink
 import okio.source
@@ -86,7 +88,10 @@ interface ChatHistoryDao {
     @Query(
             "SELECT * FROM chat_history WHERE (fromEmail = :user1 AND toEmail = :user2) OR (fromEmail = :user2 AND toEmail = :user1) ORDER BY sequence ASC"
     )
-    suspend fun getConversation(user1: String, user2: String): List<ChatHistoryEntity>
+    fun getConversation(
+            user1: String,
+            user2: String
+    ): kotlinx.coroutines.flow.Flow<List<ChatHistoryEntity>>
 
     @Query("SELECT COALESCE(MAX(sequence), 0) + 1 FROM chat_history")
     suspend fun getNextSequence(): Long
@@ -105,6 +110,14 @@ interface ChatHistoryDao {
             "UPDATE chat_history SET audioUri = :uri, isDownloading = :isDownloading WHERE id = :messageId"
     )
     suspend fun updateAudioDownload(messageId: String, uri: String, isDownloading: Boolean)
+
+    @Query(
+            "UPDATE chat_history SET status = :status WHERE id = :messageId AND status != :skippedStatus"
+    )
+    suspend fun updateStatusIfNot(messageId: String, status: String, skippedStatus: String)
+
+    @Query("SELECT status FROM chat_history WHERE id = :messageId")
+    suspend fun getStatus(messageId: String): String?
 }
 
 class Converters {
@@ -200,8 +213,8 @@ private val connectMutex = Mutex()
 @Volatile private var readyState: ReadyState = ReadyState.NOT_READY
 
 // Media endpoints
-private const val MEDIA_UPLOAD = "http://192.168.1.91:8080/media/upload"
-private const val MEDIA_DOWNLOAD_ACK = "http://192.168.1.91:8080/media/download/ack"
+//    private const val MEDIA_UPLOAD = "${NetworkConfig.BASE_URL}media/upload"
+//    private const val MEDIA_DOWNLOAD_ACK = "${NetworkConfig.BASE_URL}media/download/ack"
 
 private lateinit var appContext: Context
 
@@ -371,6 +384,17 @@ object WebSocketManager {
                             }
                         }
                     }
+                    .pingInterval(
+                            30,
+                            java.util.concurrent.TimeUnit.SECONDS
+                    ) // Keep connection alive
+                    .protocols(listOf(Protocol.HTTP_1_1)) // Force HTTP/1.1
+                    .addInterceptor(
+                            HttpLoggingInterceptor { message ->
+                                Log.e("WebSocketManager", "[HTTP] $message")
+                            }
+                                    .apply { level = HttpLoggingInterceptor.Level.BODY }
+                    )
                     .build()
 
     private var webSocket: WebSocket? = null
@@ -385,8 +409,8 @@ object WebSocketManager {
     private var wsUrl: String? = null
     private var reconnectAttempt = 0
 
-    private const val MEDIA_BASE_URL = "http://192.168.1.91:8080"
-    private const val MEDIA_UPLOAD = "$MEDIA_BASE_URL/upload"
+    private const val MEDIA_BASE_URL = NetworkConfig.BASE_URL
+    private const val MEDIA_UPLOAD = "${NetworkConfig.BASE_URL}media/upload"
 
     private const val MAX_RETRIES = 5
     private const val MAX_RECONNECT_DELAY_MS = 30_000L
@@ -532,8 +556,6 @@ object WebSocketManager {
 
         initialized = true
         Log.i("WebSocketManager", "Initialized with pending messages=${pendingQueue.size}")
-
-        registerNetworkCallback(context)
     }
 
     private fun ensureInit() {
@@ -598,8 +620,11 @@ object WebSocketManager {
                         _events.emit(WebSocketEvent.NewMessage(updatedMsg))
                     }
 
-                    // After download, for IMAGE and GIF, we send MessageReadAck
-                    if (updatedMsg.mediaType == "IMAGE" || updatedMsg.mediaType == "GIF") {
+                    // After download, for IMAGE, GIF, and VIDEO, we send MessageReadAck
+                    if (updatedMsg.mediaType == "IMAGE" ||
+                                    updatedMsg.mediaType == "GIF" ||
+                                    updatedMsg.mediaType == "VIDEO"
+                    ) {
                         sendMessageReadAck(updatedMsg.id, updatedMsg.from)
                     }
                 }
@@ -617,7 +642,7 @@ object WebSocketManager {
             val json = JSONObject().put("mediaId", mediaId).toString()
             val body = RequestBody.create("application/json".toMediaTypeOrNull(), json)
 
-            val rb = Request.Builder().url(MEDIA_DOWNLOAD_ACK).post(body)
+            val rb = Request.Builder().url("${NetworkConfig.BASE_URL}media/download/ack").post(body)
 
             if (token != null) rb.header("Authorization", "Bearer $token")
 
@@ -692,7 +717,7 @@ object WebSocketManager {
                     }
 
                     wsUrl =
-                            "ws://192.168.1.91:8080/?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
+                            "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
                     Log.i("WebSocketManager", "connect: Constructed WS URL: $wsUrl")
 
                     // Atomic boolean to ensure we resume the continuation exactly once
@@ -848,24 +873,26 @@ object WebSocketManager {
                 val compressedFile =
                         File(appContext.cacheDir, "compressed_${System.currentTimeMillis()}.jpg")
 
-                // Try different quality levels until we get under 2MB
+                // Try different quality levels until we get under 3MB
                 var quality = 90
                 var compressedSize = Long.MAX_VALUE
+                val format =
+                        if (contentType == "image/png") android.graphics.Bitmap.CompressFormat.PNG
+                        else android.graphics.Bitmap.CompressFormat.JPEG
 
                 while (quality >= 10 && compressedSize > maxSizeBytes) {
                     compressedFile.outputStream().use { output ->
-                        originalBitmap.compress(
-                                android.graphics.Bitmap.CompressFormat.JPEG,
-                                quality,
-                                output
-                        )
+                        originalBitmap.compress(format, quality, output)
                     }
                     compressedSize = compressedFile.length()
                     Log.e(
                             "WebSocketManager",
-                            "[COMPRESS] Quality: $quality%, Size: ${compressedSize / 1024}KB"
+                            "[COMPRESS] Quality: $quality%, Size: ${compressedSize / 1024}KB, Format: $format"
                     )
 
+                    if (format == android.graphics.Bitmap.CompressFormat.PNG)
+                            break // PNG doesn't support quality levels in the same way for size
+                    // reduction usually
                     if (compressedSize > maxSizeBytes) {
                         quality -= 10
                     }
@@ -888,12 +915,12 @@ object WebSocketManager {
                                         true
                                 )
 
+                        val format =
+                                if (contentType == "image/png")
+                                        android.graphics.Bitmap.CompressFormat.PNG
+                                else android.graphics.Bitmap.CompressFormat.JPEG
                         compressedFile.outputStream().use { output ->
-                            scaledBitmap.compress(
-                                    android.graphics.Bitmap.CompressFormat.JPEG,
-                                    85,
-                                    output
-                            )
+                            scaledBitmap.compress(format, 85, output)
                         }
 
                         scaledBitmap.recycle()
@@ -979,6 +1006,27 @@ object WebSocketManager {
                     "WebSocketManager",
                     "[TRACE] Compression took ${System.currentTimeMillis() - compressStart}ms"
             )
+
+            // Ensure permanent local storage for sender side persistence
+            val extension = contentType.substringAfter('/', "bin").substringBefore('+')
+            val localFileName = "sent_${localId.replace(":", "_")}.${extension}"
+            val permanentFile = File(appContext.filesDir, localFileName)
+            try {
+                appContext.contentResolver.openInputStream(actualFileUri)?.use { input ->
+                    permanentFile.outputStream().use { output -> input.copyTo(output) }
+                }
+                val permanentUri = "file://${permanentFile.absolutePath}"
+                Log.e("WebSocketManager", "[PERSIST] Saved permanent local copy: $permanentUri")
+
+                // Update history with permanent URI
+                if (contentType.startsWith("audio")) {
+                    historyDao.updateAudioDownload(localId, permanentUri, false)
+                } else {
+                    historyDao.updateMediaDownload(localId, permanentUri, false)
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "[PERSIST] Failed to save permanent copy", e)
+            }
 
             while (!uploadSuccessful && retryCount <= MAX_RETRIES) {
                 try {
@@ -1136,6 +1184,7 @@ object WebSocketManager {
                                             put("mediaId", mediaId)
                                             put("url", url)
                                             put("contentType", contentType)
+                                            put("timestamp", chatMessage.timestamp)
                                             if (amplitudes != null) {
                                                 val ampJson = org.json.JSONArray()
                                                 amplitudes.forEach { ampJson.put(it.toDouble()) }
@@ -1511,7 +1560,11 @@ object WebSocketManager {
                                                     }
                                                             ?: emptyList(),
                                             mediaId = mediaId,
-                                            timestamp = json.optLong("timestamp")
+                                            timestamp =
+                                                    json.optLong(
+                                                            "timestamp",
+                                                            System.currentTimeMillis()
+                                                    )
                                     )
                                 }
                                 contentType == "image/gif" -> {
@@ -1523,7 +1576,11 @@ object WebSocketManager {
                                             mediaUri = url,
                                             mediaType = "GIF",
                                             mediaId = mediaId,
-                                            timestamp = json.optLong("timestamp")
+                                            timestamp =
+                                                    json.optLong(
+                                                            "timestamp",
+                                                            System.currentTimeMillis()
+                                                    )
                                     )
                                 }
                                 contentType.startsWith("image") -> {
@@ -1535,7 +1592,11 @@ object WebSocketManager {
                                             mediaUri = url,
                                             mediaType = "IMAGE",
                                             mediaId = mediaId,
-                                            timestamp = json.optLong("timestamp")
+                                            timestamp =
+                                                    json.optLong(
+                                                            "timestamp",
+                                                            System.currentTimeMillis()
+                                                    )
                                     )
                                 }
                                 contentType.startsWith("video") -> {
@@ -1547,7 +1608,11 @@ object WebSocketManager {
                                             mediaUri = url,
                                             mediaType = "VIDEO",
                                             mediaId = mediaId,
-                                            timestamp = json.optLong("timestamp")
+                                            timestamp =
+                                                    json.optLong(
+                                                            "timestamp",
+                                                            System.currentTimeMillis()
+                                                    )
                                     )
                                 }
                                 else -> {
@@ -1557,7 +1622,11 @@ object WebSocketManager {
                                             to = localEmail,
                                             text = url,
                                             mediaId = mediaId,
-                                            timestamp = json.optLong("timestamp")
+                                            timestamp =
+                                                    json.optLong(
+                                                            "timestamp",
+                                                            System.currentTimeMillis()
+                                                    )
                                     )
                                 }
                             }
@@ -1577,8 +1646,8 @@ object WebSocketManager {
                             _events.emit(WebSocketEvent.NewMessage(downloadingMsg))
                         }
                         scope.launch {
-                            downloadMediaAndAck(url, mediaId, downloadingMsg)
                             sendMessageReceivedAck(messageId, json.getString("from"))
+                            downloadMediaAndAck(url, mediaId, downloadingMsg)
                         }
                     } else {
                         // Image/Video: Ack immediately, download will be manual via UI
@@ -1594,7 +1663,8 @@ object WebSocketManager {
                                     from = json.getString("from"),
                                     to = localEmail,
                                     text = json.getString("content"),
-                                    timestamp = json.optLong("timestamp")
+                                    timestamp =
+                                            json.optLong("timestamp", System.currentTimeMillis())
                             )
 
                     // chat_message received:
@@ -1612,10 +1682,12 @@ object WebSocketManager {
 
                     // This means: peer has RECEIVED the message
                     // UI should show delivered (double tick, etc.)
+                    // Only update if not already Read (prevent downgrade)
                     scope.launch {
-                        historyDao.updateStatus(
+                        historyDao.updateStatusIfNot(
                                 messageId,
-                                com.example.anonychat.ui.MessageStatus.Delivered.name
+                                com.example.anonychat.ui.MessageStatus.Delivered.name,
+                                com.example.anonychat.ui.MessageStatus.Read.name
                         )
                     }
                     withContext(Dispatchers.Main.immediate) {
@@ -1786,6 +1858,7 @@ object WebSocketManager {
                             put("content", text)
                             put("id", localId)
                             put("messageId", localId)
+                            put("timestamp", chatMessage.timestamp)
                         }
                         .toString()
 
@@ -2136,9 +2209,8 @@ object WebSocketManager {
             user1: String,
             user2: String
     ): kotlinx.coroutines.flow.Flow<List<ChatMessage>> =
-            kotlinx.coroutines.flow.flow {
-                val history = historyDao.getConversation(user1, user2)
-                emit(history.map { it.toModel() })
+            historyDao.getConversation(user1, user2).map { entities ->
+                entities.map { it.toModel() }
             }
 
     private fun saveToHistory(message: ChatMessage) {

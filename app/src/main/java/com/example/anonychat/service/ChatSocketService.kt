@@ -6,23 +6,23 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
+import androidx.core.app.ServiceCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.example.anonychat.AppVisibility
 import com.example.anonychat.R
 import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.network.WebSocketManager.reconnectIfNeeded
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import android.content.pm.ServiceInfo
-import android.util.Log
-import androidx.core.app.ServiceCompat
-import com.example.anonychat.network.WebSocketManager.reconnectIfNeeded
-import com.example.anonychat.AppVisibility
 
 class ChatSocketService : Service() {
 
@@ -38,14 +38,12 @@ class ChatSocketService : Service() {
                 WebSocketManager.reconnectIfNeeded(applicationContext)
                 WebSocketManager.sendPresence("online")
             }
-
             Lifecycle.Event.ON_STOP -> {
                 Log.e("APP TO BACKD=GROUND!!!!!!!!!!!", "OFFLINE")
                 AppVisibility.onAppStopped()
                 // App moved to background
                 WebSocketManager.sendPresence("offline")
             }
-
             else -> Unit
         }
     }
@@ -55,31 +53,40 @@ class ChatSocketService : Service() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // Android 14+
             ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                buildNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                    this,
+                    NOTIFICATION_ID,
+                    buildNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
             )
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
         // Observe app foreground/background
-        ProcessLifecycleOwner.Companion.get()
-            .lifecycle
-            .addObserver(appLifecycleObserver)
+        ProcessLifecycleOwner.Companion.get().lifecycle.addObserver(appLifecycleObserver)
 
         serviceScope.launch {
             WebSocketManager.init(applicationContext)
-            WebSocketManager.connect(applicationContext)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                WebSocketManager.registerNetworkCallback(applicationContext)
+            }
+
+            try {
+                WebSocketManager.connect(applicationContext)
+            } catch (e: Exception) {
+                Log.e("ChatSocketService", "Connection init failed", e)
+            }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
-        ProcessLifecycleOwner.Companion.get()
-            .lifecycle
-            .removeObserver(appLifecycleObserver)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            WebSocketManager.unregisterNetworkCallback()
+        }
+
+        ProcessLifecycleOwner.Companion.get().lifecycle.removeObserver(appLifecycleObserver)
 
         serviceScope.launch {
             WebSocketManager.sendPresence("offline")
@@ -103,24 +110,22 @@ class ChatSocketService : Service() {
         val channelId = createNotificationChannel()
 
         val builder =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(this, channelId)
-            } else {
-                Notification.Builder(this)
-            }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    Notification.Builder(this, channelId)
+                } else {
+                    Notification.Builder(this)
+                }
 
-        builder
-            .setContentTitle("AnonyChat")
-            .setContentText("Connected")
-            .setSmallIcon(R.drawable.ic_notification)
+        builder.setContentTitle("AnonyChat")
+                .setContentText("Connected")
+                .setSmallIcon(R.drawable.ic_notification)
 
         val notification =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-                builder.build()
-            } else {
-                @Suppress("DEPRECATION")
-                builder.getNotification()
-            }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
+                    builder.build()
+                } else {
+                    @Suppress("DEPRECATION") builder.getNotification()
+                }
 
         notification.flags = notification.flags or Notification.FLAG_ONGOING_EVENT
         return notification
@@ -130,15 +135,17 @@ class ChatSocketService : Service() {
         val channelId = "chat_socket_channel"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "Chat Connection",
-                NotificationManager.IMPORTANCE_LOW
-            )
+            val channel =
+                    NotificationChannel(
+                            channelId,
+                            "Chat Connection",
+                            NotificationManager.IMPORTANCE_LOW
+                    )
             channel.setShowBadge(false)
 
             val manager =
-                applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as
+                            NotificationManager
 
             manager.createNotificationChannel(channel)
         }
