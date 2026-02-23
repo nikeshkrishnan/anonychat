@@ -79,6 +79,18 @@ import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
 import com.example.anonychat.network.NetworkClient
 import kotlinx.coroutines.launch
+// Helper function to format numbers like YouTube (1k, 1.5k, 1M, etc.)
+private fun formatCount(count: Int): String {
+    return when {
+        count < 1000 -> count.toString()
+        count < 10000 -> String.format("%.1fk", count / 1000.0).replace(".0k", "k")
+        count < 100000 -> String.format("%.0fk", count / 1000.0)
+        count < 1000000 -> String.format("%.0fk", count / 1000.0)
+        count < 10000000 -> String.format("%.1fM", count / 1000000.0).replace(".0M", "M")
+        else -> String.format("%.0fM", count / 1000000.0)
+    }
+}
+
 
 @RequiresApi(Build.VERSION_CODES.P)
 private fun registerPlayOnceCallback(
@@ -335,7 +347,7 @@ fun ChatScreen(
 
                                                 // 1. ROSE COUNT (3D & Bright)
                                                 Text(
-                                                        text = "$roses",
+                                                        text = formatCount(roses),
                                                         style =
                                                                 TextStyle(
                                                                         color =
@@ -400,7 +412,7 @@ fun ChatScreen(
                                                                                         )
                                                                                         .data(
                                                                                                 R.drawable
-                                                                                                        .rose
+                                                                                                        .roseg
                                                                                         )
                                                                                         .memoryCacheKey(
                                                                                                 flowerKey
@@ -420,7 +432,7 @@ fun ChatScreen(
 
                                                 // 2. SPARK COUNT (3D & Bright)
                                                 Text(
-                                                        text = "$sparks",
+                                                        text = formatCount(sparks),
                                                         style =
                                                                 TextStyle(
                                                                         color =
@@ -464,7 +476,7 @@ fun ChatScreen(
                                                                                         )
                                                                                         .data(
                                                                                                 R.drawable
-                                                                                                        .thunder
+                                                                                                        .sparkling
                                                                                         )
                                                                                         .memoryCacheKey(
                                                                                                 thunderKey
@@ -475,7 +487,7 @@ fun ChatScreen(
                                                                 ),
                                                         contentDescription = "Sparks",
                                                         modifier =
-                                                                Modifier.size(24.dp).clickable {
+                                                                Modifier.size(20.dp).clickable {
                                                                         thunderKey++
                                                                 }
                                                 )

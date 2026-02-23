@@ -378,7 +378,7 @@ fun ProfileScreen(
                     horizontalArrangement = Arrangement.spacedBy(24.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    GiftCounter(roses, R.drawable.rose, imageLoader)
+                    GiftCounter(roses, R.drawable.rosey, imageLoader)
                     GiftCounter(sparks, R.drawable.thunder, imageLoader)
                 }
 
@@ -493,7 +493,7 @@ fun ProfileScreen(
                                 Image(
                                     painter = rememberAsyncImagePainter(
                                         model = ImageRequest.Builder(context)
-                                            .data(R.drawable.rose) // 🌹 GIF
+                                            .data(R.drawable.rosey) // 🌹 GIF
                                             .build(),
                                         imageLoader = imageLoader
                                     ),

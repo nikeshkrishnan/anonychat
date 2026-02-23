@@ -24,14 +24,12 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.annotation.RequiresApi
 import androidx.appcompat.widget.AppCompatEditText
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCapture.OnImageSavedCallback
-import androidx.camera.core.ImageCapture.OutputFileOptions
 import androidx.camera.core.ImageCapture.OutputFileResults
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -44,10 +42,13 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -55,12 +56,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Cameraswitch
@@ -80,27 +81,38 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.animation.core.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
@@ -122,6 +134,7 @@ import coil.compose.LocalImageLoader
 import coil.compose.rememberAsyncImagePainter
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
+import coil.request.ImageRequest
 import com.example.anonychat.MainActivity
 import com.example.anonychat.R
 import com.example.anonychat.model.Preferences
@@ -137,8 +150,20 @@ import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.isActive
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+// Helper function to format numbers like YouTube (1k, 1.5k, 1M, etc.)
+private fun formatCount(count: Int): String {
+    return when {
+        count < 1000 -> count.toString()
+        count < 10000 -> String.format("%.1fk", count / 1000.0).replace(".0k", "k")
+        count < 100000 -> String.format("%.0fk", count / 1000.0)
+        count < 1000000 -> String.format("%.0fk", count / 1000.0)
+        count < 10000000 -> String.format("%.1fM", count / 1000000.0).replace(".0M", "M")
+        else -> String.format("%.0fM", count / 1000000.0)
+    }
+}
+
 
 /* ---------------- MESSAGE STATUS ---------------- */
 
@@ -364,6 +389,12 @@ fun KeyboardProofScreen(
     var showFullScreenCamera by remember { mutableStateOf(false) }
     var capturedImageUri by remember { mutableStateOf<Uri?>(null) }
     var showAdvancedMediaPicker by remember { mutableStateOf(false) }
+    var showThunderGif by remember { mutableStateOf(false) }
+    var showMutualGif by remember { mutableStateOf(false) }
+    var showMissGif by remember { mutableStateOf(false) }
+    var showRoseOverlay by remember { mutableStateOf(false) }
+    var isRoseDead by remember { mutableStateOf(false) }
+    var overlayModeIsDead by remember { mutableStateOf(false) }
 
     val messages = remember { mutableStateListOf<ChatMessage>().apply { addAll(initialMessages) } }
 
@@ -410,12 +441,14 @@ fun KeyboardProofScreen(
         }
     }
 
+    val isDragged by listState.interactionSource.collectIsDraggedAsState()
     var showFloatingDateBanner by remember { mutableStateOf(false) }
+    var isAppInForeground by remember { mutableStateOf(true) }
 
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) {
+    LaunchedEffect(isDragged, listState.isScrollInProgress) {
+        if (isDragged) {
             showFloatingDateBanner = true
-        } else {
+        } else if (!listState.isScrollInProgress) {
             delay(1500)
             showFloatingDateBanner = false
         }
@@ -424,6 +457,18 @@ fun KeyboardProofScreen(
         mutableStateOf(if (matchedUserPrefs.isOnline) "online" else "offline")
     }
     var lastSeenTime by remember { mutableStateOf(matchedUserPrefs.lastSeen) }
+    var roses by remember { mutableStateOf(0) }
+    // var roses by remember { mutableStateOf(1500) } // Test: 1.5k
+    // var roses by remember { mutableStateOf(25000) } // Test: 25k
+    // var roses by remember { mutableStateOf(1200000) } // Test: 1.2M
+    
+    var sparks by remember { mutableStateOf(0) }
+    // var sparks by remember { mutableStateOf(3700) } // Test: 3.7k
+    // var sparks by remember { mutableStateOf(150000) } // Test: 150k
+    // var sparks by remember { mutableStateOf(5000000) } // Test: 5M
+    
+    // State to show heart/heartbreak icon on profile picture
+    var showProfileIcon by remember { mutableStateOf<String?>(null) } // "heart" or "heartbreak"
     Log.e(
             "KeyboardProofScreen",
             "DEBUG: Initialized with isOnline=${matchedUserPrefs.isOnline}, lastSeen=${matchedUserPrefs.lastSeen}"
@@ -437,7 +482,9 @@ fun KeyboardProofScreen(
     val selectedGalleryImages = remember { mutableStateListOf<Uri>() }
 
     // Handle back button for overlays
-    if (fullScreenVideoUri != null) {
+    if (showThunderGif) {
+        BackHandler { showThunderGif = false }
+    } else if (fullScreenVideoUri != null) {
         BackHandler { fullScreenVideoUri = null }
     } else if (fullScreenImageUri != null) {
         BackHandler { fullScreenImageUri = null }
@@ -445,6 +492,12 @@ fun KeyboardProofScreen(
         BackHandler { capturedImageUri = null }
     } else if (showFullScreenCamera) {
         BackHandler { showFullScreenCamera = false }
+    } else if (showMutualGif) {
+        BackHandler { showMutualGif = false }
+    } else if (showMissGif) {
+        BackHandler { showMissGif = false }
+    } else if (showRoseOverlay) {
+        BackHandler { showRoseOverlay = false }
     } else if (showAdvancedMediaPicker) {
         BackHandler {
             showAdvancedMediaPicker = false
@@ -454,6 +507,14 @@ fun KeyboardProofScreen(
 
     val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
     val localGmail = prefs.getString("user_email", "") ?: ""
+
+    LaunchedEffect(Unit) {
+        Log.d("ThunderDebug", "LaunchedEffectTimer started, waiting 5 seconds...")
+        delay(5000)
+        Log.d("ThunderDebug", "Timer finished, setting showThunderGif = true")
+        showThunderGif = true
+    }
+
     LaunchedEffect(matchedUserGmail) {
         if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
             Log.e("ChatLifecycle", "CHAT OPENED → me: $localGmail  ↔  partner: $matchedUserGmail")
@@ -471,6 +532,7 @@ fun KeyboardProofScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
+                    isAppInForeground = true
                     // Screen became visible (app foreground + screen on top)
                     if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
                         Log.e("ChatLifecycle", "CHAT VISIBLE → $matchedUserGmail")
@@ -478,10 +540,11 @@ fun KeyboardProofScreen(
                     }
                 }
                 Lifecycle.Event.ON_STOP -> {
+                    isAppInForeground = false
                     // Screen no longer visible (either backgrounded or navigated away)
                     if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
-                        Log.e("ChatLifecycle", "CHAT HIDDEN → $matchedUserGmail")
-                        //  WebSocketManager.sendChatClose(matchedUserGmail)
+                        Log.e("ChatLifecycle", "!!! CHAT HIDDEN → $matchedUserGmail !!!")
+                        WebSocketManager.sendChatClose(matchedUserGmail)
                     }
                 }
                 else -> {}
@@ -493,10 +556,11 @@ fun KeyboardProofScreen(
             if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
                 Log.e(
                         "ChatLifecycle",
-                        "CHAT CLOSED → me: $localGmail  ↔  partner: $matchedUserGmail"
+                        "!!! CHAT CLOSED → me: $localGmail  ↔  partner: $matchedUserGmail !!!"
                 )
-                // WebSocketManager.sendChatClose(matchedUserGmail)   // ← You should implement this
+                WebSocketManager.sendChatClose(matchedUserGmail)
             }
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -671,9 +735,9 @@ fun KeyboardProofScreen(
     // Works across app restarts because message status is persisted in Room DB
     // NOTE: Pauses during fullscreen media viewing - acks sent when exiting fullscreen
     // NOTE: Skips audio/image/video/gif - those get read acks on play/download complete
-    LaunchedEffect(listState, messages.size, isMediaOverlayActive) {
-        // Skip read acks while in fullscreen media mode
-        if (isMediaOverlayActive) return@LaunchedEffect
+    LaunchedEffect(listState, messages.size, isMediaOverlayActive, isAppInForeground) {
+        // Skip read acks while in fullscreen media mode or app is in background
+        if (isMediaOverlayActive || !isAppInForeground) return@LaunchedEffect
 
         snapshotFlow { listState.layoutInfo.visibleItemsInfo }.collect { visibleItems ->
             visibleItems.forEach { visibleItem ->
@@ -910,33 +974,115 @@ fun KeyboardProofScreen(
                                 }
                                 Spacer(Modifier.width(8.dp))
 
-                                Surface(
-                                        shape = CircleShape,
-                                        color = avatarRingColor,
-                                        border = BorderStroke(2.dp, Color.White),
-                                        modifier = Modifier.size(46.dp)
-                                ) {
-                                    Image(
-                                            painter =
-                                                    rememberAsyncImagePainter(
-                                                            avatarUri,
-                                                            imageLoader = staticImageLoader
-                                                    ),
-                                            contentDescription = null,
-                                            modifier = Modifier.padding(2.dp).clip(CircleShape),
-                                            contentScale = ContentScale.Crop
-                                    )
+                                Box(modifier = Modifier.size(46.dp)) {
+                                    Surface(
+                                            shape = CircleShape,
+                                            color = avatarRingColor,
+                                            border = BorderStroke(2.dp, Color.White),
+                                            modifier = Modifier.size(46.dp)
+                                    ) {
+                                        Image(
+                                                painter =
+                                                        rememberAsyncImagePainter(
+                                                                avatarUri,
+                                                                imageLoader = staticImageLoader
+                                                        ),
+                                                contentDescription = null,
+                                                modifier = Modifier.padding(2.dp).clip(CircleShape),
+                                                contentScale = ContentScale.Crop
+                                        )
+                                    }
+                                    
+                                    // Small heart or heartbreak icon overlay
+                                    if (showProfileIcon != null) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.BottomCenter)
+                                                .size(20.dp)
+                                                .offset(y = 8.dp)
+                                        ) {
+                                            Image(
+                                                painter = rememberAsyncImagePainter(
+                                                    if (showProfileIcon == "heart") R.drawable.heart else R.drawable.heartbrk,
+                                                    imageLoader = imageLoader
+                                                ),
+                                                contentDescription = if (showProfileIcon == "heart") "Rose Sent" else "Rose Taken Back",
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Fit
+                                            )
+                                        }
+                                    }
                                 }
 
                                 Spacer(Modifier.width(12.dp))
                                 Spacer(Modifier.width(12.dp))
                                 Column {
-                                    Text(
-                                            text = matchedUser.username,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 16.sp,
-                                            color = headerContentColor
-                                    )
+                                    // Username with Roses and Sparks on same line
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        // For testing: uncomment the line below and comment the line after it
+                                   //   val displayUsername = "TestUser99"
+                                        val displayUsername = matchedUser.username
+                                        
+                                        Text(
+                                                text = displayUsername,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 16.sp,
+                                                color = headerContentColor
+                                        )
+                                        
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        
+                                        // Roses count
+                                        Text(
+                                                text = formatCount(roses),
+                                                style = TextStyle(
+                                                        color = Color(0xFFFF1053),
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        shadow = Shadow(
+                                                                color = Color.Black.copy(alpha = 0.5f),
+                                                                offset = Offset(2f, 2f),
+                                                                blurRadius = 2f
+                                                        )
+                                                )
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Image(
+                                                painter = rememberAsyncImagePainter(
+                                                        R.drawable.roseg,
+                                                        imageLoader = imageLoader
+                                                ),
+                                                contentDescription = "Roses",
+                                                modifier = Modifier.size(18.dp)
+                                        )
+                                        
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        
+                                        // Sparks count
+                                        Text(
+                                                text = formatCount(sparks),
+                                                style = TextStyle(
+                                                        color = Color(0xFFFFD700),
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        shadow = Shadow(
+                                                                color = Color.Black.copy(alpha = 0.5f),
+                                                                offset = Offset(2f, 2f),
+                                                                blurRadius = 2f
+                                                        )
+                                                )
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Image(
+                                                painter = rememberAsyncImagePainter(
+                                                        R.drawable.sparkling,
+                                                        imageLoader = imageLoader
+                                                ),
+                                                contentDescription = "Sparks",
+                                                modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    
                                     val presenceText =
                                             if (presenceStatus == "online") {
                                                 "Online"
@@ -964,7 +1110,18 @@ fun KeyboardProofScreen(
                         }
                     }
             ) { padding ->
-                Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                Box(
+                        modifier =
+                                Modifier.fillMaxSize()
+                                        .padding(padding)
+                                        .pointerInput(Unit) {
+                                            detectHorizontalDragGestures { _, dragAmount ->
+                                                if (dragAmount < -100) {
+                                                    showMissGif = true
+                                                }
+                                            }
+                                        }
+                ) {
                     LazyColumn(
                             state = listState,
                             reverseLayout = true,
@@ -1010,13 +1167,31 @@ fun KeyboardProofScreen(
                                     ) {
                                         Surface(
                                                 color =
-                                                        Color(0x33000000)
-                                                                .compositeOver(
-                                                                        Color.Gray.copy(
-                                                                                alpha = 0.1f
-                                                                        )
-                                                                ),
+                                                        if (isDarkTheme) {
+                                                            Color(0xCC000000)
+                                                                    .compositeOver(
+                                                                            Color.Gray.copy(
+                                                                                    alpha = 0.2f
+                                                                            )
+                                                                    )
+                                                        } else {
+                                                            Color(0xCCF0F0F0)
+                                                                    .compositeOver(
+                                                                            Color.White.copy(
+                                                                                    alpha = 0.9f
+                                                                            )
+                                                                    )
+                                                        },
                                                 shape = RoundedCornerShape(12.dp),
+                                                border =
+                                                        if (!isDarkTheme)
+                                                                BorderStroke(
+                                                                        0.5.dp,
+                                                                        Color.LightGray.copy(
+                                                                                alpha = 0.5f
+                                                                        )
+                                                                )
+                                                        else null,
                                                 modifier =
                                                         Modifier.padding(
                                                                 horizontal = 16.dp,
@@ -1025,7 +1200,10 @@ fun KeyboardProofScreen(
                                         ) {
                                             Text(
                                                     text = item.date,
-                                                    color = messageTextColor.copy(alpha = 0.8f),
+                                                    color =
+                                                            if (isDarkTheme)
+                                                                    Color.White.copy(alpha = 0.9f)
+                                                            else Color.Black.copy(alpha = 0.8f),
                                                     style = MaterialTheme.typography.labelMedium,
                                                     modifier =
                                                             Modifier.padding(
@@ -1051,11 +1229,25 @@ fun KeyboardProofScreen(
                             floatingDate?.let { date ->
                                 Surface(
                                         color =
-                                                Color(0xCC000000)
-                                                        .compositeOver(
-                                                                Color.Gray.copy(alpha = 0.2f)
-                                                        ),
+                                                if (isDarkTheme) {
+                                                    Color(0xCC000000)
+                                                            .compositeOver(
+                                                                    Color.Gray.copy(alpha = 0.2f)
+                                                            )
+                                                } else {
+                                                    Color(0xCCF0F0F0)
+                                                            .compositeOver(
+                                                                    Color.White.copy(alpha = 0.9f)
+                                                            )
+                                                },
                                         shape = RoundedCornerShape(12.dp),
+                                        border =
+                                                if (!isDarkTheme)
+                                                        BorderStroke(
+                                                                0.5.dp,
+                                                                Color.LightGray.copy(alpha = 0.5f)
+                                                        )
+                                                else null,
                                         modifier =
                                                 Modifier.padding(
                                                         horizontal = 16.dp,
@@ -1064,7 +1256,9 @@ fun KeyboardProofScreen(
                                 ) {
                                     Text(
                                             text = date,
-                                            color = messageTextColor.copy(alpha = 0.9f),
+                                            color =
+                                                    if (isDarkTheme) Color.White.copy(alpha = 0.9f)
+                                                    else Color.Black.copy(alpha = 0.8f),
                                             style = MaterialTheme.typography.labelMedium,
                                             modifier =
                                                     Modifier.padding(
@@ -1349,6 +1543,20 @@ fun KeyboardProofScreen(
                                                 }
                                             }
                                     )
+
+                                    if (input.isEmpty() && !isKeyboardVisible) {
+                                        Image(
+                                            painter = rememberAsyncImagePainter(if (isRoseDead) R.drawable.roseff else R.drawable.roseg, imageLoader = imageLoader),
+                                            contentDescription = "Rose Hint",
+                                            modifier = Modifier
+                                                .padding(end = 4.dp)
+                                                .size(42.dp)
+                                                .clickable {
+                                                    overlayModeIsDead = isRoseDead
+                                                    showRoseOverlay = true
+                                                }
+                                        )
+                                    }
                                 }
 
                                 // Removed old showAttachmentChoices Row
@@ -1723,7 +1931,328 @@ fun KeyboardProofScreen(
             fullScreenImageUri?.let { uri ->
                 FullScreenImagePlayer(imageUri = uri, onClose = { fullScreenImageUri = null })
             }
+
+            if (showThunderGif) {
+                Log.d(
+                        "ThunderDebug",
+                        "Recomposing: showThunderGif is true, calling ThunderGifOverlay"
+                )
+                ThunderGifOverlay(
+                        isDarkTheme = isDarkTheme,
+                        onDismiss = { isRightSwipe ->
+                            Log.d(
+                                    "ThunderDebug",
+                                    "ThunderGifOverlay dismissed from within component, isRightSwipe: $isRightSwipe"
+                            )
+                            showThunderGif = false
+                            if (isRightSwipe) {
+                                showMutualGif = true
+                            } else {
+                                showMissGif = true
+                            }
+                        }
+                )
+            }
+
+            if (showMutualGif) {
+                MutualGifOverlay(onDismiss = { showMutualGif = false })
+            }
+
+            if (showMissGif) {
+                MissGifOverlay(onDismiss = { showMissGif = false })
+            }
+
+            if (showRoseOverlay) {
+                RoseGifOverlay(
+                    onDismiss = { showRoseOverlay = false },
+                    isRoseDead = overlayModeIsDead,
+                    onToggleRoseState = {
+                        overlayModeIsDead = !overlayModeIsDead
+                        isRoseDead = !isRoseDead
+                        // Update profile icon based on rose state
+                        // After toggle: if rose becomes dead, show heartbreak; if alive, show heart
+                        showProfileIcon = if (!isRoseDead) "heartbreak" else "heart"
+                    }
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun ThunderGifOverlay(isDarkTheme: Boolean, onDismiss: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    
+    // Core interaction states
+    val swipeOffsetX = remember { androidx.compose.animation.core.Animatable(0f) }
+    val cardScale = remember { androidx.compose.animation.core.Animatable(1f) }
+    
+    val swipeThreshold = 300f
+    var thresholdCrossed by remember { mutableStateOf(false) }
+
+    val imageLoader = remember {
+        ImageLoader.Builder(context)
+                .components {
+                    if (SDK_INT >= 28) {
+                        add(ImageDecoderDecoder.Factory())
+                    } else {
+                        add(GifDecoder.Factory())
+                    }
+                }
+                .build()
+    }
+
+    Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+    ) {
+        // --- 1. Background Blur & Dim ---
+        val dragProgress = (kotlin.math.abs(swipeOffsetX.value) / swipeThreshold).coerceIn(0f, 1.5f)
+        val blurRadius = (dragProgress * 10f).dp
+        
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .blur(blurRadius)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.3f),
+                            Color.Black.copy(alpha = 0.6f)
+                        )
+                    )
+                )
+        )
+
+        // --- 2. Directional Glows ---
+        val rightSweepGlowAlpha = (swipeOffsetX.value / swipeThreshold).coerceIn(0f, 0.4f)
+        val leftSweepDimAlpha = (-swipeOffsetX.value / swipeThreshold).coerceIn(0f, 0.4f)
+
+        if (rightSweepGlowAlpha > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.horizontalGradient(
+                            0f to Color.Transparent,
+                            1f to Color(0xFFFFD700).copy(alpha = rightSweepGlowAlpha)
+                        )
+                    )
+            )
+        }
+        
+        if (leftSweepDimAlpha > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = leftSweepDimAlpha))
+            )
+        }
+
+        // Colors based on theme
+        val leftArrowColor = if (isDarkTheme) Color(0xFF4CC9F0) else Color(0xFF9FA8DA)
+        val rightArrowColor = if (isDarkTheme) Color(0xFFFFE066) else Color(0xFFFF9E4A)
+
+        // Sideways Nudge Animation
+        val infiniteTransition = rememberInfiniteTransition()
+        val nudgeOffset by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 15f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1000, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            )
+        )
+
+        // --- 3. Dynamic Side Icons ---
+        
+        // 3a. Hint Arrows (Visible when idle, fade out on swipe)
+        val hintAlpha = (1f - (kotlin.math.abs(swipeOffsetX.value) / 100f)).coerceIn(0f, 0.5f)
+        if (hintAlpha > 0f) {
+            // Left Hint
+            Icon(
+                imageVector = Icons.Default.ArrowBack,
+                contentDescription = null,
+                tint = leftArrowColor.copy(alpha = hintAlpha),
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 24.dp)
+                    .offset(x = (-nudgeOffset).dp)
+                    .size(48.dp)
+            )
+            // Right Hint
+            Icon(
+                imageVector = Icons.Default.ArrowForward,
+                contentDescription = null,
+                tint = rightArrowColor.copy(alpha = hintAlpha),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 24.dp)
+                    .offset(x = nudgeOffset.dp)
+                    .size(48.dp)
+            )
+        }
+
+        // 3b. Progress Icons (Tick/Cross - fade in as user swipes)
+        val leftProgressAlpha = ((-swipeOffsetX.value / 150f).coerceIn(0f, 1f))
+        if (leftProgressAlpha > 0f) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = null,
+                tint = leftArrowColor.copy(alpha = leftProgressAlpha),
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 40.dp)
+                    .size(64.dp)
+                    .scale(0.8f + (leftProgressAlpha * 0.4f))
+            )
+        }
+
+        val rightProgressAlpha = ((swipeOffsetX.value / 150f).coerceIn(0f, 1f))
+        if (rightProgressAlpha > 0f) {
+             Icon(
+                imageVector = Icons.Default.Done,
+                contentDescription = null,
+                tint = rightArrowColor.copy(alpha = rightProgressAlpha),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 40.dp)
+                    .size(64.dp)
+                    .scale(0.8f + (rightProgressAlpha * 0.4f))
+            )
+        }
+
+        // --- 4. Main Card (Tilt & Interaction) ---
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .padding(32.dp)
+                .graphicsLayer {
+                    translationX = swipeOffsetX.value
+                    rotationZ = swipeOffsetX.value * 0.05f
+                    scaleX = cardScale.value - (kotlin.math.abs(swipeOffsetX.value) / 2000f)
+                    scaleY = scaleX
+                    if (swipeOffsetX.value < 0) {
+                        alpha = (1f - (kotlin.math.abs(swipeOffsetX.value) / 600f)).coerceIn(0.3f, 1f)
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onPress = {
+                            scope.launch {
+                                cardScale.animateTo(1.1f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.6f))
+                            }
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            tryAwaitRelease()
+                            scope.launch { cardScale.animateTo(1f) }
+                        }
+                    )
+                }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            scope.launch {
+                                if (kotlin.math.abs(swipeOffsetX.value) > swipeThreshold) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    swipeOffsetX.animateTo(if (swipeOffsetX.value > 0) 1000f else -1000f)
+                                    onDismiss(swipeOffsetX.value > 0)
+                                } else {
+                                    thresholdCrossed = false
+                                    swipeOffsetX.animateTo(0f)
+                                }
+                            }
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            scope.launch {
+                                val newValue = swipeOffsetX.value + dragAmount
+                                swipeOffsetX.snapTo(newValue)
+                                if (kotlin.math.abs(newValue) > swipeThreshold && !thresholdCrossed) {
+                                    thresholdCrossed = true
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                } else if (kotlin.math.abs(newValue) < swipeThreshold) {
+                                    thresholdCrossed = false
+                                }
+                            }
+                        }
+                    )
+                }
+        ) {
+            Image(
+                painter = rememberAsyncImagePainter(R.drawable.spark, imageLoader = imageLoader),
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth(0.7f).aspectRatio(1f),
+                contentScale = ContentScale.Fit
+            )
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            // --- 5. Reactive Text ---
+            val textAlpha = (1f - (kotlin.math.abs(swipeOffsetX.value) / 400f)).coerceIn(0.2f, 1f)
+            val textTranslationY = (-kotlin.math.abs(swipeOffsetX.value) / 10f).dp
+            
+            Text(
+                    text = "Feel the spark?",
+                    style =
+                            TextStyle(
+                                    color = Color(0xFFFFD700),
+                                    fontSize = 28.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontStyle = FontStyle.Italic,
+                                    shadow = Shadow(
+                                        color = Color(0xFFFFD700).copy(alpha = 0.5f),
+                                        offset = Offset(0f, 0f),
+                                        blurRadius = 15f
+                                    )
+                            ),
+                    modifier = Modifier
+                        .offset(y = textTranslationY)
+                        .graphicsLayer { alpha = textAlpha }
+            )
+        }
+    }
+}
+
+
+@Composable
+private fun MutualGifOverlay(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val imageLoader = remember {
+        ImageLoader.Builder(context)
+                .components {
+                    if (SDK_INT >= 28) {
+                        add(ImageDecoderDecoder.Factory())
+                    } else {
+                        add(GifDecoder.Factory())
+                    }
+                }
+                .build()
+    }
+
+    LaunchedEffect(Unit) {
+        delay(4850) // 4350ms duration + 500ms pause
+        onDismiss()
+    }
+
+    Box(
+            modifier = Modifier.fillMaxSize().background(Color.Transparent).clickable {},
+            contentAlignment = Alignment.Center
+    ) {
+        Image(
+                painter =
+                        rememberAsyncImagePainter(
+                                ImageRequest.Builder(LocalContext.current)
+                                        .data(R.drawable.suc)
+                                        .setParameter("coil#repeat_count", 0) // Play once
+                                        .build(),
+                                imageLoader = imageLoader
+                        ),
+                contentDescription = "Success",
+                modifier = Modifier.fillMaxWidth(0.8f).aspectRatio(1f),
+                contentScale = ContentScale.Fit
+        )
     }
 }
 
@@ -2868,6 +3397,264 @@ private fun FullScreenImagePlayer(imageUri: String, onClose: () -> Unit) {
                     onClick = onClose,
                     modifier = Modifier.background(Color.Black.copy(alpha = 0.5f), CircleShape)
             ) { Icon(Icons.Default.Close, null, tint = Color.White) }
+        }
+    }
+}
+@Composable
+private fun MissGifOverlay(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val imageLoader = remember {
+        ImageLoader.Builder(context)
+                .components {
+                    if (SDK_INT >= 28) {
+                        add(ImageDecoderDecoder.Factory())
+                    } else {
+                        add(GifDecoder.Factory())
+                    }
+                }
+                .build()
+    }
+
+    LaunchedEffect(Unit) {
+        delay(4850) // 4350ms duration + 500ms pause
+        onDismiss()
+    }
+
+    Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)).clickable {
+                onDismiss()
+            },
+            contentAlignment = Alignment.Center
+    ) {
+        Image(
+                painter =
+                        rememberAsyncImagePainter(
+                                ImageRequest.Builder(LocalContext.current)
+                                        .data(R.drawable.arrowfail)
+                                        .setParameter("coil#repeat_count", 0) // Play once
+                                        .build(),
+                                imageLoader = imageLoader
+                        ),
+                contentDescription = "Miss",
+                modifier = Modifier.size(250.dp),
+                contentScale = ContentScale.Fit
+        )
+    }
+}
+
+@Composable
+private fun RoseGifOverlay(
+    onDismiss: () -> Unit,
+    isRoseDead: Boolean,
+    onToggleRoseState: () -> Unit
+) {
+    val context = LocalContext.current
+    val imageLoader = remember {
+        ImageLoader.Builder(context)
+                .components {
+                    if (SDK_INT >= 28) {
+                        add(ImageDecoderDecoder.Factory())
+                    } else {
+                        add(GifDecoder.Factory())
+                    }
+                }
+                .build()
+    }
+
+    Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.85f))
+                .clickable { onDismiss() },
+            contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth().clickable(enabled = false) { } // Prevent dismiss on internal clicks
+        ) {
+            Text(
+                text = if (isRoseDead) "Was the rose a mistake?" else "Do you want to gift this rose?",
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(bottom = 40.dp)
+            )
+
+            Image(
+                painter = rememberAsyncImagePainter(if (isRoseDead) R.drawable.roseff else R.drawable.roseg, imageLoader = imageLoader),
+                contentDescription = "Rose",
+                modifier = Modifier.fillMaxWidth(0.5f).aspectRatio(1f),
+                contentScale = ContentScale.Fit
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            RoseSlider(
+                onCancel = onDismiss,
+                onSend = {
+                    // Toggle between dead and non-dead rose state when slider is swiped right
+                    onToggleRoseState()
+                    onDismiss()
+                },
+                isRoseDead = isRoseDead,
+                imageLoader = imageLoader
+            )
+        }
+    }
+}
+
+@Composable
+private fun RoseSlider(
+    onCancel: () -> Unit,
+    onSend: () -> Unit,
+    isRoseDead: Boolean,
+    imageLoader: ImageLoader
+) {
+    val haptic = LocalHapticFeedback.current
+    val thumbSize = 64.dp
+    val trackHeight = 72.dp
+    val trackWidth = 320.dp
+    val maxOffsetPx = with(androidx.compose.ui.platform.LocalDensity.current) { (trackWidth - thumbSize).toPx() }
+    
+    var offsetX by remember { mutableStateOf(0f) }
+    val animatedOffset by animateFloatAsState(targetValue = offsetX, label = "thumbOffset")
+
+    // Dynamic weights to make the split follow the thumb
+    val leftWeight = (1f + (offsetX / (maxOffsetPx / 2 + 0.001f))).coerceIn(0.01f, 1.99f)
+    val rightWeight = 2f - leftWeight
+
+    Box(
+        modifier = Modifier
+            .width(trackWidth)
+            .height(trackHeight)
+            .clip(RoundedCornerShape(36.dp)),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        // Track sections with 3D Gradients
+        Row(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .weight(leftWeight)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(topStart = 36.dp, bottomStart = 36.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xFFE53935), Color(0xFFB71C1C))
+                        )
+                    ) // 3D Red Gradient
+            )
+            Box(
+                modifier = Modifier
+                    .weight(rightWeight)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(topEnd = 36.dp, bottomEnd = 36.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xFF43A047), Color(0xFF1B5E20))
+                        )
+                    ) // 3D Green Gradient
+            )
+        }
+
+        // Labels and Icons with 3D Shadows
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                if (isRoseDead) {
+                    Image(
+                        painter = rememberAsyncImagePainter(R.drawable.rosalv, imageLoader = imageLoader),
+                        contentDescription = "Rose Alive",
+                        modifier = Modifier.size(48.dp)
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(id = R.drawable.crosswn),
+                        contentDescription = "Don't Send",
+                        modifier = Modifier.size(56.dp)
+                    )
+                }
+                Text(
+                    if (isRoseDead) "Let it stay" else "Don't Send",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.offset(y = if (isRoseDead) (-8).dp else (-10).dp)
+                )
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                if (isRoseDead) {
+                    Image(
+                        painter = rememberAsyncImagePainter(R.drawable.heartbreak, imageLoader = imageLoader),
+                        contentDescription = "Broken Heart",
+                        modifier = Modifier.size(48.dp)
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(id = R.drawable.gift),
+                        contentDescription = "Send Gift",
+                        modifier = Modifier.size(56.dp)
+                    )
+                }
+                Text(
+                    if (isRoseDead) "Take It Back" else "Send Gift",
+                    color = Color(0xFFFF4081),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.offset(y = if (isRoseDead) (-8).dp else (-10).dp)
+                )
+            }
+        }
+
+        // Draggable Thumb with 3D Pop
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(animatedOffset.toInt() + (maxOffsetPx / 2).toInt(), 0) }
+                .size(thumbSize)
+                .shadow(10.dp, CircleShape) // High Elevation for 3D Pop
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.White, Color(0xFFE0E0E0))
+                    )
+                )
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            if (offsetX > maxOffsetPx * 0.4f) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onSend()
+                            } else if (offsetX < -maxOffsetPx * 0.4f) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onCancel()
+                            } else {
+                                offsetX = 0f
+                            }
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            val newOffset = offsetX + dragAmount
+                            if (newOffset >= -maxOffsetPx / 2 && newOffset <= maxOffsetPx / 2) {
+                                offsetX = newOffset
+                            }
+                        }
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = rememberAsyncImagePainter(if (isRoseDead) R.drawable.rosestatic else R.drawable.croprose, imageLoader = imageLoader),
+                contentDescription = "Thumb Rose",
+                modifier = Modifier.size(60.dp),
+                contentScale = ContentScale.Fit
+            )
         }
     }
 }

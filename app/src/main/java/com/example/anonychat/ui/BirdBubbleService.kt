@@ -319,7 +319,7 @@ class BirdBubbleService : Service() {
                 // 5️⃣ Switch to the cupid state to indicate a match is ready to be opened
                 cupidIsActive = true
                 showingHeart = false
-                setImageSafely(bubbleView!!, R.drawable.heartcupid)
+                setImageSafely(bubbleView!!, R.drawable.heartcupi)
                 Log.d(TAG, "Switched to heart-cupid state. Ready for tap.")
             } catch (e: Exception) {
                 Log.e(TAG, "Exception while fetching preferences after match.", e)

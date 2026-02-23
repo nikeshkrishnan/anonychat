@@ -1,20 +1,11 @@
 package com.example.anonychat.ui
 
-import android.provider.Settings
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import com.example.anonychat.network.PreferencesRequest
-import com.example.anonychat.network.AgeRange
-import com.example.anonychat.service.ChatSocketService
-import com.example.anonychat.network.RomanceRange
 import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.content.Intent
-import android.os.Build
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
+import android.provider.Settings
+import android.util.Log
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
@@ -38,27 +29,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imeNestedScroll
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -89,33 +74,41 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.core.content.ContextCompat
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.anonychat.R
 import com.example.anonychat.model.User
+import com.example.anonychat.network.AgeRange
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.PreferencesRequest
+import com.example.anonychat.network.RomanceRange
 import com.example.anonychat.network.UserLoginRequest
 import com.example.anonychat.network.UserRegistrationRequest
 import com.example.anonychat.network.UserResetPasswordRequest
+import com.example.anonychat.service.ChatSocketService
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.android.gms.appset.AppSet
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 @ExperimentalFoundationApi
 @ExperimentalLayoutApi
-@OptIn(UnstableApi::class, ExperimentalLayoutApi::class, ExperimentalLayoutApi::class,
-    ExperimentalFoundationApi::class
+@OptIn(
+        UnstableApi::class,
+        ExperimentalLayoutApi::class,
+        ExperimentalLayoutApi::class,
+        ExperimentalFoundationApi::class
 )
 @Composable
-fun LoginScreen(
-    onLoginClick: (User) -> Unit = {}
-) {
+fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
     val context = LocalContext.current
 
     // Detect IME (keyboard) visibility
@@ -134,10 +127,7 @@ fun LoginScreen(
     var cardOffset by remember { mutableStateOf(0.dp) }
 
     // animate the movement
-    val animatedOffset by animateDpAsState(
-        targetValue = cardOffset,
-        label = "card offset"
-    )
+    val animatedOffset by animateDpAsState(targetValue = cardOffset, label = "card offset")
 
     // when keyboard becomes visible → move up once
     LaunchedEffect(keyboardVisible) {
@@ -157,15 +147,16 @@ fun LoginScreen(
     val transitionColor = Color(0xFFDBF0F9)
 
     // Define standard colors for all text fields
-    val textFieldColors = OutlinedTextFieldDefaults.colors(
-        focusedTextColor = Color.Black,
-        unfocusedTextColor = Color.Black,
-        focusedLabelColor = Color(0xFF4285F4),
-        unfocusedLabelColor = Color.Gray,
-        cursorColor = Color(0xFF4285F4),
-        focusedBorderColor = Color(0xFF4285F4),
-        unfocusedBorderColor = Color.Gray
-    )
+    val textFieldColors =
+            OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.Black,
+                    unfocusedTextColor = Color.Black,
+                    focusedLabelColor = Color(0xFF4285F4),
+                    unfocusedLabelColor = Color.Gray,
+                    cursorColor = Color(0xFF4285F4),
+                    focusedBorderColor = Color(0xFF4285F4),
+                    unfocusedBorderColor = Color.Gray
+            )
 
     // --- STATE MANAGEMENT ---
     var authMode by remember { mutableStateOf("Terms") }
@@ -202,14 +193,18 @@ fun LoginScreen(
 
     // Logic to enable buttons
     val isTermsEnabled = acceptedTerms && isEighteenPlus && noAbuse
-    val isSignUpComplete = username.isNotEmpty() && password.isNotEmpty() &&
-            confirmPassword.isNotEmpty() && (password == confirmPassword)
+    val isSignUpComplete =
+            username.isNotEmpty() &&
+                    password.isNotEmpty() &&
+                    confirmPassword.isNotEmpty() &&
+                    (password == confirmPassword)
     val isLoginComplete = username.isNotEmpty() && password.isNotEmpty()
-    val isResetPasswordComplete = currentUsername.isNotEmpty() && newPassword.isNotEmpty() && confirmNewPassword.isNotEmpty() && (newPassword == confirmNewPassword)
-    val androidId = Settings.Secure.getString(
-        context.contentResolver,
-        Settings.Secure.ANDROID_ID
-    )
+    val isResetPasswordComplete =
+            currentUsername.isNotEmpty() &&
+                    newPassword.isNotEmpty() &&
+                    confirmNewPassword.isNotEmpty() &&
+                    (newPassword == confirmNewPassword)
+    val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
 
     // ROOT BOX
     Box(modifier = Modifier.fillMaxSize()) {
@@ -217,81 +212,82 @@ fun LoginScreen(
         // LAYER 1: BACKGROUND (Video + Sky)
         Column(modifier = Modifier.fillMaxSize()) {
             // Video Section
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(top = 50.dp)
-            ) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 50.dp)) {
                 VideoBackground(context = context)
                 Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .height(80.dp)
-                        .background(
-                            brush = Brush.verticalGradient(
-                                colors = listOf(Color.Transparent, transitionColor)
-                            )
-                        )
+                        modifier =
+                                Modifier.align(Alignment.BottomCenter)
+                                        .fillMaxWidth()
+                                        .height(80.dp)
+                                        .background(
+                                                brush =
+                                                        Brush.verticalGradient(
+                                                                colors =
+                                                                        listOf(
+                                                                                Color.Transparent,
+                                                                                transitionColor
+                                                                        )
+                                                        )
+                                        )
                 ) {}
             }
 
             // Sky Background Section
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .background(Color.White)
-            ) {
-                val imageBitmap = remember(context) {
-                    BitmapFactory.decodeResource(context.resources, R.raw.cloud)?.asImageBitmap()
-                }
+            Box(modifier = Modifier.weight(1f).fillMaxWidth().background(Color.White)) {
+                val imageBitmap =
+                        remember(context) {
+                            BitmapFactory.decodeResource(context.resources, R.raw.cloud)
+                                    ?.asImageBitmap()
+                        }
                 if (imageBitmap != null) {
                     Image(
-                        bitmap = imageBitmap,
-                        contentDescription = "Sky Background",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                            bitmap = imageBitmap,
+                            contentDescription = "Sky Background",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
                     )
                 }
                 Box(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .height(80.dp)
-                        .background(
-                            brush = Brush.verticalGradient(
-                                colors = listOf(transitionColor, Color.Transparent)
-                            )
-                        )
+                        modifier =
+                                Modifier.align(Alignment.TopCenter)
+                                        .fillMaxWidth()
+                                        .height(80.dp)
+                                        .background(
+                                                brush =
+                                                        Brush.verticalGradient(
+                                                                colors =
+                                                                        listOf(
+                                                                                transitionColor,
+                                                                                Color.Transparent
+                                                                        )
+                                                        )
+                                        )
                 ) {}
             }
         }
 
         // LAYER 2: THE LOGIN CARD (Overlay)
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = 10.dp),
-            contentAlignment = Alignment.BottomCenter
+                modifier = Modifier.fillMaxSize().padding(bottom = 10.dp),
+                contentAlignment = Alignment.BottomCenter
         ) {
             Card(
-                modifier = Modifier
-                    .padding(horizontal = 32.dp)
-                    .offset(y = animatedOffset)
-                    .fillMaxWidth().heightIn(max = 400.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(16.dp)
+                    modifier =
+                            Modifier.padding(horizontal = 32.dp)
+                                    .offset(y = animatedOffset)
+                                    .fillMaxWidth()
+                                    .heightIn(max = 400.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    shape = RoundedCornerShape(16.dp)
             ) {
                 Column(
-                    modifier = Modifier
-                        .padding(20.dp)
-                        .verticalScroll(rememberScrollState())
-                        .imeNestedScroll(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Top
+                        modifier =
+                                Modifier.padding(20.dp)
+                                        .verticalScroll(rememberScrollState())
+                                        .imeNestedScroll(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Top
                 ) {
                     Spacer(modifier = Modifier.height(10.dp))
                     // --- CONTENT SWITCHER ---
@@ -299,83 +295,88 @@ fun LoginScreen(
                     when (authMode) {
                         "Terms" -> {
                             Text(
-                                text = "You will remain anonymous",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = Color.Gray
+                                    text = "You will remain anonymous",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = Color.Gray
                             )
                             Spacer(modifier = Modifier.height(16.dp))
 
                             TermsCheckbox(
-                                checked = acceptedTerms,
-                                onCheckedChange = { acceptedTerms = it },
-                                text = "I accept Terms and Conditions and Privacy Policy"
+                                    checked = acceptedTerms,
+                                    onCheckedChange = { acceptedTerms = it },
+                                    text = "I accept Terms and Conditions and Privacy Policy"
                             )
                             TermsCheckbox(
-                                checked = isEighteenPlus,
-                                onCheckedChange = { isEighteenPlus = it },
-                                text = "I confirm I am 18 years or older"
+                                    checked = isEighteenPlus,
+                                    onCheckedChange = { isEighteenPlus = it },
+                                    text = "I confirm I am 18 years or older"
                             )
                             TermsCheckbox(
-                                checked = noAbuse,
-                                onCheckedChange = { noAbuse = it },
-                                text = "Abuse and inappropriate content won't be tolerated"
+                                    checked = noAbuse,
+                                    onCheckedChange = { noAbuse = it },
+                                    text = "Abuse and inappropriate content won't be tolerated"
                             )
                             Spacer(modifier = Modifier.height(20.dp))
 
                             // Login Button
                             Button(
-                                onClick = { authMode = "Login" },
-                                enabled = isTermsEnabled,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF4285F4),
-                                    disabledContainerColor = Color.Gray
-                                )
-                            ) {
-                                Text(text = "Login", color = Color.White)
-                            }
+                                    onClick = { authMode = "Login" },
+                                    enabled = isTermsEnabled,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                            ButtonDefaults.buttonColors(
+                                                    containerColor = Color(0xFF4285F4),
+                                                    disabledContainerColor = Color.Gray
+                                            )
+                            ) { Text(text = "Login", color = Color.White) }
 
                             Spacer(modifier = Modifier.height(12.dp))
 
                             // Sign Up Button
                             Button(
-                                onClick = { authMode = "SignUp" },
-                                enabled = isTermsEnabled,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color.White,
-                                    contentColor = Color(0xFF4285F4),
-                                    disabledContainerColor = Color.Gray.copy(alpha = 0.1f),
-                                    disabledContentColor = Color.Gray
-                                ),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, if(isTermsEnabled) Color(0xFF4285F4) else Color.Gray)
-                            ) {
-                                Text(text = "Sign Up")
-                            }
+                                    onClick = { authMode = "SignUp" },
+                                    enabled = isTermsEnabled,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                            ButtonDefaults.buttonColors(
+                                                    containerColor = Color.White,
+                                                    contentColor = Color(0xFF4285F4),
+                                                    disabledContainerColor =
+                                                            Color.Gray.copy(alpha = 0.1f),
+                                                    disabledContentColor = Color.Gray
+                                            ),
+                                    border =
+                                            androidx.compose.foundation.BorderStroke(
+                                                    1.dp,
+                                                    if (isTermsEnabled) Color(0xFF4285F4)
+                                                    else Color.Gray
+                                            )
+                            ) { Text(text = "Sign Up") }
                         }
-
                         "Login" -> {
                             Text(
-                                text = "Login",
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = Color.Black,
-                                fontWeight = FontWeight.Bold
+                                    text = "Login",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = Color.Black,
+                                    fontWeight = FontWeight.Bold
                             )
                             Spacer(modifier = Modifier.height(10.dp))
 
                             var usernameFocused by remember { mutableStateOf(false) }
 
                             OutlinedTextField(
-                                value = username,
-                                onValueChange = { username = it },
-                                label = { Text("Username") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .bringIntoViewRequester(usernameBring)
-                                    .onFocusChanged { usernameFocused = it.isFocused },
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                                colors = textFieldColors
+                                    value = username,
+                                    onValueChange = { username = it },
+                                    label = { Text("Username") },
+                                    singleLine = true,
+                                    modifier =
+                                            Modifier.fillMaxWidth()
+                                                    .bringIntoViewRequester(usernameBring)
+                                                    .onFocusChanged {
+                                                        usernameFocused = it.isFocused
+                                                    },
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                    colors = textFieldColors
                             )
 
                             LaunchedEffect(usernameFocused, imeVisible) {
@@ -390,28 +391,29 @@ fun LoginScreen(
                             var passwordFocused by remember { mutableStateOf(false) }
                             var appSetId by remember { mutableStateOf("") }
 
-// Get App Set IDLaunchedEffect(Unit) {
-                            AppSet.getClient(context).appSetIdInfo
-                                .addOnSuccessListener {
-                                    appSetId = it.id
-                                }
-
+                            // Get App Set IDLaunchedEffect(Unit) {
+                            AppSet.getClient(context).appSetIdInfo.addOnSuccessListener {
+                                appSetId = it.id
+                            }
 
                             OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it },
-                                label = { Text("Password") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .bringIntoViewRequester(passwordBring)
-                                    .onFocusChanged { passwordFocused = it.isFocused },
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    imeAction = ImeAction.Next
-                                ),
-                                colors = textFieldColors
+                                    value = password,
+                                    onValueChange = { password = it },
+                                    label = { Text("Password") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier =
+                                            Modifier.fillMaxWidth()
+                                                    .bringIntoViewRequester(passwordBring)
+                                                    .onFocusChanged {
+                                                        passwordFocused = it.isFocused
+                                                    },
+                                    keyboardOptions =
+                                            KeyboardOptions(
+                                                    keyboardType = KeyboardType.Text,
+                                                    imeAction = ImeAction.Next
+                                            ),
+                                    colors = textFieldColors
                             )
 
                             LaunchedEffect(passwordFocused, imeVisible) {
@@ -424,74 +426,74 @@ fun LoginScreen(
                             // Reset Password Option
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 Text(
-                                    text = "Reset Password",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF4285F4),
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .align(Alignment.CenterEnd)
-                                        .padding(top = 8.dp, bottom = 8.dp)
-                                        .clickable {
-                                            authMode = "ResetPassword"
-                                        }
+                                        text = "Reset Password",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF4285F4),
+                                        fontWeight = FontWeight.Bold,
+                                        modifier =
+                                                Modifier.align(Alignment.CenterEnd)
+                                                        .padding(top = 8.dp, bottom = 8.dp)
+                                                        .clickable { authMode = "ResetPassword" }
                                 )
                             }
 
                             Spacer(modifier = Modifier.height(24.dp))
 
                             Button(
-                                onClick = {
-                                    // set loading on Main
-                                    isLoading = true
+                                    onClick = {
+                                        // set loading on Main
+                                        isLoading = true
 
-                                    coroutine.launch {
-                                        try {
-                                            // 1) LOGIN network call on IO
-                                            val response = withContext(Dispatchers.IO) {
-                                                NetworkClient.api.loginUser(UserLoginRequest(username, password,"$androidId:$appSetId"))
-                                            }
-
-                                            if (response.isSuccessful && response.body() != null) {
-                                                val loginResponse = response.body()!!
-
-                                                android.util.Log.d("LOGIN_SUCCESS", "Received Token: ${loginResponse.accessToken}")
-
-                                                // 2) Write tokens and connect websocket on Main
-                                                withContext(Dispatchers.Main) {
-                                                    try {
-                                                        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                                        prefs.edit().apply {
-                                                            putString("access_token", loginResponse.accessToken)
-                                                            putString("user_id", loginResponse.user.id)
-                                                            putString("user_email", loginResponse.user.email)
-                                                            putString("username", loginResponse.user.username)
-
-                                                            apply()
-                                                        }
-
-                                                        android.util.Log.e("LoginPrefs!!!!!!!!!!", "p $prefs")
-                                                        val intent = Intent(context, ChatSocketService::class.java)
-                                                        ContextCompat.startForegroundService(context, intent)
-
-                                                    } catch (e: Exception) {
-                                                        android.util.Log.e("LoginPrefs", "Error during main-thread prefs/ws actions", e)
-                                                        // Continue — we'll surface to user below
-                                                    }
+                                        coroutine.launch {
+                                        coroutine.launch {
+                                            try {
+                                                val response = withContext(Dispatchers.IO) {
+                                                    NetworkClient.api.loginUser(
+                                                        UserLoginRequest(
+                                                            username,
+                                                            password,
+                                                            "$androidId:$appSetId"
+                                                        )
+                                                    )
                                                 }
 
-                                                // 3) Check if detailed preferences exist; network on IO, prefs & navigation on Main
-                                                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                                if (!prefs.contains("gender")) {
-                                                    android.util.Log.e("LoginPrefs", "Local preferences missing. Fetching from server for ${loginResponse.user.email}")
+                                                if (response.isSuccessful && response.body() != null) {
+                                                    val loginResponse = response.body()!!
+                                                    android.util.Log.d(
+                                                        "LOGIN_SUCCESS",
+                                                        "Received Token: ${loginResponse.accessToken}"
+                                                    )
 
-                                                    try {
+                                                    // Process success
+                                                    withContext(Dispatchers.Main) {
+                                                        try {
+                                                            val prefs = context.getSharedPreferences(
+                                                                "user_prefs",
+                                                                Context.MODE_PRIVATE
+                                                            )
+                                                            prefs.edit().apply {
+                                                                putString("access_token", loginResponse.accessToken)
+                                                                putString("user_id", loginResponse.user.id)
+                                                                putString("user_email", loginResponse.user.email)
+                                                                putString("username", loginResponse.user.username)
+                                                                apply()
+                                                            }
+                                                            val intent = Intent(context, ChatSocketService::class.java)
+                                                            ContextCompat.startForegroundService(context, intent)
+                                                        } catch (e: Exception) {
+                                                            android.util.Log.e("LoginPrefs", "Error during success processing", e)
+                                                        }
+                                                    }
+
+                                                    // Fetch Preferences
+                                                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                    if (!prefs.contains("gender")) {
                                                         val prefResponse = withContext(Dispatchers.IO) {
                                                             NetworkClient.api.getPreferences(loginResponse.user.email)
                                                         }
 
                                                         if (prefResponse.isSuccessful && prefResponse.body() != null) {
                                                             val serverPrefs = prefResponse.body()!!
-
                                                             withContext(Dispatchers.Main) {
                                                                 prefs.edit().apply {
                                                                     serverPrefs.username.let { putString("username", it) }
@@ -509,13 +511,10 @@ fun LoginScreen(
                                                                     putBoolean("random_match", serverPrefs.random ?: true)
                                                                     apply()
                                                                 }
-
-                                                                android.util.Log.d("LoginPrefs", "Successfully fetched and saved preferences.")
                                                                 isLoading = false
                                                                 onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
                                                             }
                                                         } else if (prefResponse.code() == 404) {
-                                                            // set defaults via network call on IO
                                                             val defaultRequest = PreferencesRequest(
                                                                 userId = loginResponse.user.id,
                                                                 age = 18,
@@ -525,15 +524,12 @@ fun LoginScreen(
                                                                 romanceRange = RomanceRange(min = 1, max = 5),
                                                                 random = true
                                                             )
-
                                                             val setResponse = withContext(Dispatchers.IO) {
                                                                 NetworkClient.api.setPreferences(defaultRequest)
                                                             }
-
                                                             withContext(Dispatchers.Main) {
                                                                 isLoading = false
                                                                 if (setResponse.isSuccessful) {
-                                                                    // persist defaults locally
                                                                     prefs.edit().apply {
                                                                         putString("gender", defaultRequest.gender)
                                                                         putInt("age", defaultRequest.age)
@@ -546,271 +542,317 @@ fun LoginScreen(
                                                                     }
                                                                     onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
                                                                 } else {
-                                                                    Toast.makeText(context, "Failed to set default preferences.", Toast.LENGTH_SHORT).show()
+                                                                    Toast.makeText(context, "Failed to set defaults", Toast.LENGTH_SHORT).show()
                                                                 }
                                                             }
-                                                        } else {
-                                                            withContext(Dispatchers.Main) {
-                                                                isLoading = false
-                                                                android.util.Log.e("LoginPrefs", "Failed to fetch prefs: ${prefResponse.code()}")
-                                                                Toast.makeText(context, "Failed to fetch preferences: ${prefResponse.code()}", Toast.LENGTH_LONG).show()
-                                                            }
                                                         }
-                                                    } catch (e: Exception) {
-                                                        android.util.Log.e("LoginPrefs", "Exception fetching prefs", e)
+                                                    } else {
                                                         withContext(Dispatchers.Main) {
                                                             isLoading = false
-                                                            Toast.makeText(context, "Login failed while fetching preferences: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                                            onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
                                                         }
                                                     }
                                                 } else {
-                                                    // prefs exist — navigate immediately (on main)
+                                                    val error = response.errorBody()?.string() ?: "Unknown error"
                                                     withContext(Dispatchers.Main) {
                                                         isLoading = false
-                                                        android.util.Log.d("LoginPrefs", "Local preferences found. Navigating immediately.")
-                                                        onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                        Toast.makeText(context, "Login failed: ${response.code()} $error", Toast.LENGTH_LONG).show()
                                                     }
                                                 }
-                                            } else {
-                                                val errorBody = try {
-                                                    withContext(Dispatchers.IO) {
-                                                        response.errorBody()?.string()
-                                                    }
-                                                } catch (e: Exception) {
-                                                    "Could not read error body"
-                                                }
-
+                                            } catch (e: Exception) {
                                                 withContext(Dispatchers.Main) {
                                                     isLoading = false
-                                                    Toast.makeText(context, "Login failed: $errorBody", Toast.LENGTH_LONG).show()
+                                                    Toast.makeText(context, "Login error: ${e.message}", Toast.LENGTH_LONG).show()
                                                 }
                                             }
-                                        } catch (e: Exception) {
-                                            android.util.Log.e("LOGIN_ERROR", "Exception during login", e)
-                                            withContext(Dispatchers.Main) {
-                                                isLoading = false
-                                                Toast.makeText(context, "Login error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                                            }
                                         }
-                                    }
-                                },
-                                enabled = isLoginComplete && !isLoading,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4))
-                            ) {
-                                Text(text = "Login", color = Color.White)
-                            }
+                                        }
+                                    },
+                                    enabled = isLoginComplete && !isLoading,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                            ButtonDefaults.buttonColors(
+                                                    containerColor = Color(0xFF4285F4)
+                                            )
+                            ) { Text(text = "Login", color = Color.White) }
                         }
-
                         "SignUp" -> {
                             Text(
-                                text = "Create Account",
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = Color.Black,
-                                fontWeight = FontWeight.Bold
+                                    text = "Create Account",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = Color.Black,
+                                    fontWeight = FontWeight.Bold
                             )
                             Spacer(modifier = Modifier.height(10.dp))
 
                             OutlinedTextField(
-                                value = username,
-                                onValueChange = { username = it },
-                                label = { Text("Username") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                                colors = textFieldColors
+                                    value = username,
+                                    onValueChange = { username = it },
+                                    label = { Text("Username") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                    colors = textFieldColors
                             )
                             Spacer(modifier = Modifier.height(8.dp))
 
                             Spacer(modifier = Modifier.height(12.dp))
 
                             OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it },
-                                label = { Text("Password") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    imeAction = ImeAction.Next
-                                ),
-                                colors = textFieldColors
+                                    value = password,
+                                    onValueChange = { password = it },
+                                    label = { Text("Password") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions =
+                                            KeyboardOptions(
+                                                    keyboardType = KeyboardType.Text,
+                                                    imeAction = ImeAction.Next
+                                            ),
+                                    colors = textFieldColors
                             )
                             Spacer(modifier = Modifier.height(8.dp))
 
                             OutlinedTextField(
-                                value = confirmPassword,
-                                onValueChange = { confirmPassword = it },
-                                label = { Text("Confirm Password") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    imeAction = ImeAction.Done
-                                ),
-                                isError = confirmPassword.isNotEmpty() && password != confirmPassword,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = textFieldColors
+                                    value = confirmPassword,
+                                    onValueChange = { confirmPassword = it },
+                                    label = { Text("Confirm Password") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions =
+                                            KeyboardOptions(
+                                                    keyboardType = KeyboardType.Text,
+                                                    imeAction = ImeAction.Done
+                                            ),
+                                    isError =
+                                            confirmPassword.isNotEmpty() &&
+                                                    password != confirmPassword,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = textFieldColors
                             )
 
                             if (confirmPassword.isNotEmpty() && password != confirmPassword) {
                                 Text(
-                                    text = "Passwords do not match",
-                                    color = Color.Red,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.align(Alignment.Start)
+                                        text = "Passwords do not match",
+                                        color = Color.Red,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.align(Alignment.Start)
                                 )
                             }
                             Spacer(modifier = Modifier.height(24.dp))
                             Button(
-                                onClick = {
-                                    isLoading = true
+                                    onClick = {
+                                        isLoading = true
 
-                                    // Retrieve AppSet ID and Register
-                                    val client = AppSet.getClient(context)
-                                    client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
-                                        val appSetId = appSetIdInfo.id
-                                        val request = UserRegistrationRequest(
-                                            username = username,
-                                            password = password,
-                                            userId = "$androidId:$appSetId",
-                                            email = "$androidId:$appSetId"+"@email.com",
-                                            googleId = ""
-                                        )
+                                        // Retrieve AppSet ID and Register
+                                        val client = AppSet.getClient(context)
+                                        client.appSetIdInfo
+                                                .addOnSuccessListener { appSetIdInfo ->
+                                                    val appSetId = appSetIdInfo.id
+                                                    val request =
+                                                            UserRegistrationRequest(
+                                                                    username = username,
+                                                                    password = password,
+                                                                    userId = "$androidId:$appSetId",
+                                                                    email =
+                                                                            "$androidId:$appSetId" +
+                                                                                    "@email.com",
+                                                                    googleId = ""
+                                                            )
 
-                                        coroutine.launch {
-                                            try {
-                                                val response = NetworkClient.api.registerUser(request)
-                                                isLoading = false
-                                                if (response.isSuccessful) {
-                                                    authMode = "Login" // Move to Login on success
-                                                    Toast.makeText(context, "Sign up successful! Please login.", Toast.LENGTH_SHORT).show()
-                                                } else {
-                                                    Toast.makeText(context, "Sign up failed: ${response.errorBody()?.string()}", Toast.LENGTH_SHORT).show()
+                                                    coroutine.launch {
+                                                        try {
+                                                            val response =
+                                                                    NetworkClient.api.registerUser(
+                                                                            request
+                                                                    )
+                                                            isLoading = false
+                                                            if (response.isSuccessful) {
+                                                                authMode =
+                                                                        "Login" // Move to Login on
+                                                                // success
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Sign up successful! Please login.",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                            } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Sign up failed: ${response.errorBody()?.string()}",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            isLoading = false
+                                                            e.printStackTrace()
+                                                            Toast.makeText(
+                                                                            context,
+                                                                            "Sign up error: ${e.localizedMessage}",
+                                                                            Toast.LENGTH_SHORT
+                                                                    )
+                                                                    .show()
+                                                        }
+                                                    }
                                                 }
-                                            } catch (e: Exception) {
-                                                isLoading = false
-                                                e.printStackTrace()
-                                                Toast.makeText(context, "Sign up error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    }.addOnFailureListener {
-                                        isLoading = false
-                                        Toast.makeText(context, "Failed to retrieve ID", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                enabled = isSignUpComplete && !isLoading,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4))
-                            ) {
-                                Text(text = "Sign Up", color = Color.White)
-                            }
+                                                .addOnFailureListener {
+                                                    isLoading = false
+                                                    Toast.makeText(
+                                                                    context,
+                                                                    "Failed to retrieve ID",
+                                                                    Toast.LENGTH_SHORT
+                                                            )
+                                                            .show()
+                                                }
+                                    },
+                                    enabled = isSignUpComplete && !isLoading,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                            ButtonDefaults.buttonColors(
+                                                    containerColor = Color(0xFF4285F4)
+                                            )
+                            ) { Text(text = "Sign Up", color = Color.White) }
                             Spacer(modifier = Modifier.height(16.dp))
                         }
-
                         "ResetPassword" -> {
                             Text(
-                                text = "Reset Password",
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = Color.Black,
-                                fontWeight = FontWeight.Bold
+                                    text = "Reset Password",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = Color.Black,
+                                    fontWeight = FontWeight.Bold
                             )
                             Spacer(modifier = Modifier.height(10.dp))
 
                             OutlinedTextField(
-                                value = currentUsername,
-                                onValueChange = { currentUsername = it },
-                                label = { Text("Username") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                                colors = textFieldColors
+                                    value = currentUsername,
+                                    onValueChange = { currentUsername = it },
+                                    label = { Text("Username") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                    colors = textFieldColors
                             )
 
                             Spacer(modifier = Modifier.height(12.dp))
 
                             OutlinedTextField(
-                                value = newPassword,
-                                onValueChange = { newPassword = it },
-                                label = { Text("New Password") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    imeAction = ImeAction.Next
-                                ),
-                                colors = textFieldColors
+                                    value = newPassword,
+                                    onValueChange = { newPassword = it },
+                                    label = { Text("New Password") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions =
+                                            KeyboardOptions(
+                                                    keyboardType = KeyboardType.Text,
+                                                    imeAction = ImeAction.Next
+                                            ),
+                                    colors = textFieldColors
                             )
 
                             Spacer(modifier = Modifier.height(12.dp))
 
                             OutlinedTextField(
-                                value = confirmNewPassword,
-                                onValueChange = { confirmNewPassword = it },
-                                label = { Text("Confirm New Password") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    imeAction = ImeAction.Done
-                                ),
-                                isError = confirmNewPassword.isNotEmpty() && newPassword != confirmNewPassword,
-                                colors = textFieldColors
+                                    value = confirmNewPassword,
+                                    onValueChange = { confirmNewPassword = it },
+                                    label = { Text("Confirm New Password") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions =
+                                            KeyboardOptions(
+                                                    keyboardType = KeyboardType.Text,
+                                                    imeAction = ImeAction.Done
+                                            ),
+                                    isError =
+                                            confirmNewPassword.isNotEmpty() &&
+                                                    newPassword != confirmNewPassword,
+                                    colors = textFieldColors
                             )
 
-                            if (confirmNewPassword.isNotEmpty() && newPassword != confirmNewPassword) {
+                            if (confirmNewPassword.isNotEmpty() && newPassword != confirmNewPassword
+                            ) {
                                 Text(
-                                    text = "Passwords do not match",
-                                    color = Color.Red,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.align(Alignment.Start)
+                                        text = "Passwords do not match",
+                                        color = Color.Red,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.align(Alignment.Start)
                                 )
                             }
 
                             Spacer(modifier = Modifier.height(24.dp))
 
                             Button(
-                                onClick = {
-                                    isLoading = true
-                                    val client = AppSet.getClient(context)
-                                    client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
-                                        val appSetId = appSetIdInfo.id
-                                        val userId = "$androidId:$appSetId"
-                                        val request = UserResetPasswordRequest(
-                                            userId = userId,
-                                            username = currentUsername,
-                                            newPassword = newPassword
-                                        )
+                                    onClick = {
+                                        isLoading = true
+                                        val client = AppSet.getClient(context)
+                                        client.appSetIdInfo
+                                                .addOnSuccessListener { appSetIdInfo ->
+                                                    val appSetId = appSetIdInfo.id
+                                                    val userId = "$androidId:$appSetId"
+                                                    val request =
+                                                            UserResetPasswordRequest(
+                                                                    userId = userId,
+                                                                    username = currentUsername,
+                                                                    newPassword = newPassword
+                                                            )
 
-                                        coroutine.launch {
-                                            try {
-                                                val response = NetworkClient.api.resetPassword(request)
-                                                isLoading = false
-                                                if (response.isSuccessful) {
-                                                    authMode = "Login" // Move to Login on success
-                                                    Toast.makeText(context, "Password reset successful.", Toast.LENGTH_SHORT).show()
-                                                } else {
-                                                    Toast.makeText(context, "Reset failed: ${response.errorBody()?.string()}", Toast.LENGTH_SHORT).show()
+                                                    coroutine.launch {
+                                                        try {
+                                                            val response =
+                                                                    NetworkClient.api.resetPassword(
+                                                                            request
+                                                                    )
+                                                            isLoading = false
+                                                            if (response.isSuccessful) {
+                                                                authMode =
+                                                                        "Login" // Move to Login on
+                                                                // success
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Password reset successful.",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                            } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Reset failed: ${response.errorBody()?.string()}",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            isLoading = false
+                                                            Toast.makeText(
+                                                                            context,
+                                                                            "Error: ${e.localizedMessage}",
+                                                                            Toast.LENGTH_SHORT
+                                                                    )
+                                                                    .show()
+                                                        }
+                                                    }
                                                 }
-                                            } catch (e: Exception) {
-                                                isLoading = false
-                                                Toast.makeText(context, "Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    }.addOnFailureListener {
-                                        isLoading = false
-                                        Toast.makeText(context, "Failed to get ID", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                enabled = isResetPasswordComplete && !isLoading,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4))
-                            ) {
-                                Text(text = "Reset Password", color = Color.White)
-                            }
+                                                .addOnFailureListener {
+                                                    isLoading = false
+                                                    Toast.makeText(
+                                                                    context,
+                                                                    "Failed to get ID",
+                                                                    Toast.LENGTH_SHORT
+                                                            )
+                                                            .show()
+                                                }
+                                    },
+                                    enabled = isResetPasswordComplete && !isLoading,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors =
+                                            ButtonDefaults.buttonColors(
+                                                    containerColor = Color(0xFF4285F4)
+                                            )
+                            ) { Text(text = "Reset Password", color = Color.White) }
                         }
                     }
                 }
@@ -823,29 +865,23 @@ fun LoginScreen(
 }
 
 @Composable
-fun TermsCheckbox(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    text: String
-) {
+fun TermsCheckbox(checked: Boolean, onCheckedChange: (Boolean) -> Unit, text: String) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
     ) {
         Checkbox(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = CheckboxDefaults.colors(checkedColor = Color(0xFF4285F4)),
-            modifier = Modifier.size(36.dp)
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = CheckboxDefaults.colors(checkedColor = Color(0xFF4285F4)),
+                modifier = Modifier.size(36.dp)
         )
         Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.Black,
-            fontSize = 13.sp,
-            modifier = Modifier.padding(start = 8.dp)
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Black,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(start = 8.dp)
         )
     }
 }
@@ -858,7 +894,10 @@ fun VideoBackground(context: Context) {
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
-            val videoUri = Uri.parse("android.resource://${context.packageName}/${R.raw.video_ending_suggestion}")
+            val videoUri =
+                    Uri.parse(
+                            "android.resource://${context.packageName}/${R.raw.video_ending_suggestion}"
+                    )
             setMediaItem(MediaItem.fromUri(videoUri))
 
             repeatMode = Player.REPEAT_MODE_ONE
@@ -867,52 +906,56 @@ fun VideoBackground(context: Context) {
             playWhenReady = true
 
             // 2. Add Listener to detect exactly when the first frame appears
-            addListener(object : Player.Listener {
-                override fun onRenderedFirstFrame() {
-                    super.onRenderedFirstFrame()
-                    isVideoReady = true
-                }
-            })
+            addListener(
+                    object : Player.Listener {
+                        override fun onRenderedFirstFrame() {
+                            super.onRenderedFirstFrame()
+                            isVideoReady = true
+                        }
+                    }
+            )
         }
     }
 
-    DisposableEffect(Unit) {
-        onDispose { exoPlayer.release() }
-    }
+    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // Layer 1: The Video Player (Initially black/invisible)
         AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = false
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = false
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
 
-                    // IMPORTANT: Set the shutter to Transparent so it doesn't paint black
-                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        // IMPORTANT: Set the shutter to Transparent so it doesn't paint black
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
 
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                }
-            },
-            modifier = Modifier.fillMaxSize()
+                        layoutParams =
+                                FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
         )
 
         // Layer 2: The Placeholder Image (Sits ON TOP of the video)
         // We fade this out once the video is ready.
         androidx.compose.animation.AnimatedVisibility(
-            visible = !isVideoReady,
-            exit = androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(500)),
-            modifier = Modifier.fillMaxSize()
+                visible = !isVideoReady,
+                exit =
+                        androidx.compose.animation.fadeOut(
+                                animationSpec = androidx.compose.animation.core.tween(500)
+                        ),
+                modifier = Modifier.fillMaxSize()
         ) {
             Image(
-                painter = painterResource(id = R.drawable.video_placeholder),
-                contentDescription = "Video Placeholder",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+                    painter = painterResource(id = R.drawable.video_placeholder),
+                    contentDescription = "Video Placeholder",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
             )
         }
     }
@@ -922,7 +965,5 @@ fun VideoBackground(context: Context) {
 @Preview(showBackground = true)
 @Composable
 fun LoginScreenPreview() {
-    AnonychatTheme {
-        LoginScreen()
-    }
+    AnonychatTheme { LoginScreen() }
 }

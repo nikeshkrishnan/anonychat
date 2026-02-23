@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"name": "anonychat",
+			"path": "../../../../../../../.."
+		}
+	],
+	"settings": {
+		"files.watcherExclude": {
+			"**/target": true
+		},
+		"java.configuration.updateBuildConfiguration": "interactive"
+	}
+}

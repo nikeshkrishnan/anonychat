@@ -451,7 +451,7 @@ object WebSocketManager {
     private lateinit var connectivityManager: ConnectivityManager
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    private const val SERVER_LIVENESS_TIMEOUT_MS = 45_000L
+    private const val SERVER_LIVENESS_TIMEOUT_MS = 7_000L // 7 seconds - force reconnect if no pong
     @Volatile private var lastServerMessageAt: Long = 0
     private var livenessJob: Job? = null
     private lateinit var historyDao: ChatHistoryDao
@@ -461,12 +461,31 @@ object WebSocketManager {
         livenessJob =
                 scope.launch {
                     while (isActive) {
-                        delay(10_000)
+                        delay(2_000) // Check every 2 seconds for faster detection
                         val now = System.currentTimeMillis()
                         if (now - lastServerMessageAt > SERVER_LIVENESS_TIMEOUT_MS) {
-                            Log.e("WebSocketManager", "Server silent → force reconnect")
+                            Log.e("WebSocketManager", "!!! SERVER SILENT → KILLING OLD CONNECTION AND STARTING FRESH !!!")
+                            
+                            // Completely kill the old connection
                             forceCloseSocket()
-                            scheduleReconnect(++reconnectAttempt)
+                            
+                            // Reset reconnect attempt to start fresh
+                            reconnectAttempt = 0
+                            
+                            // Create a completely new WebSocket connection
+                            if (wsUrl != null) {
+                                Log.e("WebSocketManager", "!!! CREATING FRESH WEBSOCKET CONNECTION !!!")
+                                try {
+                                    webSocket = client.newWebSocket(
+                                        Request.Builder().url(wsUrl!!).build(),
+                                        createListener()
+                                    )
+                                    wsState = WsState.CONNECTING
+                                } catch (e: Exception) {
+                                    Log.e("WebSocketManager", "Failed to create fresh connection", e)
+                                    scheduleReconnect(++reconnectAttempt)
+                                }
+                            }
                             return@launch
                         }
                     }
@@ -1397,7 +1416,7 @@ object WebSocketManager {
                 // reset liveness timestamp and start monitors
                 lastServerMessageAt = System.currentTimeMillis()
                 startReadyHandshake()
-                // startLivenessMonitor() // if you want
+                startLivenessMonitor() // Monitor server liveness and reconnect if silent
                 startHeartbeat()
                 startAckMonitor()
 
@@ -1770,6 +1789,14 @@ object WebSocketManager {
                         _events.emit(WebSocketEvent.PeerPresence(from, status, lastSeen))
                     }
                 }
+                "chat_open" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED chat_open from: $from !!!")
+                }
+                "chat_close" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED chat_close from: $from !!!")
+                }
                 else -> {
                     // Unknown type — ignore or log
                     Log.w("WebSocketManager", "Unknown message type: $type")
@@ -1811,6 +1838,8 @@ object WebSocketManager {
         ensureInit()
 
         val payload = JSONObject().put("type", "chat_open").put("with", peerGmail).toString()
+        
+        Log.e("WebSocketManager", "!!! SENDING chat_open to: $peerGmail !!!")
 
         val pm =
                 PendingMessage(
@@ -1829,6 +1858,37 @@ object WebSocketManager {
                 dao.upsert(pm.toEntity())
             } catch (e: Exception) {
                 Log.e("WebSocketManager", "Failed to persist chat_open pending message", e)
+            }
+        }
+
+        flushPendingQueue()
+    }
+    
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendChatClose(peerGmail: String) {
+        ensureInit()
+
+        val payload = JSONObject().put("type", "chat_close").put("with", peerGmail).toString()
+        
+        Log.e("WebSocketManager", "!!! SENDING chat_close to: $peerGmail !!!")
+
+        val pm =
+                PendingMessage(
+                        "chat_close_${System.currentTimeMillis()}",
+                        payload,
+                        0,
+                        MessageState.QUEUED,
+                        0L,
+                        System.currentTimeMillis()
+                )
+
+        pendingQueue.add(pm)
+
+        scope.launch {
+            try {
+                dao.upsert(pm.toEntity())
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to persist chat_close pending message", e)
             }
         }
 

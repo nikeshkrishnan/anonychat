@@ -5,9 +5,17 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.google.gson.annotations.SerializedName
 import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.*
 import okhttp3.Call
+import okhttp3.Connection
+import okhttp3.Dns
 import okhttp3.EventListener
+import okhttp3.Handshake
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -23,51 +31,18 @@ import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
 
-class RetryInterceptor(private val maxRetries: Int = 3) : Interceptor {
-        override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
-                var request = chain.request()
-                var response: okhttp3.Response? = null
-                var exception: IOException? = null
-                var tryCount = 0
+class CachingDns : Dns {
 
-                while (tryCount < maxRetries && response == null) {
-                        try {
-                                if (tryCount > 0) {
-                                        // Simple exponential backoff: 200ms, 400ms, 800ms
-                                        val sleepTime = 200L * (1 shl (tryCount - 1))
-                                        Thread.sleep(sleepTime)
-                                        Log.d(
-                                                "RetryInterceptor",
-                                                "Retrying request ($tryCount) for: ${request.url}"
-                                        )
-                                }
-                                response = chain.proceed(request)
-                                if (!response.isSuccessful && shouldRetry(response.code)) {
-                                        response.close()
-                                        response = null
-                                }
-                        } catch (e: IOException) {
-                                exception = e
-                                Log.e(
-                                        "RetryInterceptor",
-                                        "Request failed ($tryCount): ${e.message}"
-                                )
-                        }
-                        tryCount++
+        private val cache = mutableMapOf<String, List<InetAddress>>()
+
+        override fun lookup(hostname: String): List<InetAddress> {
+                return try {
+                        val result = Dns.SYSTEM.lookup(hostname)
+                        cache[hostname] = result
+                        result
+                } catch (e: UnknownHostException) {
+                        cache[hostname] ?: throw e
                 }
-
-                // If we have a response, return it
-                if (response != null) {
-                        return response
-                }
-
-                // Otherwise throw the last exception
-                throw exception ?: IOException("Request failed after $maxRetries retries")
-        }
-
-        private fun shouldRetry(code: Int): Boolean {
-                // Retry on server errors (5xx) or request timeout (408)
-                return code >= 500 || code == 408
         }
 }
 
@@ -302,10 +277,61 @@ object NetworkClient {
                                 .eventListenerFactory { getTracingEventListener() }
                                 .protocols(listOf(Protocol.HTTP_1_1))
                                 .connectionPool(connectionPool)
+                                .dns(CachingDns())
                                 .retryOnConnectionFailure(true)
-                                .addInterceptor(RetryInterceptor()) // Add retry logic
                                 .addInterceptor(authInterceptor)
                                 .addInterceptor(loggingInterceptor)
+                                .eventListener(
+                                        object : EventListener() {
+
+                                                override fun dnsStart(
+                                                        call: Call,
+                                                        domainName: String
+                                                ) {
+                                                        Log.e(
+                                                                "NETWORK_TRACE",
+                                                                "DNS start: $domainName"
+                                                        )
+                                                }
+
+                                                override fun dnsEnd(
+                                                        call: Call,
+                                                        domainName: String,
+                                                        inetAddressList: List<InetAddress>
+                                                ) {
+                                                        Log.e("NETWORK_TRACE", "DNS end")
+                                                }
+
+                                                override fun connectStart(
+                                                        call: Call,
+                                                        inetSocketAddress: InetSocketAddress,
+                                                        proxy: Proxy
+                                                ) {
+                                                        Log.e("NETWORK_TRACE", "Connect start")
+                                                }
+
+                                                override fun secureConnectStart(call: Call) {
+                                                        Log.e("NETWORK_TRACE", "TLS start")
+                                                }
+
+                                                override fun secureConnectEnd(
+                                                        call: Call,
+                                                        handshake: Handshake?
+                                                ) {
+                                                        Log.e("NETWORK_TRACE", "TLS end")
+                                                }
+
+                                                override fun connectionAcquired(
+                                                        call: Call,
+                                                        connection: Connection
+                                                ) {
+                                                        Log.e(
+                                                                "NETWORK_TRACE",
+                                                                "Connection acquired"
+                                                        )
+                                                }
+                                        }
+                                )
                                 .addInterceptor { chain ->
                                         val request =
                                                 chain.request()
@@ -314,9 +340,9 @@ object NetworkClient {
                                                         .build()
                                         chain.proceed(request)
                                 }
-                                .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-                                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-                                .writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                                .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                 .build()
 
                 // Aggressively evict any potential stale connections from the pool on startup
