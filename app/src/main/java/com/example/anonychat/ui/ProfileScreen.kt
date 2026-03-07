@@ -9,6 +9,8 @@ import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.PreferencesRequest
 import com.example.anonychat.network.AgeRange
 import com.example.anonychat.network.RomanceRange
+import com.example.anonychat.network.WebSocketEvent
+import com.example.anonychat.network.WebSocketManager
 import android.widget.Toast
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -64,12 +66,6 @@ fun ProfileScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var roses by remember { mutableStateOf(12) }
-    var sparks by remember { mutableStateOf(5) }
-    var giftsLeft by remember { mutableStateOf(5) } // This is now a variable
-    var rating by remember { mutableStateOf(4.6f) }
-    var ratingCount by remember { mutableStateOf(128) }
-
     /* ---------- THEME ---------- */
     val themePrefs = remember {
         context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE)
@@ -90,6 +86,12 @@ fun ProfileScreen(
     val userPrefs = remember {
         context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
     }
+
+    var roses by remember { mutableStateOf(userPrefs.getInt("roses", 0)) }
+    var sparks by remember { mutableStateOf(userPrefs.getInt("sparks_self", 0)) }
+    var giftsLeft by remember { mutableStateOf(userPrefs.getInt("available_roses", 0)) }
+    var rating by remember { mutableStateOf(4.6f) }
+    var ratingCount by remember { mutableStateOf(128) }
     var isRandomMatch by remember { mutableStateOf(userPrefs.getBoolean("random_match", true)) }
     var username by remember { mutableStateOf(initialUsername) }
     var gender by remember { mutableStateOf(userPrefs.getString("gender", "male") ?: "male") }
@@ -111,55 +113,73 @@ fun ProfileScreen(
     }
 
 
-        // --- NEW: FETCH PREFERENCES IF MISSING ---
+        // Listen for incoming SparkRight events and update sparks count live
         LaunchedEffect(Unit) {
-            android.util.Log.d("existing ProfilePrefs", "Local prefs not found. Fetching for $userPrefs")
-
-            // Check if preferences are missing locally. We use 'gender' as a key indicator.
-            if (!userPrefs.contains("gender")) {
-                val userEmail = userPrefs.getString("user_email", null)
-                if (userEmail != null) {
-                    android.util.Log.d("ProfilePrefs", "Local prefs not found. Fetching for $userEmail")
-                    try {
-                        val response = NetworkClient.api.getPreferences(userEmail)
-                        android.util.Log.e("ProfilePrefsFetch", "Response Code: ${response.code()}, Body: ${response.body()}, Error: ${response.errorBody()?.string()}")
-                        if (response.isSuccessful && response.body() != null) {
-                            val serverPrefs = response.body()!!
-
-                            // Update the composable's state with the fetched data
-                            serverPrefs.gender?.let { gender = it }
-                            serverPrefs.age?.let { age = it }
-                            serverPrefs.preferredGender?.let { preferredGender = it }
-                            serverPrefs.preferredAgeRange?.let {
-                                preferredAgeRange = it.min.toFloat()..it.max.toFloat()
-                            }
-                            serverPrefs.romanceRange?.let {
-                                romanceRange = it.min.toFloat()..it.max.toFloat()
-                            }
-
-                            // Save the fetched preferences to SharedPreferences for next time
-                            with(userPrefs.edit()) {
-                                putString("gender", gender)
-                                putInt("age", age)
-                                putString("preferred_gender", preferredGender)
-                                putFloat("preferred_age_min", preferredAgeRange.start)
-                                putFloat("preferred_age_max", preferredAgeRange.endInclusive)
-                                putFloat("romance_min", romanceRange.start)
-                                putFloat("romance_max", romanceRange.endInclusive)
-                                apply()
-                            }
-                            android.util.Log.d("ProfilePrefs", "Fetched and updated prefs from server.")
-                        } else {
-                            android.util.Log.e("ProfilePrefs", "Failed to fetch prefs: ${response.errorBody()?.string()}")
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("ProfilePrefs", "Error fetching prefs: ${e.message}")
+            WebSocketManager.events.collect { event ->
+                when (event) {
+                    is WebSocketEvent.SparkRight -> {
+                        sparks = userPrefs.getInt("sparks_self", 0)
                     }
-                } else {
-                    android.util.Log.w("ProfilePrefs", "User email not found in SharedPreferences, cannot fetch.")
+                    else -> Unit
+                }
+            }
+        }
+
+        // --- FETCH PREFERENCES FROM SERVER ON LOAD (always) ---
+        LaunchedEffect(Unit) {
+            val userEmail = userPrefs.getString("user_email", null)
+            if (userEmail != null) {
+                android.util.Log.d("ProfilePrefs", "Fetching preferences for $userEmail")
+                try {
+                    val response = NetworkClient.api.getPreferences(userEmail)
+                    android.util.Log.e("ProfilePrefsFetch", "Response Code: ${response.code()}, Body: ${response.body()}, Error: ${response.errorBody()?.string()}")
+                    if (response.isSuccessful && response.body() != null) {
+                        val serverPrefs = response.body()!!
+
+                        // Update composable state with fetched data
+                        serverPrefs.gender?.let { gender = it }
+                        serverPrefs.age?.let { age = it }
+                        serverPrefs.preferredGender?.let { preferredGender = it }
+                        serverPrefs.preferredAgeRange?.let {
+                            preferredAgeRange = it.min.toFloat()..it.max.toFloat()
+                        }
+                        serverPrefs.romanceRange?.let {
+                            romanceRange = it.min.toFloat()..it.max.toFloat()
+                        }
+                        // Update sparks, roses and giftsLeft from server response
+                        serverPrefs.sparks?.let {
+                            sparks = it
+                        }
+                        serverPrefs.totalRosesReceived?.let {
+                            roses = it
+                        }
+                        serverPrefs.availableRoses?.let {
+                            giftsLeft = it
+                        }
+
+                        // Persist all fetched values to SharedPreferences
+                        with(userPrefs.edit()) {
+                            putString("gender", gender)
+                            putInt("age", age)
+                            putString("preferred_gender", preferredGender)
+                            putFloat("preferred_age_min", preferredAgeRange.start)
+                            putFloat("preferred_age_max", preferredAgeRange.endInclusive)
+                            putFloat("romance_min", romanceRange.start)
+                            putFloat("romance_max", romanceRange.endInclusive)
+                            serverPrefs.sparks?.let { putInt("sparks_self", it) }
+                            serverPrefs.totalRosesReceived?.let { putInt("roses", it) }
+                            serverPrefs.availableRoses?.let { putInt("available_roses", it) }
+                            apply()
+                        }
+                        android.util.Log.d("ProfilePrefs", "Fetched and updated prefs from server. sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
+                    } else {
+                        android.util.Log.e("ProfilePrefs", "Failed to fetch prefs: ${response.errorBody()?.string()}")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ProfilePrefs", "Error fetching prefs: ${e.message}")
                 }
             } else {
-                android.util.Log.d("ProfilePrefs", "Local preferences found, skipping fetch.")
+                android.util.Log.w("ProfilePrefs", "User email not found in SharedPreferences, cannot fetch.")
             }
         }
 
@@ -238,7 +258,7 @@ fun ProfileScreen(
                         .size(90.dp)
                         .border(2.5.dp, Color.White, CircleShape)
                         .background(
-                            if (isDarkTheme) Color(0xFF142235) else Color(0xFF87CEEB),
+                            if (isDarkTheme) Color(0xFF121821) else Color(0xFF87CEEB),
                             CircleShape
                         )
                         .clip(CircleShape),

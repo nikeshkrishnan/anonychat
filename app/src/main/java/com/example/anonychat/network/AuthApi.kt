@@ -11,6 +11,8 @@ import java.net.Proxy
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import okhttp3.Call
 import okhttp3.Connection
 import okhttp3.Dns
@@ -25,11 +27,30 @@ import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Headers
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
+
+// Sealed class for HTTP 403 events
+sealed class Http403Event {
+    data class AccountRestricted(val message: String) : Http403Event()
+}
+
+// Global flow for HTTP 403 events
+object Http403EventBus {
+    private val _events = MutableSharedFlow<Http403Event>(
+        replay = 0,
+        extraBufferCapacity = 10
+    )
+    val events = _events.asSharedFlow()
+    
+    suspend fun emit(event: Http403Event) {
+        _events.emit(event)
+    }
+}
 
 class CachingDns : Dns {
 
@@ -47,7 +68,7 @@ class CachingDns : Dns {
 }
 
 // This interceptor adds the auth token to requests
-class AuthInterceptor(context: Context) : Interceptor {
+class AuthInterceptor(private val context: Context) : Interceptor {
         private val sharedPreferences: SharedPreferences =
                 context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
 
@@ -70,7 +91,52 @@ class AuthInterceptor(context: Context) : Interceptor {
                 }
 
                 val request = requestBuilder.build()
-                return chain.proceed(request)
+                val response = chain.proceed(request)
+                
+                // Handle 403 responses (ban/suspension)
+                if (response.code == 403) {
+                        val responseBody = response.peekBody(Long.MAX_VALUE).string()
+                        val url = request.url.toString()
+                        Log.e("AuthInterceptor", "403 Forbidden received for URL: $url")
+                        Log.e("AuthInterceptor", "Response body: $responseBody")
+                        
+                        // Skip event emission for login/register endpoints - they handle 403 themselves
+                        val isAuthEndpoint = url.contains("auth/login") || url.contains("auth/register")
+                        
+                        if (isAuthEndpoint) {
+                                Log.e("AuthInterceptor", "403 on auth endpoint - letting LoginScreen handle it")
+                                // Don't emit event or clear session - LoginScreen will handle this
+                                return response
+                        }
+                        
+                        // For non-auth endpoints, handle 403 normally
+                        try {
+                                val json = org.json.JSONObject(responseBody)
+                                val message = json.optString("message", "Your account has been restricted")
+                                
+                                // Clear user session
+                                sharedPreferences.edit().clear().apply()
+                                
+                                // Emit event to show dialog in MainActivity
+                                kotlinx.coroutines.GlobalScope.launch {
+                                        Http403EventBus.emit(Http403Event.AccountRestricted(message))
+                                }
+                                
+                                Log.e("AuthInterceptor", "403 event emitted: $message")
+                        } catch (e: Exception) {
+                                Log.e("AuthInterceptor", "Failed to parse 403 response", e)
+                                
+                                // Clear user session
+                                sharedPreferences.edit().clear().apply()
+                                
+                                // Emit default message
+                                kotlinx.coroutines.GlobalScope.launch {
+                                        Http403EventBus.emit(Http403Event.AccountRestricted("Your account has been restricted"))
+                                }
+                        }
+                }
+                
+                return response
         }
 }
 
@@ -84,7 +150,10 @@ data class GetPreferencesResponse(
         val preferredAgeRange: AgeRange?,
         val random: Boolean?,
         @SerializedName("isOnline") val isOnline: Boolean?,
-        @SerializedName("lastOnline") val lastOnline: Long?
+        @SerializedName("lastOnline") val lastOnline: Long?,
+        val sparks: Int?,
+        val totalRosesReceived: Int?,
+        val availableRoses: Int?
 )
 
 // --- DATA MODELS ---
@@ -139,8 +208,55 @@ data class MatchResponse(
         val pickBestflag: Boolean?,
         @SerializedName("isOnline") val isOnline: Boolean?,
         @SerializedName("lastOnline") val lastOnline: Long?,
-        val match: String? // Keep match for backward compatibility if it's still being sent as the
-// primary identifier
+        val match: String?, // Keep match for backward compatibility if it's still being sent as the primary identifier
+        val giftedMeARose: Boolean? = null,
+        val hasTakenBackRose: Boolean? = null
+)
+
+data class SparkRequest(
+        val userA: String,
+        val userB: String
+)
+
+data class SparkResponse(
+        val sparked: Boolean,
+        val alreadyExists: Boolean? = null
+)
+
+data class SparkRoseRequest(
+        val toGmail: String
+)
+
+data class SparkRoseResponse(
+        val message: String,
+        val receiverTotalSparks: Int
+)
+
+data class BlockResponse(
+        val message: String
+)
+
+data class ReportRequest(
+        val reason: String
+)
+
+data class ReportResponse(
+        val message: String
+)
+
+data class ReportErrorResponse(
+        val isDuplicate: Boolean? = null,
+        val message: String
+)
+
+data class DeleteMatchResponse(
+        val message: String,
+        val removed: Boolean
+)
+
+data class DeleteAllMatchesResponse(
+        val message: String,
+        val deleted: Boolean
 )
 
 // --- API INTERFACE ---
@@ -165,6 +281,55 @@ interface AuthApiService {
 
         @POST("/api/match/{gmail}")
         suspend fun callMatch(@Path("gmail") gmail: String): Response<MatchResponse>
+
+        @POST("/api/match/skip/{gmail}/{candGmail}")
+        suspend fun skipMatch(@Path("gmail") gmail: String, @Path("candGmail") candGmail: String): Response<Void>
+
+        @POST("/api/match/accept/{gmail}/{candGmail}")
+        suspend fun acceptMatch(@Path("gmail") gmail: String, @Path("candGmail") candGmail: String): Response<Void>
+
+        @Headers("Content-Type: application/json")
+        @POST("/api/roses/issparked")
+        suspend fun isSparked(@Body request: SparkRequest): Response<SparkResponse>
+
+        @Headers("Content-Type: application/json")
+        @POST("/api/roses/hassparked")
+        suspend fun hasSparked(@Body request: SparkRequest): Response<SparkResponse>
+
+        @Headers("Content-Type: application/json")
+        @POST("/api/roses/spark")
+        suspend fun sparkUser(@Body request: SparkRoseRequest): Response<SparkRoseResponse>
+
+        @Headers("Content-Type: application/json")
+        @POST("/api/roses/give")
+        suspend fun giveRose(@Body request: SparkRoseRequest): Response<SparkRoseResponse>
+
+        @Headers("Content-Type: application/json")
+        @POST("/api/roses/takeback")
+        suspend fun takeBackRose(@Body request: SparkRoseRequest): Response<SparkRoseResponse>
+
+        @POST("/api/match/block/{userId}/{candId}")
+        suspend fun blockUser(@Path("userId") userId: String, @Path("candId") candId: String): Response<BlockResponse>
+
+        @POST("/api/match/unblock/{userId}/{candId}")
+        suspend fun unblockUser(@Path("userId") userId: String, @Path("candId") candId: String): Response<BlockResponse>
+
+        @Headers("Content-Type: application/json")
+        @POST("/report/{reporterId}/{targetId}")
+        suspend fun reportUser(
+                @Path("reporterId") reporterId: String,
+                @Path("targetId") targetId: String,
+                @Body request: ReportRequest
+        ): Response<ReportResponse>
+
+        @DELETE("/api/match/{gmail}/{candGmail}")
+        suspend fun deleteMatch(
+                @Path("gmail") gmail: String,
+                @Path("candGmail") candGmail: String
+        ): Response<DeleteMatchResponse>
+
+        @DELETE("/api/match/all/{gmail}")
+        suspend fun deleteAllMatches(@Path("gmail") gmail: String): Response<DeleteAllMatchesResponse>
 }
 
 // --- NETWORK CLIENT (SINGLETON) ---

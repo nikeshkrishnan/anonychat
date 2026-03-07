@@ -22,13 +22,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -46,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,6 +67,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -75,10 +83,166 @@ import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.WebSocketEvent
+import com.example.anonychat.network.WebSocketManager
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+/* ---------------------------------------------------
+   CHAT CONVERSATION ENTRY MODEL
+--------------------------------------------------- */
+data class ChatConversationEntry(
+    val userEmail: String,
+    val username: String,
+    val profilePictureUrl: String? = null,
+    val lastMessage: String,
+    val lastMessageTimestamp: Long,
+    val unreadCount: Int = 0,
+    // Peer avatar fields — same logic as KeyboardProofScreen
+    val peerGender: String = "male",
+    val peerRomanceMin: Float = 1f,
+    val peerRomanceMax: Float = 5f
+)
+
+/**
+ * Singleton repository that persists the conversation list across navigation.
+ * Both ChatScreen (display) and KeyboardProofScreen (send/receive) update this.
+ */
+object ConversationRepository {
+    private const val PREFS_NAME = "conversation_repository"
+    private const val KEY_CONVERSATIONS = "conversations_json"
+    
+    val conversations = androidx.compose.runtime.mutableStateListOf<ChatConversationEntry>()
+    private var context: Context? = null
+    private val gson = Gson()
+
+    /**
+     * Initialize the repository with a Context and load persisted data.
+     * Call this once from Application or MainActivity.
+     */
+    fun initialize(ctx: Context) {
+        if (context == null) {
+            context = ctx.applicationContext
+            load()
+        }
+    }
+
+    /**
+     * Save the current conversation list to SharedPreferences as JSON.
+     */
+    private fun save() {
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val json = gson.toJson(conversations.toList())
+        prefs.edit().putString(KEY_CONVERSATIONS, json).apply()
+    }
+
+    /**
+     * Load the conversation list from SharedPreferences.
+     */
+    private fun load() {
+        val ctx = context ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val json = prefs.getString(KEY_CONVERSATIONS, null) ?: return
+        try {
+            val type = object : TypeToken<List<ChatConversationEntry>>() {}.type
+            val loaded = gson.fromJson<List<ChatConversationEntry>>(json, type)
+            conversations.clear()
+            conversations.addAll(loaded)
+        } catch (e: Exception) {
+            Log.e("ConversationRepository", "Failed to load conversations", e)
+        }
+    }
+
+    /**
+     * @param peerGender     Optional: peer's gender ("male"/"female"). If null, keeps existing value.
+     * @param peerRomanceMin Optional: peer's romance range min. If null, keeps existing value.
+     * @param peerRomanceMax Optional: peer's romance range max. If null, keeps existing value.
+     */
+    fun upsert(
+        myEmail: String,
+        peerEmail: String,
+        peerUsername: String,
+        preview: String,
+        timestamp: Long,
+        isIncoming: Boolean,
+        peerGender: String? = null,
+        peerRomanceMin: Float? = null,
+        peerRomanceMax: Float? = null
+    ) {
+        val existingIndex = conversations.indexOfFirst { it.userEmail == peerEmail }
+        if (existingIndex >= 0) {
+            val existing = conversations[existingIndex]
+            conversations[existingIndex] = existing.copy(
+                username = peerUsername,
+                lastMessage = preview,
+                lastMessageTimestamp = timestamp,
+                unreadCount = if (isIncoming) existing.unreadCount + 1 else existing.unreadCount,
+                peerGender = peerGender ?: existing.peerGender,
+                peerRomanceMin = peerRomanceMin ?: existing.peerRomanceMin,
+                peerRomanceMax = peerRomanceMax ?: existing.peerRomanceMax
+            )
+        } else {
+            conversations.add(
+                ChatConversationEntry(
+                    userEmail = peerEmail,
+                    username = peerUsername,
+                    lastMessage = preview,
+                    lastMessageTimestamp = timestamp,
+                    unreadCount = if (isIncoming) 1 else 0,
+                    peerGender = peerGender ?: "male",
+                    peerRomanceMin = peerRomanceMin ?: 1f,
+                    peerRomanceMax = peerRomanceMax ?: 5f
+                )
+            )
+        }
+        // Sort: unread (incoming) entries first by timestamp desc, then rest by timestamp desc
+        val sorted = conversations.sortedWith(
+            compareByDescending<ChatConversationEntry> { it.unreadCount > 0 }
+                .thenByDescending { it.lastMessageTimestamp }
+        )
+        conversations.clear()
+        conversations.addAll(sorted)
+        save()
+    }
+
+    fun clearUnread(peerEmail: String) {
+        val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
+        if (idx >= 0) {
+            conversations[idx] = conversations[idx].copy(unreadCount = 0)
+            save()
+        }
+    }
+
+    /**
+     * Remove a conversation from the list by peer email.
+     */
+    fun remove(peerEmail: String) {
+        val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
+        if (idx >= 0) {
+            conversations.removeAt(idx)
+            save()
+        }
+    }
+}
+
+private fun formatMessageTime(timestamp: Long): String {
+    val now = System.currentTimeMillis()
+    val diff = now - timestamp
+    return when {
+        diff < 60_000L -> "now"
+        diff < 3_600_000L -> "${diff / 60_000}m"
+        diff < 86_400_000L -> SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+        else -> SimpleDateFormat("dd/MM", Locale.getDefault()).format(Date(timestamp))
+    }
+}
+
 // Helper function to format numbers like YouTube (1k, 1.5k, 1M, etc.)
 private fun formatCount(count: Int): String {
     return when {
@@ -158,7 +322,8 @@ fun ChatScreen(
                         currentUser: User,
                         myPrefs: Preferences,
                         matchedUser: User,
-                        matchedPrefs: Preferences) -> Unit // <--- CORRECTED
+                        matchedPrefs: Preferences,
+                        isNewMatch: Boolean) -> Unit
 ) {
         // notify MainActivity that chat is now active
         LaunchedEffect(Unit) { onChatActive() }
@@ -167,13 +332,22 @@ fun ChatScreen(
         DisposableEffect(Unit) { onDispose { onChatInactive() } }
 
         var searchQuery by remember { mutableStateOf("") }
-        val otherUsers = emptyList<User>()
-        var roses by remember { mutableStateOf(0) }
-        var sparks by remember { mutableStateOf(0) }
+        val context = LocalContext.current
+
+        // Initialize ConversationRepository with context and load persisted data
+        LaunchedEffect(Unit) {
+                ConversationRepository.initialize(context)
+        }
+
+        // Use the singleton repository so the list persists across navigation
+        val conversationList = ConversationRepository.conversations
+
+        val scope = rememberCoroutineScope() // <--- ADD THIS LINE
+        val userPrefsForCounts = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
+        var roses by remember { mutableStateOf(userPrefsForCounts.getInt("roses", 0)) }
+        var sparks by remember { mutableStateOf(userPrefsForCounts.getInt("sparks_self", 0)) }
         var flowerKey by remember { mutableStateOf(0) }
         var thunderKey by remember { mutableStateOf(0) }
-        val context = LocalContext.current
-        val scope = rememberCoroutineScope() // <--- ADD THIS LINE
         val themePrefs = remember {
                 context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE)
         }
@@ -181,6 +355,7 @@ fun ChatScreen(
                 mutableStateOf(themePrefs.getBoolean("is_dark_theme", false))
         }
         var showThemeDialog by remember { mutableStateOf(false) }
+        var isLoading by remember { mutableStateOf(false) }
 
         if (showThemeDialog) {
                 AlertDialog(
@@ -240,6 +415,90 @@ fun ChatScreen(
                         exoPlayer.pause()
                         exoPlayer.stop()
                         exoPlayer.clearVideoSurface()
+                }
+        }
+
+        // Fetch preferences from server on load — update sparks/roses state + SharedPreferences
+        LaunchedEffect(Unit) {
+                val userEmail = userPrefsForCounts.getString("user_email", null)
+                if (userEmail != null) {
+                        try {
+                                val response = NetworkClient.api.getPreferences(userEmail)
+                                if (response.isSuccessful && response.body() != null) {
+                                        val serverPrefs = response.body()!!
+                                        serverPrefs.sparks?.let {
+                                                sparks = it
+                                                userPrefsForCounts.edit().putInt("sparks_self", it).apply()
+                                        }
+                                        serverPrefs.totalRosesReceived?.let {
+                                                roses = it
+                                                userPrefsForCounts.edit().putInt("roses", it).apply()
+                                        }
+                                        serverPrefs.availableRoses?.let {
+                                                userPrefsForCounts.edit().putInt("available_roses", it).apply()
+                                        }
+                                        android.util.Log.d("ChatScreen", "Prefs fetched: sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
+                                }
+                        } catch (e: Exception) {
+                                android.util.Log.e("ChatScreen", "Error fetching prefs: ${e.message}")
+                        }
+                }
+        }
+
+        // Listen for live WebSocket events: update sparks + conversation list
+        LaunchedEffect(Unit) {
+                val myEmail = userPrefsForCounts.getString("user_email", "") ?: ""
+                WebSocketManager.events.collect { event ->
+                        when (event) {
+                                is WebSocketEvent.SparkRight -> {
+                                        sparks = userPrefsForCounts.getInt("sparks_self", sparks)
+                                }
+                                is WebSocketEvent.NewMessage -> {
+                                        val msg = event.message
+                                        val peerEmail = if (msg.from == myEmail) msg.to else msg.from
+                                        val isIncoming = msg.from != myEmail
+                                        val preview = when {
+                                            msg.text.isNotBlank() -> msg.text
+                                            msg.mediaType == "IMAGE" -> "📷 Photo"
+                                            msg.mediaType == "VIDEO" -> "🎥 Video"
+                                            msg.audioUri != null -> "🎵 Voice message"
+                                            else -> "Message"
+                                        }
+                                        
+                                        // Fetch actual username from API in background
+                                        scope.launch {
+                                            try {
+                                                val peerPrefsResponse = NetworkClient.api.getPreferences(peerEmail)
+                                                val peerPrefs = peerPrefsResponse.takeIf { it.isSuccessful }?.body()
+                                                val actualUsername = peerPrefs?.username ?: peerEmail.substringBefore('@')
+                                                
+                                                ConversationRepository.upsert(
+                                                    myEmail = myEmail,
+                                                    peerEmail = peerEmail,
+                                                    peerUsername = actualUsername,
+                                                    preview = preview,
+                                                    timestamp = msg.timestamp,
+                                                    isIncoming = isIncoming,
+                                                    peerGender = peerPrefs?.gender,
+                                                    peerRomanceMin = peerPrefs?.romanceRange?.min?.toFloat(),
+                                                    peerRomanceMax = peerPrefs?.romanceRange?.max?.toFloat()
+                                                )
+                                            } catch (e: Exception) {
+                                                // Fallback to email prefix if API call fails
+                                                ConversationRepository.upsert(
+                                                    myEmail = myEmail,
+                                                    peerEmail = peerEmail,
+                                                    peerUsername = peerEmail.substringBefore('@'),
+                                                    preview = preview,
+                                                    timestamp = msg.timestamp,
+                                                    isIncoming = isIncoming
+                                                )
+                                                Log.e("ChatScreen", "Failed to fetch username for $peerEmail", e)
+                                            }
+                                        }
+                                }
+                                else -> Unit
+                        }
                 }
         }
         DisposableEffect(exoPlayer) {
@@ -504,165 +763,186 @@ fun ChatScreen(
                                 }
                         }
 
-                        // --- NEW: White Sheet Container for Search and List ---
-                        // --- UPDATED: Floating Glassy Card for Search and List ---
-                        // --- UPDATED: Floating Glassy Card for Search and List ---
+                        // --- Floating Glassy Card for Search and List ---
+                        val filteredConversations = if (searchQuery.isBlank()) {
+                            conversationList
+                        } else {
+                            conversationList.filter {
+                                it.username.contains(searchQuery, ignoreCase = true) ||
+                                it.userEmail.contains(searchQuery, ignoreCase = true)
+                            }
+                        }
+
+                        val navigationBarPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                         Surface(
                                 modifier =
-                                        Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)
-                                                .wrapContentHeight(),
+                                        Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = navigationBarPadding + 16.dp)
+                                                .fillMaxWidth()
+                                                .weight(1f),
                                 shape = RoundedCornerShape(32.dp),
-                                color =
-                                        if (isDarkTheme) Color(0x4DFFFFFF)
-                                        else Color(0x4DFFFFFF) // Transparent Glassy
+                                color = if (isDarkTheme) Color(0x0DFFFFFF) else Color(0x4DFFFFFF), // Almost invisible in dark, glassy in light
+                                border = if (isDarkTheme) BorderStroke(1.dp, Color(0x08FFFFFF)) else null
                         ) {
-
-                                // REMOVED padding(16.dp) from this Column so the Search Bar touches
-                                // edges
                                 Column {
-
-                                        // --- SEARCH BAR (Top Rounded "Tab" Style) ---
+                                        // --- SEARCH BAR ---
                                         Surface(
-                                                modifier =
-                                                        Modifier.fillMaxWidth().wrapContentHeight(),
-                                                // Top corners match the parent card (32.dp), bottom
-                                                // corners are
-                                                // slightly less rounded (8.dp)
-                                                shape =
-                                                        RoundedCornerShape(
-                                                                topStart = 32.dp,
-                                                                topEnd = 32.dp,
-                                                                bottomStart = 8.dp,
-                                                                bottomEnd = 8.dp
-                                                        ),
-                                                color =
-                                                        if (isDarkTheme) Color(0xFF3A4552)
-                                                        else Color.White, // Moon-glow night soft
-                                                // white vs Solid
-                                                // White Background
+                                                modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+                                                shape = RoundedCornerShape(
+                                                        topStart = 32.dp,
+                                                        topEnd = 32.dp,
+                                                        bottomStart = 8.dp,
+                                                        bottomEnd = 8.dp
+                                                ),
+                                                color = if (isDarkTheme) Color(0xFF121821) else Color.White,
                                                 shadowElevation = 0.dp
                                         ) {
-                                                // Inner Text Field
                                                 TextField(
                                                         value = searchQuery,
                                                         onValueChange = { searchQuery = it },
-                                                        modifier =
-                                                                Modifier.fillMaxWidth()
-                                                                        .padding(
-                                                                                8.dp
-                                                                        ) // Inner padding for the
-                                                                        // text field itself
-                                                                        .height(50.dp),
+                                                        modifier = Modifier.fillMaxWidth()
+                                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                                .wrapContentHeight(),
                                                         shape = RoundedCornerShape(50),
                                                         placeholder = {
                                                                 Text(
                                                                         text = "Search",
-                                                                        color =
-                                                                                if (isDarkTheme)
-                                                                                        Color(
-                                                                                                0xFF8FA4C0
-                                                                                        )
-                                                                                else
-                                                                                        Color(
-                                                                                                0xFF5A6B88
-                                                                                        ), // Muted
-                                                                        // night-blue vs muted gray
+                                                                        color = if (isDarkTheme) Color(0xFF8FA4C0) else Color(0xFF5A6B88),
                                                                         fontSize = 16.sp
                                                                 )
                                                         },
                                                         leadingIcon = {
                                                                 Icon(
-                                                                        imageVector =
-                                                                                Icons.Default
-                                                                                        .Search,
-                                                                        contentDescription =
-                                                                                "Search Icon",
-                                                                        tint =
-                                                                                if (isDarkTheme)
-                                                                                        Color(
-                                                                                                0xFF7A8FA9
-                                                                                        )
-                                                                                else Color.Gray,
-                                                                        modifier =
-                                                                                Modifier.size(24.dp)
+                                                                        imageVector = Icons.Default.Search,
+                                                                        contentDescription = "Search Icon",
+                                                                        tint = if (isDarkTheme) Color(0xFF7A8FA9) else Color.Gray,
+                                                                        modifier = Modifier.size(24.dp)
                                                                 )
                                                         },
-                                                        colors =
-                                                                if (isDarkTheme) {
-                                                                        TextFieldDefaults
-                                                                                .colors( // night
-                                                                                        // theme
-                                                                                        focusedContainerColor =
-                                                                                                Color(
-                                                                                                        0xFF121821
-                                                                                                ), // near-black navy
-                                                                                        unfocusedContainerColor =
-                                                                                                Color(
-                                                                                                        0xFF121821
-                                                                                                ),
-                                                                                        disabledContainerColor =
-                                                                                                Color(
-                                                                                                        0xFF10151C
-                                                                                                ), // even darker
-                                                                                        cursorColor =
-                                                                                                Color(
-                                                                                                        0xFFEFF3FA
-                                                                                                ), // moon-white cursor
-                                                                                        focusedTextColor =
-                                                                                                Color.White, // text visible on black
-                                                                                        unfocusedTextColor =
-                                                                                                Color.White,
-                                                                                        focusedIndicatorColor =
-                                                                                                Color.Transparent,
-                                                                                        unfocusedIndicatorColor =
-                                                                                                Color.Transparent,
-                                                                                        disabledIndicatorColor =
-                                                                                                Color.Transparent
-                                                                                )
-                                                                } else {
-                                                                        TextFieldDefaults.colors(
-                                                                                focusedContainerColor =
-                                                                                        Color(
-                                                                                                0xFFEFF3FA
-                                                                                        ),
-                                                                                unfocusedContainerColor =
-                                                                                        Color(
-                                                                                                0xFFEFF3FA
-                                                                                        ),
-                                                                                disabledContainerColor =
-                                                                                        Color(
-                                                                                                0xFFEFF3FA
-                                                                                        ),
-                                                                                cursorColor =
-                                                                                        Color(
-                                                                                                0xFF5A6B88
-                                                                                        ),
-                                                                                focusedIndicatorColor =
-                                                                                        Color.Transparent,
-                                                                                unfocusedIndicatorColor =
-                                                                                        Color.Transparent,
-                                                                                disabledIndicatorColor =
-                                                                                        Color.Transparent,
-                                                                                focusedTextColor =
-                                                                                        Color(
-                                                                                                0xFF2D3648
-                                                                                        ),
-                                                                                unfocusedTextColor =
-                                                                                        Color(
-                                                                                                0xFF2D3648
-                                                                                        )
-                                                                        )
-                                                                },
+                                                        colors = if (isDarkTheme) {
+                                                                TextFieldDefaults.colors(
+                                                                        focusedContainerColor = Color(0xFF3A4552),
+                                                                        unfocusedContainerColor = Color(0xFF3A4552),
+                                                                        disabledContainerColor = Color(0xFF3A4552),
+                                                                        cursorColor = Color(0xFFEFF3FA),
+                                                                        focusedTextColor = Color.White,
+                                                                        unfocusedTextColor = Color.White,
+                                                                        focusedIndicatorColor = Color.Transparent,
+                                                                        unfocusedIndicatorColor = Color.Transparent,
+                                                                        disabledIndicatorColor = Color.Transparent
+                                                                )
+                                                        } else {
+                                                                TextFieldDefaults.colors(
+                                                                        focusedContainerColor = Color(0xFFEFF3FA),
+                                                                        unfocusedContainerColor = Color(0xFFEFF3FA),
+                                                                        disabledContainerColor = Color(0xFFEFF3FA),
+                                                                        cursorColor = Color(0xFF5A6B88),
+                                                                        focusedIndicatorColor = Color.Transparent,
+                                                                        unfocusedIndicatorColor = Color.Transparent,
+                                                                        disabledIndicatorColor = Color.Transparent,
+                                                                        focusedTextColor = Color(0xFF2D3648),
+                                                                        unfocusedTextColor = Color(0xFF2D3648)
+                                                                )
+                                                        },
                                                         singleLine = true
                                                 )
                                         }
 
-                                        // --- USER LIST ---
-                                        // Added padding here because we removed it from the parent
-                                        // Column
-                                        Column(modifier = Modifier.padding(16.dp)) {
-                                                otherUsers.forEach { otherUser ->
-                                                        UserListItem(user = otherUser)
+                                        // --- CONVERSATION LIST ---
+                                        LazyColumn(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                                items(filteredConversations, key = { it.userEmail }) { entry ->
+                                                        ConversationListItem(
+                                                                entry = entry,
+                                                                isDarkTheme = isDarkTheme,
+                                                                onClick = {
+                                                                        val prefs = context.getSharedPreferences(
+                                                                                "user_prefs",
+                                                                                Context.MODE_PRIVATE
+                                                                        )
+                                                                        val myEmail = prefs.getString("user_email", null)
+                                                                        if (myEmail != null) {
+
+                                                                        // Build current user from SharedPreferences
+                                                                        val myUsername = prefs.getString("username", null)
+                                                                                ?: myEmail.substringBefore('@')
+                                                                        val myGender = prefs.getString("gender", "male") ?: "male"
+                                                                        val myRomanceMin = prefs.getFloat("romance_min", 1f)
+                                                                        val myRomanceMax = prefs.getFloat("romance_max", 5f)
+
+                                                                        val currentUserForNav = User(
+                                                                                id = myEmail,
+                                                                                username = myUsername,
+                                                                                profilePictureUrl = null
+                                                                        )
+                                                                        val myPrefsForNav = Preferences(
+                                                                                romanceMin = myRomanceMin,
+                                                                                romanceMax = myRomanceMax,
+                                                                                gender = myGender
+                                                                        )
+
+                                                                        // Use cached peer data from entry to open chat immediately
+                                                                        val matchedPrefs = Preferences(
+                                                                                romanceMin = entry.peerRomanceMin,
+                                                                                romanceMax = entry.peerRomanceMax,
+                                                                                gender = entry.peerGender,
+                                                                                isOnline = false,
+                                                                                lastSeen = 0L
+                                                                        )
+                                                                        val matchedUser = User(
+                                                                                username = entry.username,
+                                                                                profilePictureUrl = null,
+                                                                                id = entry.userEmail
+                                                                        )
+
+                                                                        // Open chat immediately with cached data
+                                                                        onNavigateToDirectChat(
+                                                                                currentUserForNav,
+                                                                                myPrefsForNav,
+                                                                                matchedUser,
+                                                                                matchedPrefs,
+                                                                                false // From conversation list
+                                                                        )
+
+                                                                        // Asynchronously fetch fresh peer preferences in background
+                                                                        scope.launch {
+                                                                                try {
+                                                                                        val peerPrefsResponse = NetworkClient.api.getPreferences(entry.userEmail)
+                                                                                        val peerPrefsBody = peerPrefsResponse.takeIf { it.isSuccessful }?.body()
+
+                                                                                        if (peerPrefsBody != null) {
+                                                                                                // Update conversation repository with fresh data
+                                                                                                ConversationRepository.upsert(
+                                                                                                        myEmail = myEmail,
+                                                                                                        peerEmail = entry.userEmail,
+                                                                                                        peerUsername = peerPrefsBody.username ?: entry.username,
+                                                                                                        preview = entry.lastMessage,
+                                                                                                        timestamp = entry.lastMessageTimestamp,
+                                                                                                        isIncoming = false,
+                                                                                                        peerGender = peerPrefsBody.gender,
+                                                                                                        peerRomanceMin = peerPrefsBody.romanceRange?.min?.toFloat(),
+                                                                                                        peerRomanceMax = peerPrefsBody.romanceRange?.max?.toFloat()
+                                                                                                )
+                                                                                                
+                                                                                                // Update sparks and roses in SharedPreferences
+                                                                                                peerPrefsBody.sparks?.let { sparksValue ->
+                                                                                                        prefs.edit().putInt("sparks_self", sparksValue).apply()
+                                                                                                         sparks = sparksValue
+                                                                                                }
+                                                                                                peerPrefsBody.totalRosesReceived?.let { rosesValue ->
+                                                                                                        prefs.edit().putInt("roses", rosesValue).apply()
+                                                                                                        roses = rosesValue
+                                                                                                }
+                                                                                                
+                                                                                                Log.d("ChatScreen", "Background refresh: Updated prefs for ${entry.userEmail}, sparks=$sparks, roses=$roses")
+                                                                                        }
+                                                                                } catch (e: Exception) {
+                                                                                        Log.e("ChatScreen", "Background refresh failed for ${entry.userEmail}", e)
+                                                                                }
+                                                                        }
+                                                                        } else {
+                                                                                Log.e("ChatScreen", "User email missing for conv open")
+                                                                        }
+                                                                }
+                                                        )
                                                 }
                                         }
                                 }
@@ -670,7 +950,6 @@ fun ChatScreen(
                 }
         }
         // ... (Your existing AndroidView and Column code) ...
-        var isLoading by remember { mutableStateOf(false) }
         BackHandler(enabled = isLoading) {
                 isLoading = false // stop the heart overlay
         }
@@ -734,7 +1013,7 @@ fun ChatScreen(
                                 ),
                         contentDescription = "Search Bird",
                         modifier =
-                                Modifier.size(150.dp)
+                                Modifier.size(if (isDarkTheme) 150.dp else 120.dp)
                                         // 3. Apply the bounce animation
                                         .scale(scale)
                                         .clickable(
@@ -764,6 +1043,20 @@ fun ChatScreen(
                                                                                 "User email missing"
                                                                         )
                                                                         return@launch
+                                                                }
+
+                                                                // Check if conversation list is empty, if so delete all matches first
+                                                                if (conversationList.isEmpty()) {
+                                                                        try {
+                                                                                val deleteAllResponse = NetworkClient.api.deleteAllMatches(myEmail)
+                                                                                if (deleteAllResponse.isSuccessful) {
+                                                                                        Log.d("ChatScreen", "All matches deleted before calling match API")
+                                                                                } else {
+                                                                                        Log.e("ChatScreen", "Failed to delete all matches: ${deleteAllResponse.code()}")
+                                                                                }
+                                                                        } catch (e: Exception) {
+                                                                                Log.e("ChatScreen", "Error deleting all matches: ${e.message}")
+                                                                        }
                                                                 }
 
                                                                 // 1️⃣ Call match API
@@ -821,7 +1114,13 @@ fun ChatScreen(
                                                                                                 ?: false,
                                                                                 lastSeen =
                                                                                         matchObj.lastOnline
-                                                                                                ?: 0L
+                                                                                                ?: 0L,
+                                                                                giftedMeARose =
+                                                                                        matchObj.giftedMeARose
+                                                                                                ?: false,
+                                                                                hasTakenBackRose =
+                                                                                        matchObj.hasTakenBackRose
+                                                                                                ?: false
                                                                         )
 
                                                                 val matchedUser =
@@ -883,7 +1182,8 @@ fun ChatScreen(
                                                                         currentUserForNav,
                                                                         myPrefsForNav,
                                                                         matchedUser,
-                                                                        matchedPrefs
+                                                                        matchedPrefs,
+                                                                        true // From match API
                                                                 )
                                                         } catch (e: Exception) {
                                                                 Log.e(
@@ -902,51 +1202,180 @@ fun ChatScreen(
 }
 
 @Composable
-fun UserListItem(user: User) {
-        // WRAP content in a Surface to create the "Thick Card" look with a boundary
-        Surface(
-                modifier =
-                        Modifier.fillMaxWidth()
-                                .padding(vertical = 6.dp), // Add spacing between chat messages
-                shape = RoundedCornerShape(24.dp), // Rounded corners for the message card
-                color = Color(0xF2FFFFFF), // High opacity (Thick) white background
-                border = BorderStroke(3.dp, Color.White), // The white boundary
-                shadowElevation = 2.dp // Subtle shadow for depth
+fun ConversationListItem(
+    entry: ChatConversationEntry,
+    isDarkTheme: Boolean = false,
+    onClick: (() -> Unit)? = null
+) {
+    val textColor = if (isDarkTheme) Color.White else Color.Black
+    val subTextColor = if (isDarkTheme) Color(0xFFB0BEC5) else Color.Gray
+    val cardColor = if (isDarkTheme) Color(0xFF121821) else Color(0xF2FFFFFF)
+    val avatarBgColor = if (isDarkTheme) Color(0xFF3A4552) else Color(0xFF87CEEB)
+    val borderColor = if (isDarkTheme) Color(0xFF4A5562) else Color.White.copy(alpha = 0.6f)
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .clickable(enabled = onClick != null) { onClick?.invoke() },
+        shape = RoundedCornerShape(20.dp),
+        color = cardColor,
+        border = if (isDarkTheme) null else BorderStroke(1.dp, borderColor),
+        shadowElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-                Row(
-                        modifier =
-                                Modifier.fillMaxWidth()
-                                        .padding(
-                                                horizontal = 16.dp,
-                                                vertical = 12.dp
-                                        ), // Inner padding
-                        verticalAlignment = Alignment.CenterVertically
-                ) {
-                        Image(
-                                painter =
-                                        rememberAsyncImagePainter(
-                                                model = user.profilePictureUrl
-                                                                ?: R.drawable.ic_launcher_background
-                                        ),
-                                contentDescription = "User Profile Picture",
-                                modifier = Modifier.size(48.dp).clip(CircleShape),
-                                contentScale = ContentScale.Crop
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column {
-                                Text(
-                                        text = user.username,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.Black
-                                )
-                                Text(text = "Great, thanks!", color = Color.Gray, fontSize = 14.sp)
-                        }
-                        Spacer(modifier = Modifier.weight(1f))
-                        Column(horizontalAlignment = Alignment.End) {
-                                Text(text = "23:23", color = Color.Gray, fontSize = 12.sp)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Box(modifier = Modifier.size(24.dp))
-                        }
+            // Profile picture — same logic as KeyboardProofScreen avatar
+            val context = LocalContext.current
+            val staticImageLoader = remember { ImageLoader(context) }
+            val emotion = remember(entry.peerRomanceMin, entry.peerRomanceMax) {
+                romanceRangeToEmotion(entry.peerRomanceMin, entry.peerRomanceMax)
+            }
+            val avatarResName = if (entry.peerGender == "female") "female_exp$emotion" else "male_exp$emotion"
+            val avatarResId = remember(avatarResName) {
+                context.resources.getIdentifier(avatarResName, "raw", context.packageName)
+            }
+            val avatarUri = remember(avatarResId) {
+                if (avatarResId != 0)
+                    Uri.parse("android.resource://${context.packageName}/$avatarResId")
+                else
+                    Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+            }
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(avatarBgColor),
+                contentAlignment = Alignment.Center
+            ) {
+                if (entry.profilePictureUrl != null) {
+                    Image(
+                        painter = rememberAsyncImagePainter(
+                            model = entry.profilePictureUrl,
+                            imageLoader = staticImageLoader
+                        ),
+                        contentDescription = "Profile",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Image(
+                        painter = rememberAsyncImagePainter(
+                            avatarUri,
+                            imageLoader = staticImageLoader
+                        ),
+                        contentDescription = "Profile",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
                 }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // Username + last message
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = entry.username,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor,
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = entry.lastMessage,
+                    color = subTextColor,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Timestamp + unread badge
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = formatMessageTime(entry.lastMessageTimestamp),
+                    color = if (entry.unreadCount > 0) Color(0xFF7986CB) else subTextColor,
+                    fontSize = 11.sp,
+                    fontWeight = if (entry.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                if (entry.unreadCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF7986CB)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (entry.unreadCount > 99) "99+" else entry.unreadCount.toString(),
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    Box(modifier = Modifier.size(22.dp))
+                }
+            }
         }
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF87CEEB)
+@Composable
+private fun ConversationListItemPreview() {
+    Column(modifier = Modifier.padding(8.dp)) {
+        ConversationListItem(
+            entry = ChatConversationEntry(
+                userEmail = "alice@example.com",
+                username = "Alice",
+                lastMessage = "Hey! How are you? 😊",
+                lastMessageTimestamp = System.currentTimeMillis() - 2 * 60_000,
+                unreadCount = 3
+            )
+        )
+        ConversationListItem(
+            entry = ChatConversationEntry(
+                userEmail = "bob@example.com",
+                username = "Bob",
+                lastMessage = "See you tomorrow!",
+                lastMessageTimestamp = System.currentTimeMillis() - 30 * 60_000,
+                unreadCount = 0
+            )
+        )
+        ConversationListItem(
+            entry = ChatConversationEntry(
+                userEmail = "carol@example.com",
+                username = "Carol",
+                lastMessage = "📷 Photo",
+                lastMessageTimestamp = System.currentTimeMillis() - 2 * 3_600_000,
+                unreadCount = 1
+            ),
+            isDarkTheme = true
+        )
+    }
+}
+
+// Keep legacy UserListItem for backward compatibility
+@Composable
+fun UserListItem(user: User) {
+    ConversationListItem(
+        entry = ChatConversationEntry(
+            userEmail = user.id ?: user.username,
+            username = user.username,
+            profilePictureUrl = user.profilePictureUrl,
+            lastMessage = "",
+            lastMessageTimestamp = System.currentTimeMillis()
+        )
+    )
 }

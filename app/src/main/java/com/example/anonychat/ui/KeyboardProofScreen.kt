@@ -49,6 +49,8 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -72,6 +74,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.KeyboardVoice
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
@@ -139,6 +142,7 @@ import com.example.anonychat.MainActivity
 import com.example.anonychat.R
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
+import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketEvent
 import com.example.anonychat.network.WebSocketManager
 import java.io.File
@@ -293,6 +297,7 @@ private fun stopRecordingAndSend(
                         )
         messages.upsert(newMsg)
         WebSocketManager.sendMedia(peerEmail, uri, "audio/m4a", localId, amplitudes)
+        // Note: This is in stopRecordingAndSend function - hasMessageBeenSent will be set in the calling context
     }
 }
 
@@ -354,7 +359,8 @@ fun KeyboardProofScreen(
         matchedUserGmail: String, // <-- NEW: recipient's gmail/email for sending & filtering
         onBack: () -> Unit,
         initialMessages: List<ChatMessage> = emptyList(),
-        forceDarkTheme: Boolean? = null
+        forceDarkTheme: Boolean? = null,
+        isNewMatch: Boolean = false // <-- NEW: true if opened from match API, false if from conversation list
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -395,6 +401,15 @@ fun KeyboardProofScreen(
     var showRoseOverlay by remember { mutableStateOf(false) }
     var isRoseDead by remember { mutableStateOf(false) }
     var overlayModeIsDead by remember { mutableStateOf(false) }
+    var toastMessage by remember { mutableStateOf<String?>(null) }
+    var hasMessageBeenSent by remember { mutableStateOf(false) }
+    
+    // Menu and Report Dialog states
+    var showMenu by remember { mutableStateOf(false) }
+    var showReportDialog by remember { mutableStateOf(false) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var selectedReportReason by remember { mutableStateOf<String?>(null) }
+    var otherReportText by remember { mutableStateOf("") }
 
     val messages = remember { mutableStateListOf<ChatMessage>().apply { addAll(initialMessages) } }
 
@@ -453,22 +468,59 @@ fun KeyboardProofScreen(
             showFloatingDateBanner = false
         }
     }
-    var presenceStatus by remember {
-        mutableStateOf(if (matchedUserPrefs.isOnline) "online" else "offline")
-    }
-    var lastSeenTime by remember { mutableStateOf(matchedUserPrefs.lastSeen) }
-    var roses by remember { mutableStateOf(0) }
-    // var roses by remember { mutableStateOf(1500) } // Test: 1.5k
-    // var roses by remember { mutableStateOf(25000) } // Test: 25k
-    // var roses by remember { mutableStateOf(1200000) } // Test: 1.2M
+    // Moved after currentMatchedPrefs to use reactive state
+    val userPrefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
     
-    var sparks by remember { mutableStateOf(0) }
+    // Load blocked status from SharedPreferences
+    var isUserBlocked by remember { mutableStateOf(userPrefs.getBoolean("blocked_$matchedUserGmail", false)) }
+    
+    // receivedRoses: shown in top header next to matched user's name (totalRosesReceived)
+    var roses by remember { mutableStateOf(userPrefs.getInt("roses", 0)) }
+    // availableRoses: shown near text input box (availableRoses from server), decremented on gifting
+    var availableRoses by remember { mutableStateOf(userPrefs.getInt("available_roses", 0)) }
+
+    // Fetch roses counts from server on load
+    LaunchedEffect(Unit) {
+        val userEmail = userPrefs.getString("user_email", null)
+        if (userEmail != null) {
+            try {
+                val response = NetworkClient.api.getPreferences(userEmail)
+                if (response.isSuccessful && response.body() != null) {
+                    val serverPrefs = response.body()!!
+                    serverPrefs.totalRosesReceived?.let {
+                        roses = it
+                        userPrefs.edit().putInt("roses", it).apply()
+                    }
+                    serverPrefs.availableRoses?.let {
+                        availableRoses = it
+                        userPrefs.edit().putInt("available_roses", it).apply()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("KeyboardProofScreen", "Error fetching roses: ${e.message}")
+            }
+        }
+    }
+
+    var sparks by remember {
+        // Use peer-specific key so each peer's spark count is tracked separately
+        mutableStateOf(userPrefs.getInt("sparks_${matchedUserGmail}", 0))
+    }
     // var sparks by remember { mutableStateOf(3700) } // Test: 3.7k
     // var sparks by remember { mutableStateOf(150000) } // Test: 150k
     // var sparks by remember { mutableStateOf(5000000) } // Test: 5M
     
     // State to show heart/heartbreak icon on profile picture
-    var showProfileIcon by remember { mutableStateOf<String?>(null) } // "heart" or "heartbreak"
+    // Initialize from match response: giftedMeARose=true → heart, hasTakenBackRose=true → heartbreak
+    var showProfileIcon by remember {
+        mutableStateOf<String?>(
+            when {
+                matchedUserPrefs.giftedMeARose && !matchedUserPrefs.hasTakenBackRose -> "heart"
+                matchedUserPrefs.hasTakenBackRose -> "heartbreak"
+                else -> null
+            }
+        )
+    }
     Log.e(
             "KeyboardProofScreen",
             "DEBUG: Initialized with isOnline=${matchedUserPrefs.isOnline}, lastSeen=${matchedUserPrefs.lastSeen}"
@@ -503,23 +555,107 @@ fun KeyboardProofScreen(
             showAdvancedMediaPicker = false
             selectedGalleryImages.clear()
         }
+    } else {
+        // Default back button behavior - call skip or accept endpoint only for new matches
+        BackHandler {
+            if (isNewMatch) {
+                scope.launch {
+                    try {
+                        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                        val myEmail = prefs.getString("user_email", "") ?: ""
+                        
+                        if (hasMessageBeenSent) {
+                            // Accept match if message was sent
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling ACCEPT match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
+                            val response = NetworkClient.api.acceptMatch(myEmail, matchedUserGmail)
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
+                            if (response.isSuccessful) {
+                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match SUCCESS for $matchedUserGmail")
+                            } else {
+                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match FAILED: ${response.errorBody()?.string()}")
+                            }
+                        } else {
+                            // Skip match if no message was sent
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling SKIP match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
+                            val response = NetworkClient.api.skipMatch(myEmail, matchedUserGmail)
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
+                            if (response.isSuccessful) {
+                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match SUCCESS for $matchedUserGmail")
+                            } else {
+                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match FAILED: ${response.errorBody()?.string()}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("KeyboardProofScreen", "[SYSTEM BACK] EXCEPTION calling match endpoint: ${e.message}", e)
+                    }
+                }
+            } else {
+                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skipping match API call - opened from conversation list")
+            }
+            onBack()
+        }
     }
 
     val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
     val localGmail = prefs.getString("user_email", "") ?: ""
 
+    // Track mutual chat session for "feel that spark" overlay
+    var peerChatOpenReceived by remember {
+        mutableStateOf(WebSocketManager.isUserInChatWithUs(matchedUserGmail))
+    }
+    var mutualChatStartTime by remember { mutableStateOf<Long?>(null) }
+    var sparkOverlayShown by remember { mutableStateOf(false) }
+    var alreadySparked by remember { mutableStateOf(false) }
+
+    // Track if chat_open has been sent to prevent duplicates
+    var chatOpenSent by remember { mutableStateOf(false) }
+    
+    // Track spark swipe choices
+    var mySparkChoice by remember { mutableStateOf<Boolean?>(null) } // null = not swiped, true = right, false = left
+    var peerSparkChoice by remember { mutableStateOf<Boolean?>(null) } // null = not received, true = right, false = left
+    
+    // Check if users have already sparked on screen open
     LaunchedEffect(Unit) {
-        Log.d("ThunderDebug", "LaunchedEffectTimer started, waiting 5 seconds...")
-        delay(5000)
-        Log.d("ThunderDebug", "Timer finished, setting showThunderGif = true")
-        showThunderGif = true
+        Log.e("SparkOverlay", "=".repeat(60))
+        Log.e("SparkOverlay", "Screen opened - peer already in chat: $peerChatOpenReceived")
+        // Extract user IDs from email addresses (remove @email.com suffix)
+        val localUserId = localGmail.substringBefore("@")
+        val matchedUserId = matchedUserGmail.substringBefore("@")
+        
+        Log.e("SparkOverlay", "Checking spark status for: $localUserId <-> $matchedUserId")
+        Log.e("SparkOverlay", "  (Full emails: $localGmail <-> $matchedUserGmail)")
+        
+        // Check if this user pair has already sparked
+        try {
+            val request = com.example.anonychat.network.SparkRequest(
+                userA = localUserId,
+                userB = matchedUserId
+            )
+            Log.e("SparkOverlay", "Calling isSparked API with request: $request")
+            
+            val response = NetworkClient.api.isSparked(request)
+            
+            Log.e("SparkOverlay", "isSparked API Response:")
+            Log.e("SparkOverlay", "  - Status Code: ${response.code()}")
+            Log.e("SparkOverlay", "  - Is Successful: ${response.isSuccessful}")
+            Log.e("SparkOverlay", "  - Response Body: ${response.body()}")
+            Log.e("SparkOverlay", "  - Sparked: ${response.body()?.sparked}")
+            
+            if (response.isSuccessful && response.body()?.sparked == true) {
+                alreadySparked = true
+                Log.e("SparkOverlay", "✅ Users have ALREADY sparked - overlay will NOT be shown")
+            } else {
+                Log.e("SparkOverlay", "✅ Users have NOT sparked yet - timer will start when conditions met")
+            }
+        } catch (e: Exception) {
+            Log.e("SparkOverlay", "❌ EXCEPTION checking spark status: ${e.message}", e)
+            Log.e("SparkOverlay", "Stack trace: ${e.stackTraceToString()}")
+        }
+        Log.e("SparkOverlay", "=".repeat(60))
     }
 
     LaunchedEffect(matchedUserGmail) {
         if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
-            Log.e("ChatLifecycle", "CHAT OPENED → me: $localGmail  ↔  partner: $matchedUserGmail")
-            WebSocketManager.sendChatOpen(matchedUserGmail)
-
             // Load History - clear and reload to preserve chronological order
             WebSocketManager.getChatHistory(localGmail, matchedUserGmail).collect { history ->
                 messages.clear()
@@ -534,17 +670,25 @@ fun KeyboardProofScreen(
                 Lifecycle.Event.ON_START -> {
                     isAppInForeground = true
                     // Screen became visible (app foreground + screen on top)
-                    if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
-                        Log.e("ChatLifecycle", "CHAT VISIBLE → $matchedUserGmail")
+                    if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank() && !chatOpenSent) {
+                        Log.e("ChatLifecycle", "CHAT OPENED → me: $localGmail  ↔  partner: $matchedUserGmail")
                         WebSocketManager.sendChatOpen(matchedUserGmail)
+                        chatOpenSent = true
                     }
+                    // Clear unread count for this conversation when user opens the chat
+                    ConversationRepository.clearUnread(matchedUserGmail)
                 }
                 Lifecycle.Event.ON_STOP -> {
                     isAppInForeground = false
                     // Screen no longer visible (either backgrounded or navigated away)
-                    if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
+                    if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank() && chatOpenSent) {
                         Log.e("ChatLifecycle", "!!! CHAT HIDDEN → $matchedUserGmail !!!")
                         WebSocketManager.sendChatClose(matchedUserGmail)
+                        chatOpenSent = false
+                        // Reset mutual chat session
+                        peerChatOpenReceived = false
+                        mutualChatStartTime = null
+                        Log.e("SparkOverlay", "Mutual chat session ended (user left)")
                     }
                 }
                 else -> {}
@@ -553,14 +697,83 @@ fun KeyboardProofScreen(
 
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank()) {
+            // Only send chat_close if we actually sent chat_open
+            if (matchedUserGmail.isNotBlank() && localGmail.isNotBlank() && chatOpenSent) {
                 Log.e(
                         "ChatLifecycle",
                         "!!! CHAT CLOSED → me: $localGmail  ↔  partner: $matchedUserGmail !!!"
                 )
                 WebSocketManager.sendChatClose(matchedUserGmail)
+                chatOpenSent = false
             }
             lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Monitor mutual chat session and trigger "feel that spark" overlay after timer.
+    // SYNC STRATEGY: Only the lexicographically smaller email acts as "initiator".
+    // The initiator sends a spark_trigger WebSocket event when the timer fires.
+    // The receiver shows the overlay only upon receiving spark_trigger.
+    // This ensures both users see the overlay at the same wall-clock time regardless of
+    // when each user's chat_open event was received.
+    val isInitiator = localGmail < matchedUserGmail
+    LaunchedEffect(chatOpenSent, peerChatOpenReceived, alreadySparked) {
+        // Only start timer when BOTH users are in the chat AND haven't sparked before
+        if (chatOpenSent && peerChatOpenReceived && !sparkOverlayShown && !alreadySparked) {
+            // Set start time if not already set
+            if (mutualChatStartTime == null) {
+                mutualChatStartTime = System.currentTimeMillis()
+                Log.e("SparkOverlay", "Mutual session started at $mutualChatStartTime (isInitiator=$isInitiator)")
+            }
+
+            if (isInitiator) {
+                // INITIATOR: run the timer and send spark_trigger to peer when it fires
+                val startTime = mutualChatStartTime
+                Log.e("SparkOverlay", "[INITIATOR] Timer started, waiting 3 seconds...")
+                delay(3000)
+
+                if (chatOpenSent && peerChatOpenReceived && mutualChatStartTime == startTime && !alreadySparked) {
+                    Log.e("SparkOverlay", "=".repeat(60))
+                    Log.e("SparkOverlay", "[INITIATOR] ⏰ Timer elapsed - sending spark_trigger to $matchedUserGmail")
+
+                    // Mark users as sparked in the backend
+                    val localUserId = localGmail.substringBefore("@")
+                    val matchedUserId = matchedUserGmail.substringBefore("@")
+                    try {
+                        val request = com.example.anonychat.network.SparkRequest(
+                            userA = localUserId,
+                            userB = matchedUserId
+                        )
+                        Log.e("SparkOverlay", "[INITIATOR] Calling hasSparked API: $request")
+                        val response = NetworkClient.api.hasSparked(request)
+                        Log.e("SparkOverlay", "[INITIATOR] hasSparked response: ${response.code()} sparked=${response.body()?.sparked}")
+                        if (response.isSuccessful) {
+                            alreadySparked = true
+                            Log.e("SparkOverlay", "[INITIATOR] ✅ Marked as sparked in backend")
+                        } else {
+                            Log.e("SparkOverlay", "[INITIATOR] ❌ hasSparked failed: ${response.errorBody()?.string()}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SparkOverlay", "[INITIATOR] ❌ hasSparked exception: ${e.message}", e)
+                    }
+
+                    // Send trigger to peer so they show overlay at the same time
+                    WebSocketManager.sendSparkTrigger(matchedUserGmail, localGmail)
+
+                    Log.e("SparkOverlay", "[INITIATOR] 🎆 SHOWING SPARK OVERLAY NOW!")
+                    showThunderGif = true
+                    sparkOverlayShown = true
+                    Log.e("SparkOverlay", "=".repeat(60))
+                } else {
+                    Log.e("SparkOverlay", "[INITIATOR] ❌ Conditions not met after timer - overlay skipped")
+                    Log.e("SparkOverlay", "  chatOpenSent=$chatOpenSent peerChatOpenReceived=$peerChatOpenReceived alreadySparked=$alreadySparked")
+                }
+            } else {
+                // RECEIVER: do NOT run a timer - wait for spark_trigger WebSocket event from initiator
+                Log.e("SparkOverlay", "[RECEIVER] Waiting for spark_trigger from $matchedUserGmail (no local timer)")
+            }
+        } else if (alreadySparked) {
+            Log.e("SparkOverlay", "⏭️  Users have already sparked - skipping timer completely")
         }
     }
 
@@ -587,15 +800,47 @@ fun KeyboardProofScreen(
     val avatarRingColor = if (isDarkTheme) Color(0xFF2E3A46) else Color(0xFF87CEEB)
 
     /* ---------------- AVATAR ---------------- */
-    val emotion = remember {
-        romanceRangeToEmotion(matchedUserPrefs.romanceMin, matchedUserPrefs.romanceMax)
+    // Use mutable state for preferences so they can be updated when fresh data arrives
+    var currentMatchedPrefs by remember { mutableStateOf(matchedUserPrefs) }
+    var presenceStatus by remember {
+        mutableStateOf(if (matchedUserPrefs.isOnline) "online" else "offline")
+    }
+    var lastSeenTime by remember { mutableStateOf(matchedUserPrefs.lastSeen) }
+    
+    // Fetch fresh preferences in background when screen opens
+    LaunchedEffect(matchedUserGmail) {
+        try {
+            val response = NetworkClient.api.getPreferences(matchedUserGmail)
+            if (response.isSuccessful && response.body() != null) {
+                val freshPrefs = response.body()!!
+                currentMatchedPrefs = Preferences(
+                    romanceMin = freshPrefs.romanceRange?.min?.toFloat() ?: currentMatchedPrefs.romanceMin,
+                    romanceMax = freshPrefs.romanceRange?.max?.toFloat() ?: currentMatchedPrefs.romanceMax,
+                    gender = freshPrefs.gender ?: currentMatchedPrefs.gender,
+                    isOnline = freshPrefs.isOnline ?: currentMatchedPrefs.isOnline,
+                    lastSeen = freshPrefs.lastOnline ?: currentMatchedPrefs.lastSeen,
+                    giftedMeARose = currentMatchedPrefs.giftedMeARose,
+                    hasTakenBackRose = currentMatchedPrefs.hasTakenBackRose
+                )
+                // Update presence status and last seen time
+                presenceStatus = if (freshPrefs.isOnline == true) "online" else "offline"
+                lastSeenTime = freshPrefs.lastOnline ?: lastSeenTime
+                Log.d("KeyboardProofScreen", "Fresh prefs loaded for $matchedUserGmail: isOnline=${freshPrefs.isOnline}, lastOnline=${freshPrefs.lastOnline}")
+            }
+        } catch (e: Exception) {
+            Log.e("KeyboardProofScreen", "Failed to fetch fresh prefs for $matchedUserGmail", e)
+        }
+    }
+    
+    val emotion = remember(currentMatchedPrefs.romanceMin, currentMatchedPrefs.romanceMax) {
+        romanceRangeToEmotion(currentMatchedPrefs.romanceMin, currentMatchedPrefs.romanceMax)
     }
     val avatarResName =
-            if (matchedUserPrefs.gender == "female") "female_exp$emotion" else "male_exp$emotion"
-    val avatarResId = remember {
+            if (currentMatchedPrefs.gender == "female") "female_exp$emotion" else "male_exp$emotion"
+    val avatarResId = remember(avatarResName) {
         context.resources.getIdentifier(avatarResName, "raw", context.packageName)
     }
-    val avatarUri = remember {
+    val avatarUri = remember(avatarResId) {
         if (avatarResId != 0) Uri.parse("android.resource://${context.packageName}/$avatarResId")
         else Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
     }
@@ -676,8 +921,28 @@ fun KeyboardProofScreen(
         WebSocketManager.events.collect { event ->
             when (event) {
                 is WebSocketEvent.NewMessage -> {
-                    if (event.message.from == matchedUserGmail && event.message.to == localGmail) {
-                        messages.upsert(event.message.copy(status = MessageStatus.Delivered))
+                    val msg = event.message
+                    if (msg.from == matchedUserGmail && msg.to == localGmail) {
+                        messages.upsert(msg.copy(status = MessageStatus.Delivered))
+                        // Update conversation list — unreadCount = 0 since user is actively in chat
+                        val preview = when {
+                            msg.text.isNotBlank() -> msg.text
+                            msg.mediaType == "IMAGE" -> "📷 Photo"
+                            msg.mediaType == "VIDEO" -> "🎥 Video"
+                            msg.audioUri != null -> "🎵 Voice message"
+                            else -> "Message"
+                        }
+                        ConversationRepository.upsert(
+                            myEmail = localGmail,
+                            peerEmail = matchedUserGmail,
+                            peerUsername = matchedUser.username.ifBlank { matchedUserGmail.substringBefore('@') },
+                            preview = preview,
+                            timestamp = msg.timestamp,
+                            isIncoming = false, // user is in chat, don't increment unread
+                            peerGender = matchedUserPrefs.gender,
+                            peerRomanceMin = matchedUserPrefs.romanceMin,
+                            peerRomanceMax = matchedUserPrefs.romanceMax
+                        )
                     }
                 }
                 is WebSocketEvent.MessageSentAck -> {
@@ -718,6 +983,96 @@ fun KeyboardProofScreen(
                         presenceStatus = event.status
                         lastSeenTime = event.lastSeen
                     }
+                }
+                is WebSocketEvent.ChatOpen -> {
+                    if (event.from == matchedUserGmail) {
+                        Log.e("SparkOverlay", "Received chat_open from $matchedUserGmail")
+                        peerChatOpenReceived = true
+                    }
+                }
+                is WebSocketEvent.ChatClose -> {
+                    if (event.from == matchedUserGmail) {
+                        Log.e("SparkOverlay", "Received chat_close from $matchedUserGmail")
+                        peerChatOpenReceived = false
+                        mutualChatStartTime = null
+                        Log.e("SparkOverlay", "Mutual chat session ended - timer reset")
+                    }
+                }
+                is WebSocketEvent.SparkLeft -> {
+                    if (event.from == matchedUserGmail) {
+                        Log.e("SparkSwipe", "Received spark_left from $matchedUserGmail (senderUserId: ${event.senderUserId})")
+                        peerSparkChoice = false
+                        
+                        // If I already swiped, determine the result
+                        if (mySparkChoice != null) {
+                            Log.e("SparkSwipe", "Both users have swiped. My choice: $mySparkChoice, Peer choice: false")
+                            showThunderGif = false
+                            // Peer swiped left, so always show miss/fail
+                            showMissGif = true
+                        }
+                    }
+                }
+                is WebSocketEvent.SparkRight -> {
+                    if (event.from == matchedUserGmail) {
+                        Log.e("SparkSwipe", "Received spark_right from $matchedUserGmail (senderUserId: ${event.senderUserId})")
+                        peerSparkChoice = true
+
+                        // Peer swiped right on me → my own spark count increases
+                        val currentSelfSparks = prefs.getInt("sparks_self", 0)
+                        val newSelfSparks = currentSelfSparks + 1
+                        prefs.edit().putInt("sparks_self", newSelfSparks).apply()
+                        Log.e("SparkSwipe", "✅ My own sparks incremented to $newSelfSparks (peer swiped right on me)")
+
+                        // If I already swiped, determine the result
+                        if (mySparkChoice != null) {
+                            Log.e("SparkSwipe", "Both users have swiped. My choice: $mySparkChoice, Peer choice: true")
+                            showThunderGif = false
+                            if (mySparkChoice == true) {
+                                // Both swiped right - mutual!
+                                Log.e("SparkSwipe", "MUTUAL MATCH! Both swiped right")
+                                showMutualGif = true
+                            } else {
+                                // I swiped left, peer swiped right - miss
+                                Log.e("SparkSwipe", "MISS - I swiped left, peer swiped right")
+                                showMissGif = true
+                            }
+                        }
+                    }
+                }
+                is WebSocketEvent.RoseGifted -> {
+                    Log.e("RoseEvent", "!!! RECEIVED rose_gifted from: ${event.from} (matchedUser: $matchedUserGmail)")
+                    if (event.from == matchedUserGmail) {
+                        Log.e("RoseEvent", "✅ rose_gifted matches current chat → showing heart icon on profile")
+                        showProfileIcon = "heart"
+                    }
+                }
+                is WebSocketEvent.RoseTakenBack -> {
+                    Log.e("RoseEvent", "!!! RECEIVED rose_taken_back from: ${event.from} (matchedUser: $matchedUserGmail)")
+                    if (event.from == matchedUserGmail) {
+                        Log.e("RoseEvent", "✅ rose_taken_back matches current chat → showing heartbreak icon on profile")
+                        showProfileIcon = "heartbreak"
+                    }
+                }
+                is WebSocketEvent.SparkTrigger -> {
+                    Log.e("SparkOverlay", "!!! RECEIVED spark_trigger from: ${event.from} (matchedUser: $matchedUserGmail)")
+                    if (event.from == matchedUserGmail && !sparkOverlayShown && !alreadySparked) {
+                        Log.e("SparkOverlay", "[RECEIVER] ✅ spark_trigger matches current chat → showing spark overlay NOW")
+                        alreadySparked = true
+                        showThunderGif = true
+                        sparkOverlayShown = true
+                    }
+                }
+                is WebSocketEvent.WarningNotification -> {
+                    // Warning notifications are handled globally in MainActivity
+                    // No action needed here
+                }
+                is WebSocketEvent.SuspensionNotification -> {
+                    // Suspension notifications are handled globally in MainActivity
+                    // No action needed here
+                }
+                is WebSocketEvent.BanNotification -> {
+                    // Ban notifications are handled globally in MainActivity
+                    // No action needed here
                 }
             }
         }
@@ -881,6 +1236,7 @@ fun KeyboardProofScreen(
                             )
                     messages.upsert(newMsg)
                     WebSocketManager.sendMedia(matchedUserGmail, it, contentType, localId)
+                    hasMessageBeenSent = true
                 }
             }
 
@@ -908,6 +1264,7 @@ fun KeyboardProofScreen(
                                 )
                         messages.upsert(newMsg)
                         WebSocketManager.sendMedia(matchedUserGmail, uri, "video/mp4", localId)
+                        hasMessageBeenSent = true
                     }
                 }
             }
@@ -969,7 +1326,51 @@ fun KeyboardProofScreen(
                                                     .padding(horizontal = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                             ) {
-                                IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
+                                IconButton(
+                                    onClick = {
+                                        keyboardController?.hide()
+                                        focusManager.clearFocus()
+                                        
+                                        // Call skip or accept endpoint only for new matches
+                                        if (isNewMatch) {
+                                            scope.launch {
+                                                try {
+                                                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                    val myEmail = prefs.getString("user_email", "") ?: ""
+                                                    
+                                                    if (hasMessageBeenSent) {
+                                                        // Accept match if message was sent
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Calling ACCEPT match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
+                                                        val response = NetworkClient.api.acceptMatch(myEmail, matchedUserGmail)
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Accept match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
+                                                        if (response.isSuccessful) {
+                                                            Log.e("KeyboardProofScreen", "[UI BACK] Accept match SUCCESS for $matchedUserGmail")
+                                                        } else {
+                                                            Log.e("KeyboardProofScreen", "[UI BACK] Accept match FAILED: ${response.errorBody()?.string()}")
+                                                        }
+                                                    } else {
+                                                        // Skip match if no message was sent
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Calling SKIP match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
+                                                        val response = NetworkClient.api.skipMatch(myEmail, matchedUserGmail)
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Skip match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
+                                                        if (response.isSuccessful) {
+                                                            Log.e("KeyboardProofScreen", "[UI BACK] Skip match SUCCESS for $matchedUserGmail")
+                                                        } else {
+                                                            Log.e("KeyboardProofScreen", "[UI BACK] Skip match FAILED: ${response.errorBody()?.string()}")
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Log.e("KeyboardProofScreen", "[UI BACK] EXCEPTION calling match endpoint: ${e.message}", e)
+                                                }
+                                            }
+                                        } else {
+                                            Log.e("KeyboardProofScreen", "[UI BACK] Skipping match API call - opened from conversation list")
+                                        }
+                                        
+                                        onBack()
+                                    },
+                                    modifier = Modifier.size(40.dp)
+                                ) {
                                     Icon(Icons.Default.ArrowBack, "Back", tint = headerContentColor)
                                 }
                                 Spacer(Modifier.width(8.dp))
@@ -999,17 +1400,26 @@ fun KeyboardProofScreen(
                                             modifier = Modifier
                                                 .align(Alignment.BottomCenter)
                                                 .size(20.dp)
-                                                .offset(y = 8.dp)
+                                                .offset(y = 8.dp),
+                                            contentAlignment = Alignment.Center
                                         ) {
-                                            Image(
-                                                painter = rememberAsyncImagePainter(
-                                                    if (showProfileIcon == "heart") R.drawable.heart else R.drawable.heartbrk,
-                                                    imageLoader = imageLoader
-                                                ),
-                                                contentDescription = if (showProfileIcon == "heart") "Rose Sent" else "Rose Taken Back",
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = ContentScale.Fit
-                                            )
+                                            if (showProfileIcon == "heart") {
+                                                Image(
+                                                    painter = rememberAsyncImagePainter(
+                                                        R.drawable.heart,
+                                                        imageLoader = imageLoader
+                                                    ),
+                                                    contentDescription = "Rose Sent",
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = ContentScale.Fit
+                                                )
+                                            } else {
+                                                Text(
+                                                    text = "🥀",
+                                                    fontSize = 14.sp,
+                                                    lineHeight = 14.sp
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1097,7 +1507,7 @@ fun KeyboardProofScreen(
                                                     "Last seen ${SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(lastSeenTime))}"
                                                 }
                                             } else {
-                                                "Offline"
+                                                ""
                                             }
                                     Text(
                                             text = presenceText,
@@ -1105,6 +1515,78 @@ fun KeyboardProofScreen(
                                             fontSize = 12.sp,
                                             color = headerContentColor.copy(alpha = 0.7f)
                                     )
+                                }
+                                
+                                Spacer(Modifier.weight(1f))
+                                
+                                // Three-dot menu
+                                Box {
+                                    IconButton(
+                                        onClick = { showMenu = true },
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.MoreVert,
+                                            contentDescription = "More options",
+                                            tint = headerContentColor
+                                        )
+                                    }
+                                    
+                                    DropdownMenu(
+                                        expanded = showMenu,
+                                        onDismissRequest = { showMenu = false }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Delete Chat") },
+                                            onClick = {
+                                                showMenu = false
+                                                showDeleteConfirmDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(if (isUserBlocked) "Unblock User" else "Block User") },
+                                            onClick = {
+                                                showMenu = false
+                                                scope.launch {
+                                                    try {
+                                                        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                        val myEmail = prefs.getString("user_email", "") ?: ""
+                                                        val myUserId = myEmail.substringBefore("@")
+                                                        val targetUserId = matchedUserGmail.substringBefore("@")
+                                                        
+                                                        val response = if (isUserBlocked) {
+                                                            NetworkClient.api.unblockUser(myUserId, targetUserId)
+                                                        } else {
+                                                            NetworkClient.api.blockUser(myUserId, targetUserId)
+                                                        }
+                                                        
+                                                        if (response.isSuccessful) {
+                                                            isUserBlocked = !isUserBlocked
+                                                            // Persist blocked status to SharedPreferences
+                                                            userPrefs.edit()
+                                                                .putBoolean("blocked_$matchedUserGmail", isUserBlocked)
+                                                                .apply()
+                                                            
+                                                            val message = if (isUserBlocked) "User blocked successfully" else "User unblocked successfully"
+                                                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                                                        } else {
+                                                            Toast.makeText(context, "Failed to ${if (isUserBlocked) "unblock" else "block"} user", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        Log.e("KeyboardProofScreen", "Error blocking/unblocking user: ${e.message}")
+                                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Report User") },
+                                            onClick = {
+                                                showMenu = false
+                                                showReportDialog = true
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1546,7 +2028,10 @@ fun KeyboardProofScreen(
 
                                     if (input.isEmpty() && !isKeyboardVisible) {
                                         Image(
-                                            painter = rememberAsyncImagePainter(if (isRoseDead) R.drawable.roseff else R.drawable.roseg, imageLoader = imageLoader),
+                                            painter = rememberAsyncImagePainter(
+                                                if (isRoseDead) R.drawable.roseff else R.drawable.roseg,
+                                                imageLoader = imageLoader
+                                            ),
                                             contentDescription = "Rose Hint",
                                             modifier = Modifier
                                                 .padding(end = 4.dp)
@@ -1583,6 +2068,19 @@ fun KeyboardProofScreen(
                                 Log.e("from to!!!!!!!!!!!!", "${localGmail} to ${matchedUserGmail}")
 
                                 WebSocketManager.sendMessage(matchedUserGmail, text, localId)
+                                hasMessageBeenSent = true // Mark that a message has been sent
+                                // Update conversation list so it appears when navigating back
+                                ConversationRepository.upsert(
+                                    myEmail = localGmail,
+                                    peerEmail = matchedUserGmail,
+                                    peerUsername = matchedUser.username.ifBlank { matchedUserGmail.substringBefore('@') },
+                                    preview = text,
+                                    timestamp = newMsg.timestamp,
+                                    isIncoming = false,
+                                    peerGender = matchedUserPrefs.gender,
+                                    peerRomanceMin = matchedUserPrefs.romanceMin,
+                                    peerRomanceMax = matchedUserPrefs.romanceMax
+                                )
                             }
                         }
 
@@ -1687,6 +2185,7 @@ fun KeyboardProofScreen(
                                                                         messages,
                                                                         recordingAmplitudes.toList()
                                                                 )
+                                                                hasMessageBeenSent = true
                                                                 recordingAmplitudes.clear()
                                                             }
                                                         }
@@ -1820,6 +2319,7 @@ fun KeyboardProofScreen(
                                         contentType,
                                         localId
                                 )
+                                hasMessageBeenSent = true
                                 Log.e("MediaSending", "[TRACE] WebSocketManager.sendMedia() called")
                             }
                             Log.e(
@@ -1912,6 +2412,7 @@ fun KeyboardProofScreen(
                                     "[TRACE] Calling WebSocketManager.sendMedia() → toEmail=$matchedUserGmail, uri=$uri, contentType=$contentType, localId=$localId"
                             )
                             WebSocketManager.sendMedia(matchedUserGmail, uri, contentType, localId)
+                            hasMessageBeenSent = true
                             Log.e("MediaSending", "[TRACE] WebSocketManager.sendMedia() called")
 
                             capturedImageUri = null
@@ -1944,11 +2445,64 @@ fun KeyboardProofScreen(
                                     "ThunderDebug",
                                     "ThunderGifOverlay dismissed from within component, isRightSwipe: $isRightSwipe"
                             )
-                            showThunderGif = false
+                            
+                            // Track my choice
+                            mySparkChoice = isRightSwipe
+                            Log.e("SparkSwipe", "My spark choice: ${if (isRightSwipe) "RIGHT" else "LEFT"}")
+                            
+                            // Send WebSocket event for spark swipe
+                            val localUserId = localGmail.substringBefore("@")
                             if (isRightSwipe) {
-                                showMutualGif = true
+                                Log.e("SparkSwipe", "Sending spark_right to $matchedUserGmail (from: $localUserId)")
+                                WebSocketManager.sendSparkRight(matchedUserGmail, localUserId)
+
+                                // Call spark API - we are sending a spark TO the peer
+                                kotlinx.coroutines.MainScope().launch {
+                                    try {
+                                        val response = NetworkClient.api.sparkUser(
+                                            com.example.anonychat.network.SparkRoseRequest(toGmail = matchedUserGmail)
+                                        )
+                                        if (response.isSuccessful) {
+                                            val body = response.body()
+                                            Log.e("SparkSwipe", "✅ sparkUser API success: ${body?.message}")
+                                            // Increment peer's spark count in top bar and persist
+                                            sparks += 1
+                                            prefs.edit().putInt("sparks_${matchedUserGmail}", sparks).apply()
+                                            Log.e("SparkSwipe", "✅ Peer sparks incremented to $sparks (receiverTotalSparks: ${body?.receiverTotalSparks})")
+                                        } else {
+                                            Log.e("SparkSwipe", "❌ sparkUser API failed - code: ${response.code()}")
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("SparkSwipe", "❌ sparkUser API exception: ${e.message}", e)
+                                    }
+                                }
                             } else {
+                                Log.e("SparkSwipe", "Sending spark_left to $matchedUserGmail (from: $localUserId)")
+                                WebSocketManager.sendSparkLeft(matchedUserGmail, localUserId)
+                            }
+                            
+                            // Determine what to show based on my choice and peer's choice (if received)
+                            showThunderGif = false
+                            
+                            if (!isRightSwipe) {
+                                // I swiped left - always show miss immediately
+                                Log.e("SparkSwipe", "I swiped LEFT - showing miss immediately")
                                 showMissGif = true
+                            } else if (peerSparkChoice != null) {
+                                // I swiped right AND peer already responded
+                                if (peerSparkChoice == true) {
+                                    // Both swiped right - mutual!
+                                    Log.e("SparkSwipe", "MUTUAL! Both swiped right")
+                                    showMutualGif = true
+                                } else {
+                                    // I swiped right, peer swiped left - miss
+                                    Log.e("SparkSwipe", "MISS - I swiped right, peer swiped left")
+                                    showMissGif = true
+                                }
+                            } else {
+                                // I swiped right but waiting for peer's response
+                                // Don't show anything yet - will be handled by WebSocket event
+                                Log.e("SparkSwipe", "I swiped RIGHT - waiting for peer's response...")
                             }
                         }
                 )
@@ -1967,11 +2521,298 @@ fun KeyboardProofScreen(
                     onDismiss = { showRoseOverlay = false },
                     isRoseDead = overlayModeIsDead,
                     onToggleRoseState = {
+                        val wasDeadBeforeToggle = overlayModeIsDead
                         overlayModeIsDead = !overlayModeIsDead
                         isRoseDead = !isRoseDead
-                        // Update profile icon based on rose state
-                        // After toggle: if rose becomes dead, show heartbreak; if alive, show heart
-                        showProfileIcon = if (!isRoseDead) "heartbreak" else "heart"
+
+                        // wasDeadBeforeToggle=false → rose was alive → swiped right → gift the rose
+                        // wasDeadBeforeToggle=true  → rose was dead  → swiped right → take back the rose
+                        if (!wasDeadBeforeToggle) {
+                            // Rose was alive (non-dead) and user swiped right = gift the rose
+                            scope.launch {
+                                try {
+                                    val response = NetworkClient.api.giveRose(
+                                        com.example.anonychat.network.SparkRoseRequest(toGmail = matchedUserGmail)
+                                    )
+                                    if (response.isSuccessful) {
+                                        // Decrement availableRoses (sender's roses left to give)
+                                        val newCount = (availableRoses - 1).coerceAtLeast(0)
+                                        availableRoses = newCount
+                                        userPrefs.edit().putInt("available_roses", newCount).apply()
+                                        // Increment peer's rose counter shown in the top header
+                                        roses += 1
+                                        android.util.Log.d("KeyboardProofScreen", "Rose gifted to $matchedUserGmail. Remaining: $newCount, peer roses: $roses")
+                                        // Notify peer via WebSocket
+                                        WebSocketManager.sendRoseGifted(matchedUserGmail, localGmail)
+                                    } else {
+                                        val errorBodyStr = response.errorBody()?.string() ?: ""
+                                        android.util.Log.e("KeyboardProofScreen", "giveRose failed: $errorBodyStr")
+                                        val errorMsg = try {
+                                            org.json.JSONObject(errorBodyStr).optString("error", "")
+                                        } catch (_: Exception) { "" }
+                                        if (errorMsg.isNotEmpty()) {
+                                            toastMessage = errorMsg
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("KeyboardProofScreen", "giveRose exception: ${e.message}")
+                                }
+                            }
+                        } else {
+                            // Rose was dead and user swiped right = take back the rose
+                            scope.launch {
+                                try {
+                                    val response = NetworkClient.api.takeBackRose(
+                                        com.example.anonychat.network.SparkRoseRequest(toGmail = matchedUserGmail)
+                                    )
+                                    if (response.isSuccessful) {
+                                        // Increment availableRoses (sender gets rose back)
+                                        val newCount = availableRoses + 1
+                                        availableRoses = newCount
+                                        userPrefs.edit().putInt("available_roses", newCount).apply()
+                                        // Decrement peer's rose counter shown in the top header
+                                        roses = (roses - 1).coerceAtLeast(0)
+                                        android.util.Log.d("KeyboardProofScreen", "Rose taken back from $matchedUserGmail. Available: $newCount, peer roses: $roses")
+                                        // Notify peer via WebSocket
+                                        WebSocketManager.sendRoseTakenBack(matchedUserGmail, localGmail)
+                                    } else {
+                                        val errorBodyStr = response.errorBody()?.string() ?: ""
+                                        android.util.Log.e("KeyboardProofScreen", "takeBackRose failed: $errorBodyStr")
+                                        val errorMsg = try {
+                                            org.json.JSONObject(errorBodyStr).optString("error", "")
+                                        } catch (_: Exception) { "" }
+                                        if (errorMsg.isNotEmpty()) {
+                                            toastMessage = errorMsg
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("KeyboardProofScreen", "takeBackRose exception: ${e.message}")
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+
+            toastMessage?.let { msg ->
+                LaunchedEffect(msg) {
+                    kotlinx.coroutines.delay(3000)
+                    toastMessage = null
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp)
+                        .align(Alignment.Center)
+                        .zIndex(10f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = Color(0xFF1A1A1A).copy(alpha = 0.92f),
+                        shadowElevation = 8.dp
+                    ) {
+                        Text(
+                            text = msg,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+            }
+            
+            // Delete Chat Confirmation Dialog
+            if (showDeleteConfirmDialog) {
+                AlertDialog(
+                    onDismissRequest = { showDeleteConfirmDialog = false },
+                    title = { Text("Delete Chat?") },
+                    text = {
+                        Column {
+                            Text(
+                                "Choose how you want to proceed:",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "• Delete Only: Removes conversation history but you may match with this user again.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "• Block & Delete: Permanently prevents matching with this user and stops all messages.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Column {
+                            TextButton(
+                                onClick = {
+                                    showDeleteConfirmDialog = false
+                                    scope.launch {
+                                        try {
+                                            val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                            val myEmail = prefs.getString("user_email", "") ?: ""
+                                            val myUserId = myEmail.substringBefore("@")
+                                            val targetUserId = matchedUserGmail.substringBefore("@")
+                                            
+                                            // Block user first
+                                            val blockResponse = NetworkClient.api.blockUser(myUserId, targetUserId)
+                                            
+                                            if (blockResponse.isSuccessful) {
+                                                // Then delete the match
+                                                val deleteResponse = NetworkClient.api.deleteMatch(myEmail, matchedUserGmail)
+                                                
+                                                if (deleteResponse.isSuccessful) {
+                                                    // Update blocked status in SharedPreferences
+                                                    userPrefs.edit()
+                                                        .putBoolean("blocked_$matchedUserGmail", true)
+                                                        .apply()
+                                                    
+                                                    // Remove from conversation list
+                                                    ConversationRepository.remove(matchedUserGmail)
+                                                    
+                                                    Toast.makeText(context, "User blocked and chat deleted", Toast.LENGTH_SHORT).show()
+                                                    
+                                                    // Navigate back to ChatScreen
+                                                    onBack()
+                                                } else {
+                                                    Toast.makeText(context, "User blocked but failed to delete chat", Toast.LENGTH_SHORT).show()
+                                                }
+                                            } else {
+                                                Toast.makeText(context, "Failed to block user", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("KeyboardProofScreen", "Error blocking and deleting: ${e.message}")
+                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Block & Delete")
+                            }
+                            TextButton(
+                                onClick = {
+                                    showDeleteConfirmDialog = false
+                                    scope.launch {
+                                        try {
+                                            val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                            val myEmail = prefs.getString("user_email", "") ?: ""
+                                            
+                                            val response = NetworkClient.api.deleteMatch(myEmail, matchedUserGmail)
+                                            
+                                            if (response.isSuccessful) {
+                                                // Clear chat data from SharedPreferences
+                                                userPrefs.edit()
+                                                    .remove("blocked_$matchedUserGmail")
+                                                    .apply()
+                                                
+                                                // Remove from conversation list
+                                                ConversationRepository.remove(matchedUserGmail)
+                                                
+                                                Toast.makeText(context, "Chat deleted successfully", Toast.LENGTH_SHORT).show()
+                                                
+                                                // Navigate back to ChatScreen
+                                                onBack()
+                                            } else {
+                                                Toast.makeText(context, "Failed to delete chat", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("KeyboardProofScreen", "Error deleting chat: ${e.message}")
+                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Delete Only")
+                            }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+
+            // Report User Dialog
+            if (showReportDialog) {
+                ReportUserDialog(
+                    onDismiss = {
+                        showReportDialog = false
+                        selectedReportReason = null
+                        otherReportText = ""
+                    },
+                    selectedReason = selectedReportReason,
+                    onReasonSelected = { selectedReportReason = it },
+                    otherText = otherReportText,
+                    onOtherTextChanged = { otherReportText = it },
+                    onReport = {
+                        scope.launch {
+                            try {
+                                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                val myEmail = prefs.getString("user_email", "") ?: ""
+                                val myUserId = myEmail.substringBefore("@")
+                                val targetUserId = matchedUserGmail.substringBefore("@")
+                                
+                                val reason = if (selectedReportReason == "Other") {
+                                    "Other: $otherReportText"
+                                } else {
+                                    selectedReportReason ?: ""
+                                }
+                                
+                                val response = NetworkClient.api.reportUser(
+                                    myUserId,
+                                    targetUserId,
+                                    com.example.anonychat.network.ReportRequest(reason)
+                                )
+                                
+                                if (response.isSuccessful) {
+                                    Toast.makeText(
+                                        context,
+                                        "Report submitted successfully",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } else {
+                                    // Handle error responses, especially 409 Conflict
+                                    val errorMsg = when (response.code()) {
+                                        409 -> {
+                                            // Parse the error body for duplicate report
+                                            try {
+                                                val errorBody = response.errorBody()?.string()
+                                                if (errorBody != null) {
+                                                    val gson = com.google.gson.Gson()
+                                                    val errorResponse = gson.fromJson(
+                                                        errorBody,
+                                                        com.example.anonychat.network.ReportErrorResponse::class.java
+                                                    )
+                                                    errorResponse.message ?: "You have already reported this user"
+                                                } else {
+                                                    "You have already reported this user"
+                                                }
+                                            } catch (e: Exception) {
+                                                "You have already reported this user"
+                                            }
+                                        }
+                                        else -> response.body()?.message ?: "Failed to submit report"
+                                    }
+                                    Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
+                                }
+                            } catch (e: Exception) {
+                                Log.e("KeyboardProofScreen", "Error reporting user: ${e.message}")
+                                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                            
+                            showReportDialog = false
+                            selectedReportReason = null
+                            otherReportText = ""
+                        }
                     }
                 )
             }
@@ -3512,7 +4353,7 @@ private fun RoseSlider(
 ) {
     val haptic = LocalHapticFeedback.current
     val thumbSize = 64.dp
-    val trackHeight = 72.dp
+    val trackHeight = 80.dp
     val trackWidth = 320.dp
     val maxOffsetPx = with(androidx.compose.ui.platform.LocalDensity.current) { (trackWidth - thumbSize).toPx() }
     
@@ -3539,9 +4380,13 @@ private fun RoseSlider(
                     .clip(RoundedCornerShape(topStart = 36.dp, bottomStart = 36.dp))
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color(0xFFE53935), Color(0xFFB71C1C))
+                            if (isRoseDead) {
+                                listOf(Color(0xFFE53935), Color(0xFFB71C1C)) // Red when dead
+                            } else {
+                                listOf(Color(0xFF43A047), Color(0xFF1B5E20)) // Green when alive
+                            }
                         )
-                    ) // 3D Red Gradient
+                    )
             )
             Box(
                 modifier = Modifier
@@ -3550,9 +4395,13 @@ private fun RoseSlider(
                     .clip(RoundedCornerShape(topEnd = 36.dp, bottomEnd = 36.dp))
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color(0xFF43A047), Color(0xFF1B5E20))
+                            if (isRoseDead) {
+                                listOf(Color(0xFF43A047), Color(0xFF1B5E20)) // Green when dead
+                            } else {
+                                listOf(Color(0xFFE53935), Color(0xFFB71C1C)) // Red when alive
+                            }
                         )
-                    ) // 3D Green Gradient
+                    )
             )
         }
 
@@ -3563,52 +4412,58 @@ private fun RoseSlider(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(vertical = 4.dp)
             ) {
                 if (isRoseDead) {
                     Image(
                         painter = rememberAsyncImagePainter(R.drawable.rosalv, imageLoader = imageLoader),
                         contentDescription = "Rose Alive",
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(36.dp)
                     )
                 } else {
                     Image(
                         painter = painterResource(id = R.drawable.crosswn),
                         contentDescription = "Don't Send",
-                        modifier = Modifier.size(56.dp)
+                        modifier = Modifier.size(36.dp)
                     )
                 }
+                Spacer(Modifier.height(2.dp))
                 Text(
                     if (isRoseDead) "Let it stay" else "Don't Send",
                     color = Color.White,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.offset(y = if (isRoseDead) (-8).dp else (-10).dp)
+                    maxLines = 1
                 )
             }
 
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(vertical = 4.dp)
             ) {
                 if (isRoseDead) {
                     Image(
                         painter = rememberAsyncImagePainter(R.drawable.heartbreak, imageLoader = imageLoader),
                         contentDescription = "Broken Heart",
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(36.dp)
                     )
                 } else {
                     Image(
                         painter = painterResource(id = R.drawable.gift),
                         contentDescription = "Send Gift",
-                        modifier = Modifier.size(56.dp)
+                        modifier = Modifier.size(36.dp)
                     )
                 }
+                Spacer(Modifier.height(2.dp))
                 Text(
                     if (isRoseDead) "Take It Back" else "Send Gift",
-                    color = Color(0xFFFF4081),
-                    fontSize = 12.sp,
+                    color = Color.White,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.offset(y = if (isRoseDead) (-8).dp else (-10).dp)
+                    maxLines = 1
                 )
             }
         }
@@ -3642,14 +4497,14 @@ private fun RoseSlider(
                             change.consume()
                             val newOffset = offsetX + dragAmount
                             if (newOffset >= -maxOffsetPx / 2 && newOffset <= maxOffsetPx / 2) {
-                                offsetX = newOffset
+                            offsetX = newOffset
                             }
                         }
                     )
                 },
             contentAlignment = Alignment.Center
         ) {
-            Image(
+           Image(
                 painter = rememberAsyncImagePainter(if (isRoseDead) R.drawable.rosestatic else R.drawable.croprose, imageLoader = imageLoader),
                 contentDescription = "Thumb Rose",
                 modifier = Modifier.size(60.dp),
@@ -3657,4 +4512,140 @@ private fun RoseSlider(
             )
         }
     }
+}
+
+@Composable
+private fun ReportUserDialog(
+    onDismiss: () -> Unit,
+    selectedReason: String?,
+    onReasonSelected: (String) -> Unit,
+    otherText: String,
+    onOtherTextChanged: (String) -> Unit,
+    onReport: () -> Unit
+) {
+    val reportReasons = listOf(
+        "Harassment or Bullying",
+        "Hate Speech",
+        "Sexual Harassment / Explicit Content",
+        "Fake Profile / Impersonation",
+        "Scam or Fraud",
+        "Spam or Advertising",
+        "Threats or Violence",
+        "Illegal Activity",
+        "Underage User",
+        "Inappropriate Messages",
+        "Other"
+    )
+    
+    // Theme-aware colors
+    val titleColor = MaterialTheme.colorScheme.onSurface
+    val subtitleColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val buttonColors = ButtonDefaults.buttonColors(
+        containerColor = MaterialTheme.colorScheme.error,
+        contentColor = MaterialTheme.colorScheme.onError
+    )
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                text = "Report User",
+                fontWeight = FontWeight.Bold,
+                fontSize = 20.sp,
+                color = titleColor
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    text = "Please select a reason for reporting this user:",
+                    fontSize = 14.sp,
+                    color = subtitleColor,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
+                
+                reportReasons.forEach { reason ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onReasonSelected(reason) }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selectedReason == reason,
+                            onClick = { onReasonSelected(reason) },
+                            colors = RadioButtonDefaults.colors(
+                                selectedColor = MaterialTheme.colorScheme.primary,
+                                unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = reason,
+                            fontSize = 15.sp,
+                            color = textColor
+                        )
+                    }
+                }
+                
+                // Show text field when "Other" is selected
+                if (selectedReason == "Other") {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = otherText,
+                        onValueChange = onOtherTextChanged,
+                        label = {
+                            Text(
+                                "Please describe the issue",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp),
+                        maxLines = 4,
+                        placeholder = {
+                            Text(
+                                "Enter details here...",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                            focusedTextColor = textColor,
+                            unfocusedTextColor = textColor,
+                            cursorColor = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onReport,
+                enabled = selectedReason != null && (selectedReason != "Other" || otherText.isNotBlank()),
+                colors = buttonColors
+            ) {
+                Text("Report", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
 }

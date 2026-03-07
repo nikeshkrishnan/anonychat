@@ -18,9 +18,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -65,19 +70,20 @@ sealed class Screen(val route: String) {
     }
     object Ratings : Screen("ratings")
 
-    object DirectChat : Screen("directChat/{currentUser}/{myPrefs}/{matchedUser}/{matchedPrefs}") {
+    object DirectChat : Screen("directChat/{currentUser}/{myPrefs}/{matchedUser}/{matchedPrefs}/{isNewMatch}") {
         fun createRoute(
                 currentUser: User,
                 myPrefs: Preferences,
                 matchedUser: User,
-                matchedPrefs: Preferences
+                matchedPrefs: Preferences,
+                isNewMatch: Boolean
         ): String {
             val gson = Gson()
             val u1 = URLEncoder.encode(gson.toJson(currentUser), "UTF-8")
             val p1 = URLEncoder.encode(gson.toJson(myPrefs), "UTF-8")
             val u2 = URLEncoder.encode(gson.toJson(matchedUser), "UTF-8")
             val p2 = URLEncoder.encode(gson.toJson(matchedPrefs), "UTF-8")
-            return "directChat/$u1/$p1/$u2/$p2"
+            return "directChat/$u1/$p1/$u2/$p2/$isNewMatch"
         }
     }
 }
@@ -225,7 +231,8 @@ class MainActivity : ComponentActivity() {
                                                 currentUser,
                                                 myPrefs,
                                                 matchedUser,
-                                                matchedPrefs
+                                                matchedPrefs,
+                                                isNewMatch = true // From notification/service
                                         )
 
                                 // Relaunch the activity to bring it to the foreground
@@ -310,7 +317,7 @@ class MainActivity : ComponentActivity() {
             registerReceiver(
                     navigationReceiver,
                     IntentFilter("com.example.anonychat.ACTION_NAVIGATE_TO_DIRECT_CHAT"),
-                    RECEIVER_NOT_EXPORTED // <-- ADD THIS FLAG
+                    RECEIVER_NOT_EXPORTED
             )
         }
 
@@ -397,6 +404,115 @@ class MainActivity : ComponentActivity() {
             onNavControllerReady: (androidx.navigation.NavController) -> Unit
     ) {
         val navController = rememberNavController()
+        var warningMessage by remember { mutableStateOf<String?>(null) }
+        var suspensionMessage by remember { mutableStateOf<String?>(null) }
+        var banMessage by remember { mutableStateOf<String?>(null) }
+        var http403Message by remember { mutableStateOf<String?>(null) }
+
+        // Listen for warning, suspension, and ban notifications from WebSocket
+        LaunchedEffect(Unit) {
+            WebSocketManager.events.collect { event ->
+                when (event) {
+                    is com.example.anonychat.network.WebSocketEvent.WarningNotification -> {
+                        warningMessage = event.message
+                    }
+                    is com.example.anonychat.network.WebSocketEvent.SuspensionNotification -> {
+                        suspensionMessage = event.message
+                        // Clear session and navigate to login
+                        getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().clear().apply()
+                        navController.navigate(Screen.Login.route) {
+                            popUpTo(0) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                    is com.example.anonychat.network.WebSocketEvent.BanNotification -> {
+                        banMessage = event.message
+                        // Clear session and navigate to login
+                        getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().clear().apply()
+                        navController.navigate(Screen.Login.route) {
+                            popUpTo(0) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                    else -> {}
+                }
+            }
+        }
+        
+        // Listen for HTTP 403 events
+        LaunchedEffect(Unit) {
+            com.example.anonychat.network.Http403EventBus.events.collect { event ->
+                when (event) {
+                    is com.example.anonychat.network.Http403Event.AccountRestricted -> {
+                        http403Message = event.message
+                        // Only navigate to login if not already there
+                        val currentRoute = navController.currentBackStackEntry?.destination?.route
+                        if (currentRoute != Screen.Login.route) {
+                            navController.navigate(Screen.Login.route) {
+                                popUpTo(0) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Show warning dialog when warningMessage is not null
+        if (warningMessage != null) {
+            AlertDialog(
+                onDismissRequest = { warningMessage = null },
+                title = { Text("⚠️ Warning") },
+                text = { Text(warningMessage ?: "") },
+                confirmButton = {
+                    TextButton(onClick = { warningMessage = null }) {
+                        Text("OK")
+                    }
+                }
+            )
+        }
+        
+        // Show suspension dialog
+        if (suspensionMessage != null) {
+            AlertDialog(
+                onDismissRequest = { suspensionMessage = null },
+                title = { Text("⛔ Account Suspended") },
+                text = { Text(suspensionMessage ?: "") },
+                confirmButton = {
+                    TextButton(onClick = { suspensionMessage = null }) {
+                        Text("OK")
+                    }
+                }
+            )
+        }
+        
+        // Show ban dialog
+        if (banMessage != null) {
+            AlertDialog(
+                onDismissRequest = { banMessage = null },
+                title = { Text("🚫 Account Banned") },
+                text = { Text(banMessage ?: "") },
+                confirmButton = {
+                    TextButton(onClick = { banMessage = null }) {
+                        Text("OK")
+                    }
+                }
+            )
+        }
+        
+        // Show HTTP 403 dialog (account restricted)
+        if (http403Message != null) {
+            AlertDialog(
+                onDismissRequest = { http403Message = null },
+                title = { Text("🚫 Account Restricted") },
+                text = { Text(http403Message ?: "") },
+                confirmButton = {
+                    TextButton(onClick = { http403Message = null }) {
+                        Text("OK")
+                    }
+                }
+            )
+        }
 
         // Give the activity a reference to the NavController
         LaunchedEffect(navController) { onNavControllerReady(navController) }
@@ -432,14 +548,15 @@ class MainActivity : ComponentActivity() {
                         onNavigateToProfile = { username ->
                             navController.navigate(Screen.Profile.createRoute(username))
                         },
-                        onNavigateToDirectChat = { currentUser, myPrefs, matchedUser, matchedPrefs
+                        onNavigateToDirectChat = { currentUser, myPrefs, matchedUser, matchedPrefs, isNewMatch
                             ->
                             val route =
                                     Screen.DirectChat.createRoute(
                                             currentUser,
                                             myPrefs,
                                             matchedUser,
-                                            matchedPrefs
+                                            matchedPrefs,
+                                            isNewMatch
                                     )
                             navController.navigate(route)
                         }
@@ -453,7 +570,8 @@ class MainActivity : ComponentActivity() {
                                     navArgument("currentUser") { type = NavType.StringType },
                                     navArgument("myPrefs") { type = NavType.StringType },
                                     navArgument("matchedUser") { type = NavType.StringType },
-                                    navArgument("matchedPrefs") { type = NavType.StringType }
+                                    navArgument("matchedPrefs") { type = NavType.StringType },
+                                    navArgument("isNewMatch") { type = NavType.BoolType }
                             )
             ) { entry ->
                 val currentUserJson =
@@ -476,6 +594,7 @@ class MainActivity : ComponentActivity() {
                                 entry.arguments!!.getString("matchedPrefs")!!,
                                 "UTF-8"
                         )
+                val isNewMatch = entry.arguments?.getBoolean("isNewMatch") ?: false
 
                 val gson = Gson()
                 val currentUser = gson.fromJson(currentUserJson, User::class.java)
@@ -487,6 +606,7 @@ class MainActivity : ComponentActivity() {
                         matchedUser = matchedUser,
                         matchedUserPrefs = matchedPrefs,
                         matchedUserGmail = matchedUser.id,
+                        isNewMatch = isNewMatch,
                         onBack = { navController.popBackStack() }
                 )
             }

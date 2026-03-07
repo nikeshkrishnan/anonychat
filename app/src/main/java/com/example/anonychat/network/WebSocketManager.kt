@@ -173,55 +173,72 @@ sealed class WebSocketEvent {
     data class MessageSentAck(val messageId: String) : WebSocketEvent()
     data class PeerPresence(val from: String, val status: String, val lastSeen: Long) :
             WebSocketEvent()
+    data class ChatOpen(val from: String) : WebSocketEvent()
+    data class ChatClose(val from: String) : WebSocketEvent()
+    data class SparkLeft(val from: String, val senderUserId: String) : WebSocketEvent()
+    data class SparkRight(val from: String, val senderUserId: String) : WebSocketEvent()
+    data class RoseGifted(val from: String) : WebSocketEvent()
+    data class RoseTakenBack(val from: String) : WebSocketEvent()
+    data class SparkTrigger(val from: String) : WebSocketEvent()
+    data class WarningNotification(val message: String) : WebSocketEvent()
+    data class SuspensionNotification(val message: String, val remainingMinutes: Int) : WebSocketEvent()
+    data class BanNotification(val message: String) : WebSocketEvent()
 }
-
-/* ---------------------------------------------------
-   INTERNAL MODEL
---------------------------------------------------- */
-private enum class MessageState {
-    QUEUED,
-    IN_FLIGHT,
-    DELIVERED,
-    FAILED
-}
-
-private data class PendingMessage(
-        val messageId: String,
-        val payload: String,
-        var retries: Int,
-        var state: MessageState,
-        var lastSentAt: Long,
-        val timestamp: Long
-)
-
-private enum class WsState {
-    DISCONNECTED,
-    CONNECTING,
-    CONNECTED
-}
-
-private enum class ReadyState {
-    NOT_READY,
-    WAITING_ACK,
-    READY
-}
-
-private val connectMutex = Mutex()
-
-@Volatile private var wsState: WsState = WsState.DISCONNECTED
-
-@Volatile private var readyState: ReadyState = ReadyState.NOT_READY
-
-// Media endpoints
-//    private const val MEDIA_UPLOAD = "${NetworkConfig.BASE_URL}media/upload"
-//    private const val MEDIA_DOWNLOAD_ACK = "${NetworkConfig.BASE_URL}media/download/ack"
-
-private lateinit var appContext: Context
 
 /* ---------------------------------------------------
    WEBSOCKET MANAGER
 --------------------------------------------------- */
 object WebSocketManager {
+    
+    /* ---------------------------------------------------
+       INTERNAL MODEL
+    --------------------------------------------------- */
+    private enum class MessageState {
+        QUEUED,
+        IN_FLIGHT,
+        DELIVERED,
+        FAILED
+    }
+
+    private data class PendingMessage(
+            val messageId: String,
+            val payload: String,
+            var retries: Int,
+            var state: MessageState,
+            var lastSentAt: Long,
+            val timestamp: Long
+    )
+
+    private enum class WsState {
+        DISCONNECTED,
+        CONNECTING,
+        CONNECTED
+    }
+
+    private enum class ReadyState {
+        NOT_READY,
+        WAITING_ACK,
+        READY
+    }
+
+    private val connectMutex = Mutex()
+
+    @Volatile private var wsState: WsState = WsState.DISCONNECTED
+
+    @Volatile private var readyState: ReadyState = ReadyState.NOT_READY
+
+    // Media endpoints
+    //    private const val MEDIA_UPLOAD = "${NetworkConfig.BASE_URL}media/upload"
+    //    private const val MEDIA_DOWNLOAD_ACK = "${NetworkConfig.BASE_URL}media/download/ack"
+
+    private lateinit var appContext: Context
+
+    // Track which users currently have their chat windows open with us
+    private val activeChatSessions = mutableSetOf<String>()
+    
+    fun isUserInChatWithUs(userEmail: String): Boolean {
+        return activeChatSessions.contains(userEmail)
+    }
 
     private fun getEventListener(requestId: String): EventListener {
         return object : EventListener() {
@@ -414,7 +431,8 @@ object WebSocketManager {
 
     private const val MAX_RETRIES = 5
     private const val MAX_RECONNECT_DELAY_MS = 30_000L
-    private const val HEARTBEAT_INTERVAL_MS = 100L
+    private const val HEARTBEAT_INTERVAL_MS = 5_000L // send ping every 5 seconds
+    private const val PING_PONG_TIMEOUT_MS = 10_000L // reconnect if no pong within 10 seconds
     private const val READY_RETRY_INTERVAL_MS = 3_000L // increased to reduce spam
     private const val OUTGOING_SEND_DELAY_MS = 40L // throttle to avoid kernel buffer overflow
 
@@ -451,8 +469,9 @@ object WebSocketManager {
     private lateinit var connectivityManager: ConnectivityManager
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    private const val SERVER_LIVENESS_TIMEOUT_MS = 7_000L // 7 seconds - force reconnect if no pong
+    private const val SERVER_LIVENESS_TIMEOUT_MS = 30_000L // 30 seconds - fallback if server goes completely silent
     @Volatile private var lastServerMessageAt: Long = 0
+    @Volatile private var lastPingSentAt: Long = 0
     private var livenessJob: Job? = null
     private lateinit var historyDao: ChatHistoryDao
 
@@ -463,15 +482,21 @@ object WebSocketManager {
                     while (isActive) {
                         delay(2_000) // Check every 2 seconds for faster detection
                         val now = System.currentTimeMillis()
-                        if (now - lastServerMessageAt > SERVER_LIVENESS_TIMEOUT_MS) {
-                            Log.e("WebSocketManager", "!!! SERVER SILENT → KILLING OLD CONNECTION AND STARTING FRESH !!!")
-                            
+                        // Trigger reconnect if a ping was sent but no pong/message received within 10s
+                        val pingSent = lastPingSentAt
+                        val pingTimedOut = pingSent > 0 && (now - pingSent) > PING_PONG_TIMEOUT_MS
+                        val serverSilent = lastServerMessageAt > 0 && (now - lastServerMessageAt) > SERVER_LIVENESS_TIMEOUT_MS
+                        if (pingTimedOut || serverSilent) {
+                            val reason = if (pingTimedOut) "PING NOT RECEIVED WITHIN 10s" else "SERVER SILENT"
+                            Log.e("WebSocketManager", "!!! $reason → KILLING OLD CONNECTION AND STARTING FRESH !!!")
+
                             // Completely kill the old connection
                             forceCloseSocket()
-                            
-                            // Reset reconnect attempt to start fresh
+
+                            // Reset ping tracking and reconnect attempt to start fresh
+                            lastPingSentAt = 0
                             reconnectAttempt = 0
-                            
+
                             // Create a completely new WebSocket connection
                             if (wsUrl != null) {
                                 Log.e("WebSocketManager", "!!! CREATING FRESH WEBSOCKET CONNECTION !!!")
@@ -556,22 +581,46 @@ object WebSocketManager {
         dao = db.pendingMessageDao()
         historyDao = db.chatHistoryDao()
 
+        // Load pending messages from DB, but filter out chat_open/chat_close messages
+        // These are presence signals and should not be persisted or retried
         pendingQueue.addAll(
-                dao.getAll().map {
-                    val st =
-                            runCatching { MessageState.valueOf(it.state) }.getOrElse {
-                                MessageState.QUEUED
-                            }
-                    PendingMessage(
-                            it.messageId,
-                            it.payload,
-                            it.retries,
-                            st,
-                            it.lastSentAt,
-                            it.timestamp
-                    )
-                }
+                dao.getAll()
+                    .filter { entity ->
+                        // Filter out chat_open and chat_close messages
+                        !entity.messageId.startsWith("chat_open_") &&
+                        !entity.messageId.startsWith("chat_close_")
+                    }
+                    .map {
+                        val st =
+                                runCatching { MessageState.valueOf(it.state) }.getOrElse {
+                                    MessageState.QUEUED
+                                }
+                        PendingMessage(
+                                it.messageId,
+                                it.payload,
+                                it.retries,
+                                st,
+                                it.lastSentAt,
+                                it.timestamp
+                        )
+                    }
         )
+        
+        // Clean up any chat_open/chat_close messages from DB
+        scope.launch {
+            try {
+                val allMessages = dao.getAll()
+                allMessages.forEach { entity ->
+                    if (entity.messageId.startsWith("chat_open_") ||
+                        entity.messageId.startsWith("chat_close_")) {
+                        dao.delete(entity.messageId)
+                        Log.d("WebSocketManager", "Cleaned up stale presence message: ${entity.messageId}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to clean up stale presence messages", e)
+            }
+        }
 
         initialized = true
         Log.i("WebSocketManager", "Initialized with pending messages=${pendingQueue.size}")
@@ -704,12 +753,16 @@ object WebSocketManager {
     --------------------------------------------------- */
     suspend fun connect(context: Context) {
         ensureInit()
-        Log.e("WebSocketManager", "Connecting...")
+        Log.e("WebSocketManager", "connect() called - attempting to establish WebSocket connection")
 
         // 1) Acquire lock only to check & mutate quick state -> don't suspend while holding it
         connectMutex.withLock {
-            Log.e("WebSocketManager", "connect $wsState")
-            if (wsState != WsState.DISCONNECTED) return
+            Log.e("WebSocketManager", "Current wsState: $wsState")
+            if (wsState != WsState.DISCONNECTED) {
+                Log.e("WebSocketManager", "Already connecting or connected, skipping connection attempt")
+                return
+            }
+            Log.e("WebSocketManager", "State is DISCONNECTED, proceeding with connection")
             wsState = WsState.CONNECTING
         }
 
@@ -1349,7 +1402,12 @@ object WebSocketManager {
                                                         e
                                                 )
                                             }
-                                            pendingQueue.removeIf { it.messageId == msg.messageId }
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                                pendingQueue.removeIf { it.messageId == msg.messageId }
+                                            } else {
+                                                val iter = pendingQueue.iterator()
+                                                while (iter.hasNext()) { if (iter.next().messageId == msg.messageId) iter.remove() }
+                                            }
                                             withContext(Dispatchers.Main.immediate) {
                                                 _events.emit(
                                                         WebSocketEvent.DeliveryFailed(
@@ -1413,8 +1471,9 @@ object WebSocketManager {
                     Log.e("WebSocketManager", "  $name: $value")
                 }
 
-                // reset liveness timestamp and start monitors
+                // reset liveness timestamps and start monitors
                 lastServerMessageAt = System.currentTimeMillis()
+                lastPingSentAt = 0 // clear stale ping state from any previous connection
                 startReadyHandshake()
                 startLivenessMonitor() // Monitor server liveness and reconnect if silent
                 startHeartbeat()
@@ -1433,6 +1492,7 @@ object WebSocketManager {
             @RequiresApi(Build.VERSION_CODES.N)
             override fun onMessage(ws: WebSocket, text: String) {
                 lastServerMessageAt = System.currentTimeMillis()
+                lastPingSentAt = 0 // pong or any server message resets ping timeout
                 try {
                     scope.launch { handleIncoming(ws, text) }
                 } catch (e: Exception) {
@@ -1442,6 +1502,15 @@ object WebSocketManager {
 
             override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
                 Log.e("WebSocketManager", "WebSocket FAILURE", t)
+                
+                // Check if failure is due to 403 (ban/suspension)
+                // For 403, we don't reconnect - user session is cleared and they're sent to login
+                // After suspension ends, they can login again and establish a new connection
+                val is403 = r?.code == 403
+                if (is403) {
+                    Log.e("WebSocketManager", "WebSocket failed with 403 - account restricted")
+                    Log.e("WebSocketManager", "User session will be cleared. They can login again after restriction is lifted.")
+                }
 
                 // If connect() is still waiting, resume it with exception (exactly once)
                 try {
@@ -1452,14 +1521,34 @@ object WebSocketManager {
                     Log.w("WebSocketManager", "continuation resume onFailure failed", e)
                 }
 
-                // Clean up and schedule reconnect as before
+                // Clean up
                 forceCloseSocket()
                 readyState = ReadyState.NOT_READY
-                scheduleReconnect(++reconnectAttempt)
+                
+                // For 403, don't reconnect - session is cleared, user must login again
+                // This works for both ban (permanent) and suspension (temporary)
+                // After suspension ends, user can login and establish new connection
+                if (!is403) {
+                    scheduleReconnect(++reconnectAttempt)
+                } else {
+                    Log.e("WebSocketManager", "Not reconnecting - user must login again after restriction is lifted")
+                }
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.w("WebSocketManager", "WebSocket CLOSED: $code $reason")
+                
+                // Check if closure is due to authentication/authorization (code 1008 = policy violation)
+                // For ban/suspension, session is cleared and user is sent to login
+                // After suspension ends, they can login again and establish new connection
+                val isAuthFailure = code == 1008 || reason.contains("403", ignoreCase = true) ||
+                                   reason.contains("banned", ignoreCase = true) ||
+                                   reason.contains("suspended", ignoreCase = true)
+                
+                if (isAuthFailure) {
+                    Log.e("WebSocketManager", "WebSocket closed due to auth/ban/suspension")
+                    Log.e("WebSocketManager", "User session will be cleared. They can login again after restriction is lifted.")
+                }
 
                 // If connect() is still waiting, signal closed as failure
                 try {
@@ -1476,7 +1565,15 @@ object WebSocketManager {
 
                 forceCloseSocket()
                 readyState = ReadyState.NOT_READY
-                scheduleReconnect(++reconnectAttempt)
+                
+                // For auth failures, don't reconnect - session is cleared, user must login again
+                // This works for both ban (permanent) and suspension (temporary)
+                // After suspension ends, user can login and establish new connection
+                if (!isAuthFailure) {
+                    scheduleReconnect(++reconnectAttempt)
+                } else {
+                    Log.e("WebSocketManager", "Not reconnecting - user must login again after restriction is lifted")
+                }
             }
         }
     }
@@ -1736,6 +1833,7 @@ object WebSocketManager {
                 "pong" -> {
                     Log.d("WebSocketManager", "pong received")
                     lastServerMessageAt = System.currentTimeMillis()
+                    lastPingSentAt = 0 // clear ping timeout — pong received within window
                     return
                 }
                 "delivery_failed" -> {
@@ -1753,7 +1851,12 @@ object WebSocketManager {
                             } catch (e: Exception) {
                                 Log.e("WebSocketManager", "Failed to delete failed message", e)
                             }
-                            pendingQueue.removeIf { it.messageId == pm.messageId }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                pendingQueue.removeIf { it.messageId == pm.messageId }
+                            } else {
+                                val iter = pendingQueue.iterator()
+                                while (iter.hasNext()) { if (iter.next().messageId == pm.messageId) iter.remove() }
+                            }
                             withContext(Dispatchers.Main.immediate) {
                                 _events.emit(WebSocketEvent.DeliveryFailed(pm.messageId, reason))
                             }
@@ -1792,10 +1895,77 @@ object WebSocketManager {
                 "chat_open" -> {
                     val from = json.getString("from")
                     Log.e("WebSocketManager", "!!! RECEIVED chat_open from: $from !!!")
+                    activeChatSessions.add(from)
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.ChatOpen(from))
+                    }
                 }
                 "chat_close" -> {
                     val from = json.getString("from")
                     Log.e("WebSocketManager", "!!! RECEIVED chat_close from: $from !!!")
+                    activeChatSessions.remove(from)
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.ChatClose(from))
+                    }
+                }
+                "spark_left" -> {
+                    val from = json.getString("from")
+                    val senderUserId = json.getString("senderUserId")
+                    Log.e("WebSocketManager", "!!! RECEIVED spark_left from: $from (senderUserId: $senderUserId) !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SparkLeft(from, senderUserId))
+                    }
+                }
+                "spark_right" -> {
+                    val from = json.getString("from")
+                    val senderUserId = json.getString("senderUserId")
+                    Log.e("WebSocketManager", "!!! RECEIVED spark_right from: $from (senderUserId: $senderUserId) !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SparkRight(from, senderUserId))
+                    }
+                }
+                "spark_trigger" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED spark_trigger from: $from !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SparkTrigger(from))
+                    }
+                }
+                "rose_gifted" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED rose_gifted from: $from !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.RoseGifted(from))
+                    }
+                }
+                "rose_taken_back" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED rose_taken_back from: $from !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.RoseTakenBack(from))
+                    }
+                }
+                "warning_notification" -> {
+                    val message = json.getString("message")
+                    Log.e("WebSocketManager", "!!! RECEIVED warning_notification: $message !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.WarningNotification(message))
+                    }
+                }
+                "suspension_notification" -> {
+                    val message = json.getString("message")
+                    val remainingMinutes = json.optInt("remainingMinutes", 0)
+                    Log.e("WebSocketManager", "!!! RECEIVED suspension_notification: $message (remaining: $remainingMinutes min) !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SuspensionNotification(message, remainingMinutes))
+                    }
+                }
+                "ban_notification" -> {
+                    val message = json.getString("message")
+                    Log.e("WebSocketManager", "!!! RECEIVED ban_notification: $message !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.BanNotification(message))
+                    }
                 }
                 else -> {
                     // Unknown type — ignore or log
@@ -1817,7 +1987,11 @@ object WebSocketManager {
                     while (isActive) {
                         delay(HEARTBEAT_INTERVAL_MS)
                         try {
-                            webSocket?.send(JSONObject().put("type", "ping").toString())
+                            val sent = webSocket?.send(JSONObject().put("type", "ping").toString()) ?: false
+                            if (sent) {
+                                lastPingSentAt = System.currentTimeMillis()
+                                Log.d("WebSocketManager", "ping sent, awaiting pong within ${PING_PONG_TIMEOUT_MS}ms")
+                            }
                         } catch (e: Exception) {
                             Log.e("WebSocketManager", "heartbeat send failed", e)
                         }
@@ -1837,62 +2011,219 @@ object WebSocketManager {
     fun sendChatOpen(peerGmail: String) {
         ensureInit()
 
-        val payload = JSONObject().put("type", "chat_open").put("with", peerGmail).toString()
+        val messageId = "chat_open_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "chat_open")
+            .put("with", peerGmail)
+            .put("messageId", messageId)
+            .toString()
         
-        Log.e("WebSocketManager", "!!! SENDING chat_open to: $peerGmail !!!")
+        Log.e("WebSocketManager", "Sending chat_open to: $peerGmail")
 
-        val pm =
-                PendingMessage(
-                        "chat_open_${System.currentTimeMillis()}",
-                        payload,
-                        0,
-                        MessageState.QUEUED,
-                        0L,
-                        System.currentTimeMillis()
-                )
-
-        pendingQueue.add(pm)
-
+        // Send directly without queuing - chat_open is a presence signal, not a critical message
+        // No need to persist or wait for ack
         scope.launch {
             try {
-                dao.upsert(pm.toEntity())
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "chat_open sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send chat_open to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send chat_open - WebSocket not ready")
+                }
             } catch (e: Exception) {
-                Log.e("WebSocketManager", "Failed to persist chat_open pending message", e)
+                Log.e("WebSocketManager", "Exception sending chat_open", e)
             }
         }
-
-        flushPendingQueue()
     }
     
     @RequiresApi(Build.VERSION_CODES.N)
     fun sendChatClose(peerGmail: String) {
         ensureInit()
 
-        val payload = JSONObject().put("type", "chat_close").put("with", peerGmail).toString()
+        val messageId = "chat_close_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "chat_close")
+            .put("with", peerGmail)
+            .put("messageId", messageId)
+            .toString()
         
-        Log.e("WebSocketManager", "!!! SENDING chat_close to: $peerGmail !!!")
+        Log.e("WebSocketManager", "Sending chat_close to: $peerGmail")
 
-        val pm =
-                PendingMessage(
-                        "chat_close_${System.currentTimeMillis()}",
-                        payload,
-                        0,
-                        MessageState.QUEUED,
-                        0L,
-                        System.currentTimeMillis()
-                )
-
-        pendingQueue.add(pm)
-
+        // Send directly without queuing - chat_close is a presence signal, not a critical message
+        // No need to persist or wait for ack
         scope.launch {
             try {
-                dao.upsert(pm.toEntity())
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "chat_close sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send chat_close to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send chat_close - WebSocket not ready")
+                }
             } catch (e: Exception) {
-                Log.e("WebSocketManager", "Failed to persist chat_close pending message", e)
+                Log.e("WebSocketManager", "Exception sending chat_close", e)
             }
         }
+    }
 
-        flushPendingQueue()
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendSparkLeft(peerGmail: String, senderUserId: String) {
+        ensureInit()
+
+        val messageId = "spark_left_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "spark_left")
+            .put("to", peerGmail)
+            .put("senderUserId", senderUserId)
+            .put("messageId", messageId)
+            .toString()
+        
+        Log.e("WebSocketManager", "Sending spark_left to: $peerGmail (from: $senderUserId)")
+
+        // Send directly without queuing - spark events are presence signals
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "spark_left sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send spark_left to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send spark_left - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending spark_left", e)
+            }
+        }
+    }
+    
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendSparkRight(peerGmail: String, senderUserId: String) {
+        ensureInit()
+
+        val messageId = "spark_right_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "spark_right")
+            .put("to", peerGmail)
+            .put("senderUserId", senderUserId)
+            .put("messageId", messageId)
+            .toString()
+        
+        Log.e("WebSocketManager", "Sending spark_right to: $peerGmail (from: $senderUserId)")
+
+        // Send directly without queuing - spark events are presence signals
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "spark_right sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send spark_right to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send spark_right - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending spark_right", e)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendSparkTrigger(peerGmail: String, senderGmail: String) {
+        ensureInit()
+        val messageId = "spark_trigger_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "spark_trigger")
+            .put("to", peerGmail)
+            .put("from", senderGmail)
+            .put("messageId", messageId)
+            .toString()
+        Log.e("WebSocketManager", "Sending spark_trigger to: $peerGmail (from: $senderGmail)")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "spark_trigger sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send spark_trigger to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send spark_trigger - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending spark_trigger", e)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendRoseGifted(peerGmail: String, senderGmail: String) {
+        ensureInit()
+        val messageId = "rose_gifted_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "rose_gifted")
+            .put("to", peerGmail)
+            .put("from", senderGmail)
+            .put("messageId", messageId)
+            .toString()
+        Log.e("WebSocketManager", "Sending rose_gifted to: $peerGmail (from: $senderGmail)")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "rose_gifted sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send rose_gifted to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send rose_gifted - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending rose_gifted", e)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendRoseTakenBack(peerGmail: String, senderGmail: String) {
+        ensureInit()
+        val messageId = "rose_taken_back_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "rose_taken_back")
+            .put("to", peerGmail)
+            .put("from", senderGmail)
+            .put("messageId", messageId)
+            .toString()
+        Log.e("WebSocketManager", "Sending rose_taken_back to: $peerGmail (from: $senderGmail)")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "rose_taken_back sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send rose_taken_back to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send rose_taken_back - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending rose_taken_back", e)
+            }
+        }
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
@@ -1947,7 +2278,6 @@ object WebSocketManager {
        FLUSH QUEUE
        Only send QUEUED messages. After ws.send succeeds we mark IN_FLIGHT and set lastSentAt.
     --------------------------------------------------- */
-    @RequiresApi(Build.VERSION_CODES.N)
     private fun flushPendingQueue() {
         Log.e(
                 "WebSocketManager",
@@ -2032,7 +2362,12 @@ object WebSocketManager {
                             "WebSocketManager",
                             "[TRACE] flushPendingQueue() removing ${msg.messageId} from pendingQueue"
                     )
-                    pendingQueue.removeIf { it.messageId == msg.messageId }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        pendingQueue.removeIf { it.messageId == msg.messageId }
+                    } else {
+                        val iter = pendingQueue.iterator()
+                        while (iter.hasNext()) { if (iter.next().messageId == msg.messageId) iter.remove() }
+                    }
                     Log.e(
                             "WebSocketManager",
                             "[TRACE] flushPendingQueue() emitting DeliveryFailed event"
@@ -2144,13 +2479,19 @@ object WebSocketManager {
        REMOVE MESSAGE
        Only remove on delivery_ack or when permanently failed
     --------------------------------------------------- */
-    @RequiresApi(Build.VERSION_CODES.N)
     private fun removeFromQueue(messageId: String) {
         Log.e(
                 "WebSocketManager",
                 "[TRACE] removeFromQueue() ENTRY → messageId=$messageId, pendingQueue.size=${pendingQueue.size}"
         )
-        val removed = pendingQueue.removeIf { it.messageId == messageId }
+        val removed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            pendingQueue.removeIf { it.messageId == messageId }
+        } else {
+            var found = false
+            val iter = pendingQueue.iterator()
+            while (iter.hasNext()) { if (iter.next().messageId == messageId) { iter.remove(); found = true } }
+            found
+        }
         Log.e(
                 "WebSocketManager",
                 "[TRACE] removeFromQueue() removed from queue=$removed, new pendingQueue.size=${pendingQueue.size}"

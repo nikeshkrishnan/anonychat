@@ -301,7 +301,10 @@ class BirdBubbleService : Service() {
                                 preferredAgeRange = match.preferredAgeRange,
                                 random = match.random,
                                 isOnline = match.isOnline,
-                                lastOnline = match.lastOnline
+                                lastOnline = match.lastOnline,
+                                sparks = null,
+                                totalRosesReceived = null,
+                                availableRoses = null
                         )
                 val matchedPrefsJson = gson.toJson(matchedPrefsData)
 

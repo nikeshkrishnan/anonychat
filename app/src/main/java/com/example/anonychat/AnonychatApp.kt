@@ -3,6 +3,7 @@ package com.example.anonychat
 import android.app.Application
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.ui.ConversationRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -14,7 +15,12 @@ class AnonychatApp : Application() {
 
         NetworkClient.initialize(this)
 
+        // Load persisted conversation list from app storage
+        ConversationRepository.initialize(this)
+
         // Initialize WebSocketManager in background to avoid blocking main thread
-        CoroutineScope(Dispatchers.IO).launch { WebSocketManager.init(applicationContext) }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            CoroutineScope(Dispatchers.IO).launch { WebSocketManager.init(applicationContext) }
+        }
     }
 }

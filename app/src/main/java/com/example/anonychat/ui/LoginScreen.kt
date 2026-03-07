@@ -110,6 +110,10 @@ import kotlinx.coroutines.withTimeout
 @Composable
 fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
     val context = LocalContext.current
+    
+    // State for 403 error dialog
+    var show403Dialog by remember { mutableStateOf(false) }
+    var error403Message by remember { mutableStateOf("") }
 
     // Detect IME (keyboard) visibility
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -553,10 +557,22 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                                         }
                                                     }
                                                 } else {
-                                                    val error = response.errorBody()?.string() ?: "Unknown error"
+                                                    val errorBody = response.errorBody()?.string() ?: "Unknown error"
                                                     withContext(Dispatchers.Main) {
                                                         isLoading = false
-                                                        Toast.makeText(context, "Login failed: ${response.code()} $error", Toast.LENGTH_LONG).show()
+                                                        
+                                                        // Handle 403 specifically (ban/suspension)
+                                                        if (response.code() == 403) {
+                                                            try {
+                                                                val json = org.json.JSONObject(errorBody)
+                                                                error403Message = json.optString("message", "Your account has been restricted")
+                                                            } catch (e: Exception) {
+                                                                error403Message = "Your account has been restricted"
+                                                            }
+                                                            show403Dialog = true
+                                                        } else {
+                                                            Toast.makeText(context, "Login failed: ${response.code()} $errorBody", Toast.LENGTH_LONG).show()
+                                                        }
                                                     }
                                                 }
                                             } catch (e: Exception) {
@@ -861,6 +877,20 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
 
         // LAYER 3: SHARED LOADING OVERLAY
         LoadingHeartOverlay(isLoading = isLoading)
+        
+        // LAYER 4: 403 ERROR DIALOG
+        if (show403Dialog) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { show403Dialog = false },
+                title = { Text("🚫 Account Restricted") },
+                text = { Text(error403Message) },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { show403Dialog = false }) {
+                        Text("OK")
+                    }
+                }
+            )
+        }
     }
 }
 
