@@ -118,6 +118,9 @@ interface ChatHistoryDao {
 
     @Query("SELECT status FROM chat_history WHERE id = :messageId")
     suspend fun getStatus(messageId: String): String?
+    
+    @Query("DELETE FROM chat_history WHERE (fromEmail = :user1 AND toEmail = :user2) OR (fromEmail = :user2 AND toEmail = :user1)")
+    suspend fun deleteChatHistory(user1: String, user2: String)
 }
 
 class Converters {
@@ -1504,12 +1507,23 @@ object WebSocketManager {
                 Log.e("WebSocketManager", "WebSocket FAILURE", t)
                 
                 // Check if failure is due to 403 (ban/suspension)
-                // For 403, we don't reconnect - user session is cleared and they're sent to login
-                // After suspension ends, they can login again and establish a new connection
                 val is403 = r?.code == 403
                 if (is403) {
-                    Log.e("WebSocketManager", "WebSocket failed with 403 - account restricted")
-                    Log.e("WebSocketManager", "User session will be cleared. They can login again after restriction is lifted.")
+                    Log.e("WebSocketManager", "WebSocket failed with 403 - account may be restricted")
+                    
+                    // Try to parse response to check if it's a permanent ban
+                    val responseBody = r?.peekBody(Long.MAX_VALUE)?.string()
+                    val isPermanentBan = responseBody?.contains("permanently banned", ignoreCase = true) == true ||
+                                        responseBody?.contains("permanent ban", ignoreCase = true) == true
+                    
+                    if (isPermanentBan) {
+                        Log.e("WebSocketManager", "Permanent ban detected - clearing session and stopping reconnects")
+                        // Clear session for permanent ban
+                        val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().clear().apply()
+                    } else {
+                        Log.e("WebSocketManager", "Temporary restriction or suspension - will keep trying to reconnect")
+                    }
                 }
 
                 // If connect() is still waiting, resume it with exception (exactly once)
@@ -1525,29 +1539,35 @@ object WebSocketManager {
                 forceCloseSocket()
                 readyState = ReadyState.NOT_READY
                 
-                // For 403, don't reconnect - session is cleared, user must login again
-                // This works for both ban (permanent) and suspension (temporary)
-                // After suspension ends, user can login and establish new connection
-                if (!is403) {
-                    scheduleReconnect(++reconnectAttempt)
-                } else {
-                    Log.e("WebSocketManager", "Not reconnecting - user must login again after restriction is lifted")
-                }
+                // Always schedule reconnect - even for 403
+                // This allows reconnection after temporary suspensions end
+                // For permanent bans, session is cleared so reconnect will fail at auth check
+                scheduleReconnect(++reconnectAttempt)
+                Log.e("WebSocketManager", "Scheduled reconnect attempt #${reconnectAttempt}")
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.w("WebSocketManager", "WebSocket CLOSED: $code $reason")
                 
-                // Check if closure is due to authentication/authorization (code 1008 = policy violation)
-                // For ban/suspension, session is cleared and user is sent to login
-                // After suspension ends, they can login again and establish new connection
+                // Check if closure is due to authentication/authorization
                 val isAuthFailure = code == 1008 || reason.contains("403", ignoreCase = true) ||
                                    reason.contains("banned", ignoreCase = true) ||
                                    reason.contains("suspended", ignoreCase = true)
                 
                 if (isAuthFailure) {
                     Log.e("WebSocketManager", "WebSocket closed due to auth/ban/suspension")
-                    Log.e("WebSocketManager", "User session will be cleared. They can login again after restriction is lifted.")
+                    
+                    // Check if it's a permanent ban
+                    val isPermanentBan = reason.contains("permanently banned", ignoreCase = true) ||
+                                        reason.contains("permanent ban", ignoreCase = true)
+                    
+                    if (isPermanentBan) {
+                        Log.e("WebSocketManager", "Permanent ban detected - clearing session")
+                        val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().clear().apply()
+                    } else {
+                        Log.e("WebSocketManager", "Temporary restriction - will keep trying to reconnect")
+                    }
                 }
 
                 // If connect() is still waiting, signal closed as failure
@@ -1566,14 +1586,11 @@ object WebSocketManager {
                 forceCloseSocket()
                 readyState = ReadyState.NOT_READY
                 
-                // For auth failures, don't reconnect - session is cleared, user must login again
-                // This works for both ban (permanent) and suspension (temporary)
-                // After suspension ends, user can login and establish new connection
-                if (!isAuthFailure) {
-                    scheduleReconnect(++reconnectAttempt)
-                } else {
-                    Log.e("WebSocketManager", "Not reconnecting - user must login again after restriction is lifted")
-                }
+                // Always schedule reconnect - even for auth failures
+                // This allows reconnection after temporary suspensions end
+                // For permanent bans, session is cleared so reconnect will fail at auth check
+                scheduleReconnect(++reconnectAttempt)
+                Log.e("WebSocketManager", "Scheduled reconnect attempt #${reconnectAttempt}")
             }
         }
     }
@@ -2604,6 +2621,17 @@ object WebSocketManager {
 
     fun updateMessageStatus(messageId: String, status: com.example.anonychat.ui.MessageStatus) {
         scope.launch { historyDao.updateStatus(messageId, status.name) }
+    }
+    
+    fun deleteChatHistory(user1: String, user2: String) {
+        scope.launch {
+            try {
+                historyDao.deleteChatHistory(user1, user2)
+                Log.d("WebSocketManager", "Deleted chat history between $user1 and $user2")
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to delete chat history", e)
+            }
+        }
     }
 
     fun getChatHistory(

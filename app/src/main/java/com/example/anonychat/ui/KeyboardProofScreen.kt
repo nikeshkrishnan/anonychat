@@ -2675,6 +2675,9 @@ fun KeyboardProofScreen(
                                                     // Remove from conversation list
                                                     ConversationRepository.remove(matchedUserGmail)
                                                     
+                                                    // Delete chat history from Room database
+                                                    WebSocketManager.deleteChatHistory(myEmail, matchedUserGmail)
+                                                    
                                                     Toast.makeText(context, "User blocked and chat deleted", Toast.LENGTH_SHORT).show()
                                                     
                                                     // Navigate back to ChatScreen
@@ -2713,6 +2716,9 @@ fun KeyboardProofScreen(
                                                 
                                                 // Remove from conversation list
                                                 ConversationRepository.remove(matchedUserGmail)
+                                                
+                                                // Delete chat history from Room database
+                                                WebSocketManager.deleteChatHistory(myEmail, matchedUserGmail)
                                                 
                                                 Toast.makeText(context, "Chat deleted successfully", Toast.LENGTH_SHORT).show()
                                                 

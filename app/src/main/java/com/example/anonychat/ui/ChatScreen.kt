@@ -333,6 +333,7 @@ fun ChatScreen(
 
         var searchQuery by remember { mutableStateOf("") }
         val context = LocalContext.current
+        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
         // Initialize ConversationRepository with context and load persisted data
         LaunchedEffect(Unit) {
@@ -341,6 +342,13 @@ fun ChatScreen(
 
         // Use the singleton repository so the list persists across navigation
         val conversationList = ConversationRepository.conversations
+        
+        // Auto-scroll to top when conversation list changes (new message arrives)
+        LaunchedEffect(conversationList.size, conversationList.firstOrNull()?.lastMessageTimestamp) {
+                if (conversationList.isNotEmpty() && searchQuery.isBlank()) {
+                        listState.animateScrollToItem(0)
+                }
+        }
 
         val scope = rememberCoroutineScope() // <--- ADD THIS LINE
         val userPrefsForCounts = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
@@ -764,12 +772,15 @@ fun ChatScreen(
                         }
 
                         // --- Floating Glassy Card for Search and List ---
-                        val filteredConversations = if (searchQuery.isBlank()) {
-                            conversationList
-                        } else {
-                            conversationList.filter {
-                                it.username.contains(searchQuery, ignoreCase = true) ||
-                                it.userEmail.contains(searchQuery, ignoreCase = true)
+                        // Force recomposition by observing the list content, not just size
+                        val filteredConversations = remember(conversationList.toList(), searchQuery) {
+                            if (searchQuery.isBlank()) {
+                                conversationList.toList()
+                            } else {
+                                conversationList.filter {
+                                    it.username.contains(searchQuery, ignoreCase = true) ||
+                                    it.userEmail.contains(searchQuery, ignoreCase = true)
+                                }
                             }
                         }
 
@@ -848,7 +859,10 @@ fun ChatScreen(
                                         }
 
                                         // --- CONVERSATION LIST ---
-                                        LazyColumn(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                        LazyColumn(
+                                                state = listState,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
                                                 items(filteredConversations, key = { it.userEmail }) { entry ->
                                                         ConversationListItem(
                                                                 entry = entry,
