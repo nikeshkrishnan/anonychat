@@ -357,6 +357,7 @@ fun KeyboardProofScreen(
         matchedUser: User,
         matchedUserPrefs: Preferences,
         matchedUserGmail: String, // <-- NEW: recipient's gmail/email for sending & filtering
+        navController: androidx.navigation.NavController,
         onBack: () -> Unit,
         initialMessages: List<ChatMessage> = emptyList(),
         forceDarkTheme: Boolean? = null,
@@ -1375,7 +1376,17 @@ fun KeyboardProofScreen(
                                 }
                                 Spacer(Modifier.width(8.dp))
 
-                                Box(modifier = Modifier.size(46.dp)) {
+                                Box(
+                                    modifier = Modifier.size(46.dp)
+                                        .clickable {
+                                            // Navigate to target user's ratings screen
+                                            navController.navigate(
+                                                "ratings?email=${matchedUserGmail}&username=${matchedUser.username}" +
+                                                "&gender=${matchedUserPrefs.gender}&romanceMin=${matchedUserPrefs.romanceMin}" +
+                                                "&romanceMax=${matchedUserPrefs.romanceMax}"
+                                            )
+                                        }
+                                ) {
                                     Surface(
                                             shape = CircleShape,
                                             color = avatarRingColor,
@@ -1426,7 +1437,16 @@ fun KeyboardProofScreen(
 
                                 Spacer(Modifier.width(12.dp))
                                 Spacer(Modifier.width(12.dp))
-                                Column {
+                                Column(
+                                    modifier = Modifier.clickable {
+                                        // Navigate to target user's ratings screen
+                                        navController.navigate(
+                                            "ratings?email=${matchedUserGmail}&username=${matchedUser.username}" +
+                                            "&gender=${matchedUserPrefs.gender}&romanceMin=${matchedUserPrefs.romanceMin}" +
+                                            "&romanceMax=${matchedUserPrefs.romanceMax}"
+                                        )
+                                    }
+                                ) {
                                     // Username with Roses and Sparks on same line
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         // For testing: uncomment the line below and comment the line after it

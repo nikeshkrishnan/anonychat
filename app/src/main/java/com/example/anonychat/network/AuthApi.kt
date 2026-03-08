@@ -259,6 +259,33 @@ data class DeleteAllMatchesResponse(
         val deleted: Boolean
 )
 
+// --- RATING DATA MODELS ---
+data class Rating(
+        val rating: Int,
+        val comment: String?,
+        val fromusername: String?,
+        val fromgender: String?,
+        val createdAt: String,  // ISO 8601 date string from backend
+        val romanceRange: RomanceRange?,
+        val random: Boolean?
+)
+
+data class AverageRatingResponse(
+        val avgRating: Float?,
+        val count: Int?
+)
+
+data class SubmitRatingRequest(
+        val rating: Int,
+        val comment: String?,
+        val romanceRange: RomanceRange,
+        val random: Boolean
+)
+
+data class SubmitRatingResponse(
+        val message: String?
+)
+
 // --- API INTERFACE ---
 interface AuthApiService {
         @Headers("Content-Type: application/json")
@@ -330,6 +357,24 @@ interface AuthApiService {
 
         @DELETE("/api/match/all/{gmail}")
         suspend fun deleteAllMatches(@Path("gmail") gmail: String): Response<DeleteAllMatchesResponse>
+
+        @GET("/rating/{email}")
+        suspend fun getRatings(@Path("email") email: String): Response<List<Rating>>
+
+        @GET("/rating/average/{email}")
+        suspend fun getAverageRating(@Path("email") email: String): Response<AverageRatingResponse>
+        
+        @GET("/rating/from/{fromEmail}/to/{toEmail}")
+        suspend fun getSpecificRating(
+                @Path("fromEmail") fromEmail: String,
+                @Path("toEmail") toEmail: String
+        ): Response<Rating>
+        
+        @POST("/rating/{email}")
+        suspend fun submitRating(
+                @Path("email") targetEmail: String,
+                @Body request: SubmitRatingRequest
+        ): Response<SubmitRatingResponse>
 }
 
 // --- NETWORK CLIENT (SINGLETON) ---

@@ -404,10 +404,7 @@ object WebSocketManager {
                             }
                         }
                     }
-                    .pingInterval(
-                            30,
-                            java.util.concurrent.TimeUnit.SECONDS
-                    ) // Keep connection alive
+                    // Removed OkHttp's built-in pingInterval to avoid conflict with custom JSON ping/pong
                     .protocols(listOf(Protocol.HTTP_1_1)) // Force HTTP/1.1
                     .addInterceptor(
                             HttpLoggingInterceptor { message ->
@@ -1359,7 +1356,13 @@ object WebSocketManager {
                 scope.launch {
                     while (isActive && readyState != ReadyState.READY) {
                         try {
-                            webSocket?.send(JSONObject().put("type", "is_ready").toString())
+                            val readyMsg = JSONObject().put("type", "is_ready").toString()
+                            val sent = webSocket?.send(readyMsg) ?: false
+                            if (sent) {
+                                Log.d("WebSocketManager", "is_ready sent: $readyMsg")
+                            } else {
+                                Log.w("WebSocketManager", "is_ready send returned false")
+                            }
                         } catch (e: Exception) {
                             Log.e("WebSocketManager", "ready handshake send failed", e)
                         }
@@ -1479,7 +1482,7 @@ object WebSocketManager {
                 lastPingSentAt = 0 // clear stale ping state from any previous connection
                 startReadyHandshake()
                 startLivenessMonitor() // Monitor server liveness and reconnect if silent
-                startHeartbeat()
+                // Note: startHeartbeat() is called after ready_ack is received (line 1648)
                 startAckMonitor()
 
                 // resume connect() once (if provided)
@@ -1494,6 +1497,7 @@ object WebSocketManager {
 
             @RequiresApi(Build.VERSION_CODES.N)
             override fun onMessage(ws: WebSocket, text: String) {
+                Log.d("WebSocketManager", "<<< Received message: $text")
                 lastServerMessageAt = System.currentTimeMillis()
                 lastPingSentAt = 0 // pong or any server message resets ping timeout
                 try {

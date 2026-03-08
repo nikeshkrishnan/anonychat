@@ -68,7 +68,21 @@ sealed class Screen(val route: String) {
             return "profile/$username"
         }
     }
-    object Ratings : Screen("ratings")
+    object Ratings : Screen("ratings?email={email}&username={username}&gender={gender}&romanceMin={romanceMin}&romanceMax={romanceMax}") {
+        fun createRoute(
+            email: String? = null,
+            username: String? = null,
+            gender: String? = null,
+            romanceMin: Float? = null,
+            romanceMax: Float? = null
+        ): String {
+            return if (email != null && username != null) {
+                "ratings?email=$email&username=$username&gender=${gender ?: "male"}&romanceMin=${romanceMin ?: 1f}&romanceMax=${romanceMax ?: 5f}"
+            } else {
+                "ratings"
+            }
+        }
+    }
 
     object DirectChat : Screen("directChat/{currentUser}/{myPrefs}/{matchedUser}/{matchedPrefs}/{isNewMatch}") {
         fun createRoute(
@@ -606,6 +620,7 @@ class MainActivity : ComponentActivity() {
                         matchedUser = matchedUser,
                         matchedUserPrefs = matchedPrefs,
                         matchedUserGmail = matchedUser.id,
+                        navController = navController,
                         isNewMatch = isNewMatch,
                         onBack = { navController.popBackStack() }
                 )
@@ -619,7 +634,51 @@ class MainActivity : ComponentActivity() {
                 ProfileScreen(navController = navController, initialUsername = username)
             }
 
-            composable(Screen.Ratings.route) { RatingsScreen(navController = navController) }
+            composable(
+                Screen.Ratings.route,
+                arguments = listOf(
+                    navArgument("email") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("username") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("gender") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("romanceMin") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("romanceMax") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    }
+                )
+            ) { backStackEntry ->
+                val email = backStackEntry.arguments?.getString("email")
+                val username = backStackEntry.arguments?.getString("username")
+                val gender = backStackEntry.arguments?.getString("gender")
+                val romanceMin = backStackEntry.arguments?.getString("romanceMin")?.toFloatOrNull()
+                val romanceMax = backStackEntry.arguments?.getString("romanceMax")?.toFloatOrNull()
+                
+                RatingsScreen(
+                    navController = navController,
+                    targetUserEmail = email,
+                    targetUsername = username,
+                    targetGender = gender,
+                    targetRomanceMin = romanceMin,
+                    targetRomanceMax = romanceMax
+                )
+            }
         }
     }
 }

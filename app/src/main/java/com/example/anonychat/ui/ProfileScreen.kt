@@ -90,8 +90,8 @@ fun ProfileScreen(
     var roses by remember { mutableStateOf(userPrefs.getInt("roses", 0)) }
     var sparks by remember { mutableStateOf(userPrefs.getInt("sparks_self", 0)) }
     var giftsLeft by remember { mutableStateOf(userPrefs.getInt("available_roses", 0)) }
-    var rating by remember { mutableStateOf(4.6f) }
-    var ratingCount by remember { mutableStateOf(128) }
+    var rating by remember { mutableStateOf(userPrefs.getFloat("user_rating", 0f)) }
+    var ratingCount by remember { mutableStateOf(userPrefs.getInt("user_rating_count", 0)) }
     var isRandomMatch by remember { mutableStateOf(userPrefs.getBoolean("random_match", true)) }
     var username by remember { mutableStateOf(initialUsername) }
     var gender by remember { mutableStateOf(userPrefs.getString("gender", "male") ?: "male") }
@@ -180,6 +180,61 @@ fun ProfileScreen(
                 }
             } else {
                 android.util.Log.w("ProfilePrefs", "User email not found in SharedPreferences, cannot fetch.")
+            }
+        }
+
+        // --- FETCH RATINGS FROM SERVER ON LOAD ---
+        LaunchedEffect(Unit) {
+            val userEmail = userPrefs.getString("user_email", null)
+            if (userEmail != null) {
+                android.util.Log.d("ProfileRatings", "Fetching ratings for $userEmail")
+                try {
+                    val avgResponse = NetworkClient.api.getAverageRating(userEmail)
+                    if (avgResponse.isSuccessful && avgResponse.body() != null) {
+                        val avgData = avgResponse.body()!!
+                        rating = avgData.avgRating ?: 0f
+                        ratingCount = avgData.count ?: 0
+                        android.util.Log.d("ProfileRatings", "Fetched ratings: avg=$rating, count=$ratingCount")
+                    } else {
+                        android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${avgResponse.code()}")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ProfileRatings", "Error fetching ratings: ${e.message}")
+                }
+            } else {
+                android.util.Log.w("ProfileRatings", "User email not found, cannot fetch ratings.")
+            }
+        }
+
+        // --- FETCH RATINGS FROM SERVER ON LOAD ---
+        LaunchedEffect(Unit) {
+            val userEmail = userPrefs.getString("user_email", null)
+            if (userEmail != null) {
+                android.util.Log.d("ProfileRatings", "Fetching ratings for $userEmail")
+                try {
+                    // Fetch average rating
+                    val avgResponse = NetworkClient.api.getAverageRating(userEmail)
+                    if (avgResponse.isSuccessful && avgResponse.body() != null) {
+                        val avgData = avgResponse.body()!!
+                        avgData.avgRating?.let {
+                            rating = it
+                            // Persist to SharedPreferences
+                            userPrefs.edit().putFloat("user_rating", it).apply()
+                        }
+                        avgData.count?.let {
+                            ratingCount = it
+                            // Persist to SharedPreferences
+                            userPrefs.edit().putInt("user_rating_count", it).apply()
+                        }
+                        android.util.Log.d("ProfileRatings", "Fetched and persisted average rating: $rating, count: $ratingCount")
+                    } else {
+                        android.util.Log.e("ProfileRatings", "Failed to fetch average rating: ${avgResponse.errorBody()?.string()}")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ProfileRatings", "Error fetching ratings: ${e.message}")
+                }
+            } else {
+                android.util.Log.w("ProfileRatings", "User email not found in SharedPreferences")
             }
         }
 
