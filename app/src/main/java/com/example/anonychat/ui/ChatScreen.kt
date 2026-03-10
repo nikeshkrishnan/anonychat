@@ -1,12 +1,14 @@
 package com.example.anonychat.ui
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.drawable.Animatable2
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.Crossfade
@@ -83,6 +85,7 @@ import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
+import com.example.anonychat.service.ChatSocketService
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.example.anonychat.model.Preferences
@@ -338,6 +341,14 @@ fun ChatScreen(
         // Initialize ConversationRepository with context and load persisted data
         LaunchedEffect(Unit) {
                 ConversationRepository.initialize(context)
+                
+                // Start ChatSocketService if not already running
+                try {
+                    val intent = Intent(context, ChatSocketService::class.java)
+                    ContextCompat.startForegroundService(context, intent)
+                } catch (e: Exception) {
+                    Log.e("ChatScreen", "Failed to start ChatSocketService", e)
+                }
         }
 
         // Use the singleton repository so the list persists across navigation

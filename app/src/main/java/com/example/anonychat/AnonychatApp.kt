@@ -4,6 +4,7 @@ import android.app.Application
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketManager
 import com.example.anonychat.ui.ConversationRepository
+import com.example.anonychat.utils.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -14,6 +15,9 @@ class AnonychatApp : Application() {
         super.onCreate()
 
         NetworkClient.initialize(this)
+
+        // Initialize notification channel for chat messages
+        NotificationHelper.createNotificationChannel(this)
 
         // Load persisted conversation list from app storage
         ConversationRepository.initialize(this)

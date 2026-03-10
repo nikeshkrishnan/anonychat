@@ -15,6 +15,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.anonychat.AppVisibility
 import com.example.anonychat.ui.ChatMessage
+import com.example.anonychat.utils.ActiveChatTracker
+import com.example.anonychat.utils.NotificationHelper
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -183,6 +185,8 @@ sealed class WebSocketEvent {
     data class RoseGifted(val from: String) : WebSocketEvent()
     data class RoseTakenBack(val from: String) : WebSocketEvent()
     data class SparkTrigger(val from: String) : WebSocketEvent()
+    data class SparkStart(val from: String) : WebSocketEvent()
+    data class SparkReceivedAck(val from: String) : WebSocketEvent()
     data class WarningNotification(val message: String) : WebSocketEvent()
     data class SuspensionNotification(val message: String, val remainingMinutes: Int) : WebSocketEvent()
     data class BanNotification(val message: String) : WebSocketEvent()
@@ -241,6 +245,62 @@ object WebSocketManager {
     
     fun isUserInChatWithUs(userEmail: String): Boolean {
         return activeChatSessions.contains(userEmail)
+    }
+    
+    /**
+     * Check if we should show a notification for a message from a specific user
+     */
+    private fun shouldShowNotification(fromEmail: String): Boolean {
+        // Don't show notification if app is in foreground AND user is viewing this chat
+        val isInForeground = AppVisibility.isForeground
+        val isViewingThisChat = ActiveChatTracker.isChatActive(fromEmail)
+        
+        val shouldShow = !isInForeground || !isViewingThisChat
+        
+        Log.d("WebSocketManager", "shouldShowNotification for $fromEmail: $shouldShow (foreground=$isInForeground, viewingChat=$isViewingThisChat)")
+        
+        return shouldShow
+    }
+    
+    /**
+     * Trigger notification for a new message
+     */
+    private suspend fun triggerNotification(message: ChatMessage) {
+        try {
+            // Fetch sender's username and preferences
+            val response = NetworkClient.api.getPreferences(message.from)
+            
+            if (response.isSuccessful) {
+                val prefsResponse = response.body()
+                val username = prefsResponse?.username ?: message.from.substringBefore("@")
+                
+                // Create Preferences object from response
+                val senderPreferences = com.example.anonychat.model.Preferences(
+                    romanceMin = prefsResponse?.romanceRange?.min?.toFloat() ?: 1f,
+                    romanceMax = prefsResponse?.romanceRange?.max?.toFloat() ?: 5f,
+                    gender = prefsResponse?.gender ?: "male",
+                    isOnline = prefsResponse?.isOnline ?: false,
+                    lastSeen = prefsResponse?.lastOnline ?: 0L
+                )
+                
+                // Get current user email from WebSocket request
+                val localEmail = webSocket?.request()?.url?.queryParameter("gmail") ?: ""
+                
+                NotificationHelper.showMessageNotification(
+                    appContext,
+                    message,
+                    username,
+                    senderPreferences,
+                    localEmail
+                )
+                
+                Log.d("WebSocketManager", "Notification triggered for message from $username")
+            } else {
+                Log.e("WebSocketManager", "Failed to fetch user preferences for notification: ${response.code()}")
+            }
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Error triggering notification", e)
+        }
     }
 
     private fun getEventListener(requestId: String): EventListener {
@@ -1772,6 +1832,13 @@ object WebSocketManager {
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.NewMessage(chatMessage))
                     }
+                    
+                    // Trigger notification if appropriate
+                    if (shouldShowNotification(chatMessage.from)) {
+                        scope.launch {
+                            triggerNotification(chatMessage)
+                        }
+                    }
 
                     val shouldAutoDownload =
                             contentType.startsWith("audio") || contentType == "image/gif"
@@ -1812,6 +1879,14 @@ object WebSocketManager {
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.NewMessage(chatMessage))
                     }
+                    
+                    // Trigger notification if appropriate
+                    if (shouldShowNotification(chatMessage.from)) {
+                        scope.launch {
+                            triggerNotification(chatMessage)
+                        }
+                    }
+                    
                     sendMessageReceivedAck(messageId, json.getString("from"))
                 }
                 "message_delivered" -> {
@@ -1950,6 +2025,20 @@ object WebSocketManager {
                     Log.e("WebSocketManager", "!!! RECEIVED spark_trigger from: $from !!!")
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.SparkTrigger(from))
+                    }
+                }
+                "spark_start" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED spark_start from: $from !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SparkStart(from))
+                    }
+                }
+                "spark_received_ack" -> {
+                    val from = json.getString("from")
+                    Log.e("WebSocketManager", "!!! RECEIVED spark_received_ack from: $from !!!")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SparkReceivedAck(from))
                     }
                 }
                 "rose_gifted" -> {
@@ -2185,6 +2274,64 @@ object WebSocketManager {
                 }
             } catch (e: Exception) {
                 Log.e("WebSocketManager", "Exception sending spark_trigger", e)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendSparkStart(peerGmail: String, senderGmail: String) {
+        ensureInit()
+        val messageId = "spark_start_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "spark_start")
+            .put("to", peerGmail)
+            .put("from", senderGmail)
+            .put("messageId", messageId)
+            .toString()
+        Log.e("WebSocketManager", "Sending spark_start to: $peerGmail (from: $senderGmail)")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "spark_start sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send spark_start to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send spark_start - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending spark_start", e)
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun sendSparkReceivedAck(peerGmail: String, senderGmail: String) {
+        ensureInit()
+        val messageId = "spark_received_ack_${System.currentTimeMillis()}"
+        val payload = JSONObject()
+            .put("type", "spark_received_ack")
+            .put("to", peerGmail)
+            .put("from", senderGmail)
+            .put("messageId", messageId)
+            .toString()
+        Log.e("WebSocketManager", "Sending spark_received_ack to: $peerGmail (from: $senderGmail)")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "spark_received_ack sent successfully to $peerGmail")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send spark_received_ack to $peerGmail")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send spark_received_ack - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending spark_received_ack", e)
             }
         }
     }

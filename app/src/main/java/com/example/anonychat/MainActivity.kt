@@ -534,7 +534,22 @@ class MainActivity : ComponentActivity() {
         // --- Handle intent from the service to navigate to ChatScreen ---
         LaunchedEffect(intent) { handleIntentNavigation(navController, intent) }
 
-        NavHost(navController = navController, startDestination = Screen.Login.route) {
+        // Determine start destination based on login status
+        val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val isLoggedIn = prefs.getString("access_token", null) != null
+        val userEmail = prefs.getString("user_email", null)
+        val username = prefs.getString("username", null)
+        
+        val startDestination = if (isLoggedIn && userEmail != null && username != null) {
+            // User is logged in, start at ChatScreen
+            val user = User(userEmail, username, null)
+            Screen.Chat.createRoute(user)
+        } else {
+            // User not logged in, start at LoginScreen
+            Screen.Login.route
+        }
+
+        NavHost(navController = navController, startDestination = startDestination) {
             composable(Screen.Login.route) {
                 LoginScreen(
                         onLoginClick = { user ->

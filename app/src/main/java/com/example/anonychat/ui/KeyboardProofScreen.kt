@@ -2,6 +2,8 @@ package com.example.anonychat.ui
 // VERIFIED_MEDIA_SUPPORT_ADDED_2026_01_25
 
 import android.Manifest
+import com.example.anonychat.utils.ActiveChatTracker
+import com.example.anonychat.utils.NotificationHelper
 import android.app.Activity
 import android.content.ContentUris
 import android.content.Context
@@ -611,6 +613,11 @@ fun KeyboardProofScreen(
     // Track if chat_open has been sent to prevent duplicates
     var chatOpenSent by remember { mutableStateOf(false) }
     
+    // Track spark handshake state
+    var mySparkTimerReached by remember { mutableStateOf(false) }
+    var sparkStartReceived by remember { mutableStateOf(false) }
+    var waitingForPeerAck by remember { mutableStateOf(false) }
+    
     // Track spark swipe choices
     var mySparkChoice by remember { mutableStateOf<Boolean?>(null) } // null = not swiped, true = right, false = left
     var peerSparkChoice by remember { mutableStateOf<Boolean?>(null) } // null = not received, true = right, false = left
@@ -675,6 +682,10 @@ fun KeyboardProofScreen(
                         Log.e("ChatLifecycle", "CHAT OPENED → me: $localGmail  ↔  partner: $matchedUserGmail")
                         WebSocketManager.sendChatOpen(matchedUserGmail)
                         chatOpenSent = true
+                        
+                        // Track active chat and clear notifications
+                        ActiveChatTracker.setActiveChatUser(matchedUserGmail)
+                        NotificationHelper.clearNotificationsForUser(context, matchedUserGmail)
                     }
                     // Clear unread count for this conversation when user opens the chat
                     ConversationRepository.clearUnread(matchedUserGmail)
@@ -690,6 +701,9 @@ fun KeyboardProofScreen(
                         peerChatOpenReceived = false
                         mutualChatStartTime = null
                         Log.e("SparkOverlay", "Mutual chat session ended (user left)")
+                        
+                        // Clear active chat tracking
+                        ActiveChatTracker.clearActiveChatUser()
                     }
                 }
                 else -> {}
@@ -712,11 +726,12 @@ fun KeyboardProofScreen(
     }
 
     // Monitor mutual chat session and trigger "feel that spark" overlay after timer.
-    // SYNC STRATEGY: Only the lexicographically smaller email acts as "initiator".
-    // The initiator sends a spark_trigger WebSocket event when the timer fires.
-    // The receiver shows the overlay only upon receiving spark_trigger.
-    // This ensures both users see the overlay at the same wall-clock time regardless of
-    // when each user's chat_open event was received.
+    // HANDSHAKE STRATEGY:
+    // 1. Both users run their own 3-second timer when mutual chat starts
+    // 2. INITIATOR (lexicographically smaller email): When timer reaches 3s, send spark_start to peer
+    // 3. RECEIVER: When BOTH their timer reaches 3s AND they receive spark_start, send spark_received_ack and show overlay
+    // 4. INITIATOR: Upon receiving spark_received_ack, show overlay
+    // This ensures both users' timers are ripe before showing the overlay.
     val isInitiator = localGmail < matchedUserGmail
     LaunchedEffect(chatOpenSent, peerChatOpenReceived, alreadySparked) {
         // Only start timer when BOTH users are in the chat AND haven't sparked before
@@ -727,15 +742,19 @@ fun KeyboardProofScreen(
                 Log.e("SparkOverlay", "Mutual session started at $mutualChatStartTime (isInitiator=$isInitiator)")
             }
 
-            if (isInitiator) {
-                // INITIATOR: run the timer and send spark_trigger to peer when it fires
-                val startTime = mutualChatStartTime
-                Log.e("SparkOverlay", "[INITIATOR] Timer started, waiting 3 seconds...")
-                delay(3000)
+            // Both users run the timer
+            val startTime = mutualChatStartTime
+            Log.e("SparkOverlay", "[${if (isInitiator) "INITIATOR" else "RECEIVER"}] Timer started, waiting 3 seconds...")
+            delay(3000)
 
-                if (chatOpenSent && peerChatOpenReceived && mutualChatStartTime == startTime && !alreadySparked) {
+            if (chatOpenSent && peerChatOpenReceived && mutualChatStartTime == startTime && !alreadySparked) {
+                mySparkTimerReached = true
+                Log.e("SparkOverlay", "[${if (isInitiator) "INITIATOR" else "RECEIVER"}] ⏰ My timer reached 3 seconds")
+
+                if (isInitiator) {
+                    // INITIATOR: Timer reached, send spark_start to peer
                     Log.e("SparkOverlay", "=".repeat(60))
-                    Log.e("SparkOverlay", "[INITIATOR] ⏰ Timer elapsed - sending spark_trigger to $matchedUserGmail")
+                    Log.e("SparkOverlay", "[INITIATOR] Sending spark_start to $matchedUserGmail")
 
                     // Mark users as sparked in the backend
                     val localUserId = localGmail.substringBefore("@")
@@ -758,20 +777,33 @@ fun KeyboardProofScreen(
                         Log.e("SparkOverlay", "[INITIATOR] ❌ hasSparked exception: ${e.message}", e)
                     }
 
-                    // Send trigger to peer so they show overlay at the same time
-                    WebSocketManager.sendSparkTrigger(matchedUserGmail, localGmail)
-
-                    Log.e("SparkOverlay", "[INITIATOR] 🎆 SHOWING SPARK OVERLAY NOW!")
-                    showThunderGif = true
-                    sparkOverlayShown = true
+                    // Send spark_start to peer
+                    WebSocketManager.sendSparkStart(matchedUserGmail, localGmail)
+                    waitingForPeerAck = true
+                    Log.e("SparkOverlay", "[INITIATOR] Waiting for spark_received_ack from peer...")
                     Log.e("SparkOverlay", "=".repeat(60))
                 } else {
-                    Log.e("SparkOverlay", "[INITIATOR] ❌ Conditions not met after timer - overlay skipped")
-                    Log.e("SparkOverlay", "  chatOpenSent=$chatOpenSent peerChatOpenReceived=$peerChatOpenReceived alreadySparked=$alreadySparked")
+                    // RECEIVER: Timer reached, check if we already received spark_start
+                    if (sparkStartReceived) {
+                        Log.e("SparkOverlay", "=".repeat(60))
+                        Log.e("SparkOverlay", "[RECEIVER] ✅ Both conditions met: timer reached AND spark_start received")
+                        Log.e("SparkOverlay", "[RECEIVER] Sending spark_received_ack and showing overlay")
+                        
+                        // Send ack to initiator
+                        WebSocketManager.sendSparkReceivedAck(matchedUserGmail, localGmail)
+                        
+                        // Show overlay
+                        showThunderGif = true
+                        sparkOverlayShown = true
+                        Log.e("SparkOverlay", "[RECEIVER] 🎆 SHOWING SPARK OVERLAY NOW!")
+                        Log.e("SparkOverlay", "=".repeat(60))
+                    } else {
+                        Log.e("SparkOverlay", "[RECEIVER] Timer reached but waiting for spark_start from peer...")
+                    }
                 }
             } else {
-                // RECEIVER: do NOT run a timer - wait for spark_trigger WebSocket event from initiator
-                Log.e("SparkOverlay", "[RECEIVER] Waiting for spark_trigger from $matchedUserGmail (no local timer)")
+                Log.e("SparkOverlay", "[${if (isInitiator) "INITIATOR" else "RECEIVER"}] ❌ Conditions not met after timer - overlay skipped")
+                Log.e("SparkOverlay", "  chatOpenSent=$chatOpenSent peerChatOpenReceived=$peerChatOpenReceived alreadySparked=$alreadySparked")
             }
         } else if (alreadySparked) {
             Log.e("SparkOverlay", "⏭️  Users have already sparked - skipping timer completely")
@@ -1061,6 +1093,45 @@ fun KeyboardProofScreen(
                         alreadySparked = true
                         showThunderGif = true
                         sparkOverlayShown = true
+                    }
+                }
+                is WebSocketEvent.SparkStart -> {
+                    Log.e("SparkOverlay", "!!! RECEIVED spark_start from: ${event.from} (matchedUser: $matchedUserGmail)")
+                    if (event.from == matchedUserGmail && !sparkOverlayShown && !alreadySparked) {
+                        sparkStartReceived = true
+                        Log.e("SparkOverlay", "[RECEIVER] ✅ spark_start received from initiator")
+                        
+                        // Check if my timer has also reached 3 seconds
+                        if (mySparkTimerReached) {
+                            Log.e("SparkOverlay", "=".repeat(60))
+                            Log.e("SparkOverlay", "[RECEIVER] ✅ Both conditions met: timer reached AND spark_start received")
+                            Log.e("SparkOverlay", "[RECEIVER] Sending spark_received_ack and showing overlay")
+                            
+                            // Send ack to initiator
+                            WebSocketManager.sendSparkReceivedAck(matchedUserGmail, localGmail)
+                            
+                            // Show overlay
+                            showThunderGif = true
+                            sparkOverlayShown = true
+                            Log.e("SparkOverlay", "[RECEIVER] 🎆 SHOWING SPARK OVERLAY NOW!")
+                            Log.e("SparkOverlay", "=".repeat(60))
+                        } else {
+                            Log.e("SparkOverlay", "[RECEIVER] spark_start received but my timer hasn't reached 3s yet, waiting...")
+                        }
+                    }
+                }
+                is WebSocketEvent.SparkReceivedAck -> {
+                    Log.e("SparkOverlay", "!!! RECEIVED spark_received_ack from: ${event.from} (matchedUser: $matchedUserGmail)")
+                    if (event.from == matchedUserGmail && waitingForPeerAck && !sparkOverlayShown) {
+                        Log.e("SparkOverlay", "=".repeat(60))
+                        Log.e("SparkOverlay", "[INITIATOR] ✅ Received spark_received_ack from peer")
+                        Log.e("SparkOverlay", "[INITIATOR] 🎆 SHOWING SPARK OVERLAY NOW!")
+                        
+                        // Show overlay
+                        showThunderGif = true
+                        sparkOverlayShown = true
+                        waitingForPeerAck = false
+                        Log.e("SparkOverlay", "=".repeat(60))
                     }
                 }
                 is WebSocketEvent.WarningNotification -> {
