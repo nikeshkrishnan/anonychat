@@ -93,7 +93,9 @@ fun ProfileScreen(
     var rating by remember { mutableStateOf(userPrefs.getFloat("user_rating", 0f)) }
     var ratingCount by remember { mutableStateOf(userPrefs.getInt("user_rating_count", 0)) }
     var isRandomMatch by remember { mutableStateOf(userPrefs.getBoolean("random_match", true)) }
-    var username by remember { mutableStateOf(initialUsername) }
+    var username by remember {
+        mutableStateOf(userPrefs.getString("username", initialUsername) ?: initialUsername)
+    }
     var gender by remember { mutableStateOf(userPrefs.getString("gender", "male") ?: "male") }
     var age by remember { mutableStateOf(userPrefs.getInt("age", 30)) }
     var preferredGender by remember {
@@ -112,31 +114,21 @@ fun ProfileScreen(
         )
     }
 
+    var isLoading by remember { mutableStateOf(false) }
 
-        // Listen for incoming SparkRight events and update sparks count live
-        LaunchedEffect(Unit) {
+    // Listen for incoming WebSocket events and update state live
+    LaunchedEffect(Unit) {
             WebSocketManager.events.collect { event ->
                 when (event) {
                     is WebSocketEvent.SparkRight -> {
                         sparks = userPrefs.getInt("sparks_self", 0)
                     }
-                    else -> Unit
-                }
-            }
-        }
-
-        // --- FETCH PREFERENCES FROM SERVER ON LOAD (always) ---
-        LaunchedEffect(Unit) {
-            val userEmail = userPrefs.getString("user_email", null)
-            if (userEmail != null) {
-                android.util.Log.d("ProfilePrefs", "Fetching preferences for $userEmail")
-                try {
-                    val response = NetworkClient.api.getPreferences(userEmail)
-                    android.util.Log.e("ProfilePrefsFetch", "Response Code: ${response.code()}, Body: ${response.body()}, Error: ${response.errorBody()?.string()}")
-                    if (response.isSuccessful && response.body() != null) {
-                        val serverPrefs = response.body()!!
-
+                    is WebSocketEvent.PreferencesData -> {
+                        val serverPrefs = event.preferences
+                        android.util.Log.d("ProfilePrefs", "Received preferences via WebSocket: username=${serverPrefs.username}")
+                        
                         // Update composable state with fetched data
+                        serverPrefs.username?.takeIf { it.isNotBlank() }?.let { username = it }
                         serverPrefs.gender?.let { gender = it }
                         serverPrefs.age?.let { age = it }
                         serverPrefs.preferredGender?.let { preferredGender = it }
@@ -159,6 +151,7 @@ fun ProfileScreen(
 
                         // Persist all fetched values to SharedPreferences
                         with(userPrefs.edit()) {
+                            serverPrefs.username?.takeIf { it.isNotBlank() }?.let { putString("username", it) }
                             putString("gender", gender)
                             putInt("age", age)
                             putString("preferred_gender", preferredGender)
@@ -171,15 +164,34 @@ fun ProfileScreen(
                             serverPrefs.availableRoses?.let { putInt("available_roses", it) }
                             apply()
                         }
-                        android.util.Log.d("ProfilePrefs", "Fetched and updated prefs from server. sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
-                    } else {
-                        android.util.Log.e("ProfilePrefs", "Failed to fetch prefs: ${response.errorBody()?.string()}")
+                        android.util.Log.d("ProfilePrefs", "Updated prefs from WebSocket. sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
                     }
-                } catch (e: Exception) {
-                    android.util.Log.e("ProfilePrefs", "Error fetching prefs: ${e.message}")
+                    is WebSocketEvent.PreferencesError -> {
+                        android.util.Log.e("ProfilePrefs", "Error fetching prefs via WebSocket: ${event.error}")
+                    }
+                    is WebSocketEvent.UpdatePreferencesSuccess -> {
+                        android.util.Log.d("ProfilePrefs", "Preferences updated successfully via WebSocket")
+                        isLoading = false
+                        Toast.makeText(context, "Preferences saved! ❤️", Toast.LENGTH_SHORT).show()
+                    }
+                    is WebSocketEvent.UpdatePreferencesError -> {
+                        android.util.Log.e("ProfilePrefs", "Error updating prefs via WebSocket: ${event.error}")
+                        isLoading = false
+                        Toast.makeText(context, "Failed to save preferences", Toast.LENGTH_SHORT).show()
+                    }
+                    else -> Unit
                 }
+            }
+        }
+
+        // --- FETCH PREFERENCES FROM SERVER ON LOAD (via WebSocket) ---
+        LaunchedEffect(Unit) {
+            val token = userPrefs.getString("access_token", null)
+            if (token != null) {
+                android.util.Log.d("ProfilePrefs", "Fetching preferences via WebSocket")
+                WebSocketManager.sendGetPreferences(token)
             } else {
-                android.util.Log.w("ProfilePrefs", "User email not found in SharedPreferences, cannot fetch.")
+                android.util.Log.w("ProfilePrefs", "Access token not found, cannot fetch preferences")
             }
         }
 
@@ -272,8 +284,6 @@ fun ProfileScreen(
     }
 
     /* ================= UI ================= */
-    var isLoading by remember { mutableStateOf(false) }
-
     Box(Modifier.fillMaxSize()) {
 
         AndroidView(
@@ -684,15 +694,7 @@ fun ProfileScreen(
                                 preferredGender = preferredGender,
                                 preferredAgeRange = preferredAgeRange,
                                 romanceRange = romanceRange,
-                                random = isRandomMatch,
-                                onSuccess = {
-                                    isLoading = false
-                                    Toast.makeText(context, "Preferences saved!", Toast.LENGTH_SHORT).show()
-                                },
-                                onFailure = {
-                                    isLoading = false
-                                    Toast.makeText(context, "Failed to save. Please try again.", Toast.LENGTH_LONG).show()
-                                }
+                                random = isRandomMatch
                             )
                          },
                         modifier = Modifier
@@ -895,15 +897,20 @@ private fun saveUserPrefs(
     preferredGender: String,
     preferredAgeRange: ClosedFloatingPointRange<Float>,
     romanceRange: ClosedFloatingPointRange<Float>,
-    random: Boolean,
-    onSuccess: () -> Unit,
-    onFailure: () -> Unit
+    random: Boolean
 ) {
     scope.launch {
         try {
-            // 1. Build the request body
-            val request = PreferencesRequest(
-                userId = userPrefs.getString("user_id", "") ?: "", // Get userId from prefs
+            val token = userPrefs.getString("access_token", null)
+            if (token == null) {
+                android.util.Log.e("PREFS_SAVE_ERROR", "Access token not found")
+                Toast.makeText(context, "Authentication error. Please login again.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+
+            // Send update preferences via WebSocket
+            WebSocketManager.sendUpdatePreferences(
+                token = token,
                 age = age,
                 gender = gender,
                 preferredGender = preferredGender,
@@ -918,35 +925,26 @@ private fun saveUserPrefs(
                 random = random
             )
 
-            // 2. Make the network call
-            val response = NetworkClient.api.setPreferences(request)
-
-            // 3. Handle the response
-            if (response.isSuccessful) {
-                // On success, save the preferences locally
-                with(userPrefs.edit()) {
-                    putString("username", username)
-                    putString("gender", gender)
-                    putInt("age", age)
-                    putString("preferred_gender", preferredGender)
-                    putFloat("preferred_age_min", preferredAgeRange.start)
-                    putFloat("preferred_age_max", preferredAgeRange.endInclusive)
-                    putFloat("romance_min", romanceRange.start)
-                    putFloat("romance_max", romanceRange.endInclusive)
-                    putBoolean("random_match", random)
-                    apply()
-                }
-                onSuccess() // Trigger success callback (e.g., show toast and navigate)
-            } else {
-                // On failure, log the error and show a toast
-                val errorBody = response.errorBody()?.string() ?: "Unknown error"
-                android.util.Log.e("PREFS_SAVE_ERROR", "Failed to save preferences: $errorBody")
-                onFailure() // Trigger failure callback (e.g., show error toast)
+            // Save preferences locally immediately (optimistic update)
+            with(userPrefs.edit()) {
+                putString("username", username)
+                putString("gender", gender)
+                putInt("age", age)
+                putString("preferred_gender", preferredGender)
+                putFloat("preferred_age_min", preferredAgeRange.start)
+                putFloat("preferred_age_max", preferredAgeRange.endInclusive)
+                putFloat("romance_min", romanceRange.start)
+                putFloat("romance_max", romanceRange.endInclusive)
+                putBoolean("random_match", random)
+                apply()
             }
+            
+            // Success/failure will be handled by WebSocket event listeners
+            android.util.Log.d("PREFS_SAVE", "Preferences update sent via WebSocket, waiting for confirmation...")
         } catch (e: Exception) {
-            // Handle network exceptions (e.g., no internet)
+            // Handle exceptions
             android.util.Log.e("PREFS_SAVE_ERROR", "Exception while saving preferences", e)
-            onFailure() // Trigger failure callback
+            Toast.makeText(context, "Failed to send update. Please try again.", Toast.LENGTH_LONG).show()
         }
     }
 }

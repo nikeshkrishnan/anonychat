@@ -25,6 +25,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -190,6 +191,27 @@ sealed class WebSocketEvent {
     data class WarningNotification(val message: String) : WebSocketEvent()
     data class SuspensionNotification(val message: String, val remainingMinutes: Int) : WebSocketEvent()
     data class BanNotification(val message: String) : WebSocketEvent()
+    
+    // Matchmaking events
+    data class MatchFound(val match: com.example.anonychat.network.MatchResponse) : WebSocketEvent()
+    data class MatchError(val error: String) : WebSocketEvent()
+    data class SkipUserSuccess(val message: String) : WebSocketEvent()
+    data class SkipUserError(val error: String) : WebSocketEvent()
+    data class AcceptUserSuccess(val message: String) : WebSocketEvent()
+    data class AcceptUserError(val error: String) : WebSocketEvent()
+    data class DeleteAllMatchesSuccess(val message: String, val deleted: Boolean) : WebSocketEvent()
+    data class DeleteAllMatchesError(val error: String) : WebSocketEvent()
+    
+    // Preference events
+    data class PreferencesData(val preferences: com.example.anonychat.network.GetPreferencesResponse) : WebSocketEvent()
+    data class PreferencesError(val error: String) : WebSocketEvent()
+    data class UpdatePreferencesSuccess(val message: String) : WebSocketEvent()
+    data class UpdatePreferencesError(val error: String) : WebSocketEvent()
+    data class TogglePickBestSuccess(val enabled: Boolean) : WebSocketEvent()
+    data class TogglePickBestError(val error: String) : WebSocketEvent()
+    
+    // Username update event for chat list
+    data class UsernameUpdated(val email: String, val username: String) : WebSocketEvent()
 }
 
 /* ---------------------------------------------------
@@ -267,20 +289,28 @@ object WebSocketManager {
      */
     private suspend fun triggerNotification(message: ChatMessage) {
         try {
-            // Fetch sender's username and preferences
-            val response = NetworkClient.api.getPreferences(message.from)
+            // Fetch sender's username and preferences via WebSocket
+            Log.i("WebSocketManager", "Sending get_preferences request for: ${message.from}")
+            sendGetPreferences("", message.from) // Empty token since we're already connected
             
-            if (response.isSuccessful) {
-                val prefsResponse = response.body()
-                val username = prefsResponse?.username ?: message.from.substringBefore("@")
+            // Wait for preferences response with timeout
+            val prefsData = withTimeoutOrNull(5000L) {
+                events.first { event: WebSocketEvent ->
+                    event is WebSocketEvent.PreferencesData
+                } as? WebSocketEvent.PreferencesData
+            }
+            
+            if (prefsData != null) {
+                val prefs = prefsData.preferences
+                val username = prefs.username ?: message.from.substringBefore("@")
                 
-                // Create Preferences object from response
+                // Create Preferences object from WebSocket response
                 val senderPreferences = com.example.anonychat.model.Preferences(
-                    romanceMin = prefsResponse?.romanceRange?.min?.toFloat() ?: 1f,
-                    romanceMax = prefsResponse?.romanceRange?.max?.toFloat() ?: 5f,
-                    gender = prefsResponse?.gender ?: "male",
-                    isOnline = prefsResponse?.isOnline ?: false,
-                    lastSeen = prefsResponse?.lastOnline ?: 0L
+                    romanceMin = prefs.romanceRange?.min?.toFloat() ?: 1f,
+                    romanceMax = prefs.romanceRange?.max?.toFloat() ?: 5f,
+                    gender = prefs.gender ?: "male",
+                    isOnline = prefs.isOnline ?: false,
+                    lastSeen = prefs.lastOnline ?: 0L
                 )
                 
                 // Get current user email from WebSocket request
@@ -294,9 +324,28 @@ object WebSocketManager {
                     localEmail
                 )
                 
+                // Emit username update event so ChatScreen can update the conversation list
+                _events.tryEmit(WebSocketEvent.UsernameUpdated(message.from, username))
+                
                 Log.d("WebSocketManager", "Notification triggered for message from $username")
             } else {
-                Log.e("WebSocketManager", "Failed to fetch user preferences for notification: ${response.code()}")
+                Log.e("WebSocketManager", "Failed to fetch user preferences via WebSocket (timeout)")
+                // Fallback: show notification with email as username
+                val localEmail = webSocket?.request()?.url?.queryParameter("gmail") ?: ""
+                val fallbackPrefs = com.example.anonychat.model.Preferences(
+                    romanceMin = 1f,
+                    romanceMax = 5f,
+                    gender = "male",
+                    isOnline = false,
+                    lastSeen = 0L
+                )
+                NotificationHelper.showMessageNotification(
+                    appContext,
+                    message,
+                    message.from.substringBefore("@"),
+                    fallbackPrefs,
+                    localEmail
+                )
             }
         } catch (e: Exception) {
             Log.e("WebSocketManager", "Error triggering notification", e)
@@ -501,6 +550,89 @@ object WebSocketManager {
 
     private var heartbeatJob: Job? = null
     private var readyJob: Job? = null
+    
+    /**
+     * Get the current WebSocket instance for monitoring purposes.
+     * Used by WebSocketMonitorService to check connection health.
+     */
+    fun getWebSocket(): WebSocket? = webSocket
+    
+    /**
+     * Check if WebSocket is currently connected
+     */
+    fun isConnected(): Boolean {
+        return wsState == WsState.CONNECTED && webSocket != null
+    }
+    
+    /**
+     * Send a ping and return true if pong is received within timeout.
+     * Used by WebSocketMonitorService for health checks.
+     * Returns true if server responds, false if timeout or error.
+     */
+    suspend fun sendPingAndWaitForPong(timeoutMs: Long = 5000L): Boolean {
+        return try {
+            val ws = webSocket
+            if (ws == null || wsState != WsState.CONNECTED) {
+                return false
+            }
+            
+            // Record current lastServerMessageAt
+            val beforePing = lastServerMessageAt
+            
+            // Send ping
+            val sent = ws.send(JSONObject().put("type", "ping").toString())
+            if (!sent) {
+                return false
+            }
+            
+            // Wait for pong (which updates lastServerMessageAt)
+            val startTime = System.currentTimeMillis()
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                if (lastServerMessageAt > beforePing) {
+                    // Server responded (pong or any message)
+                    return true
+                }
+                delay(100) // Check every 100ms
+            }
+            
+            // Timeout - no response
+            false
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Error in sendPingAndWaitForPong", e)
+            false
+        }
+    }
+    
+    /**
+     * Connect to WebSocket with stored credentials (for reconnection)
+     * This is a simpler version that doesn't require Context parameter
+     */
+    fun connect(token: String, email: String) {
+        scope.launch {
+            try {
+                connectMutex.withLock {
+                    if (wsState != WsState.DISCONNECTED) {
+                        Log.w("WebSocketManager", "Already connecting or connected")
+                        return@launch
+                    }
+                    wsState = WsState.CONNECTING
+                }
+                
+                curruser = email
+                val url = "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
+                wsUrl = url
+                
+                Log.i("WebSocketManager", "Reconnecting WebSocket to: $url")
+                
+                val request = Request.Builder().url(url).build()
+                webSocket = client.newWebSocket(request, createListener())
+                
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to reconnect WebSocket", e)
+                wsState = WsState.DISCONNECTED
+            }
+        }
+    }
     private var ackMonitorJob: Job? = null
 
     private fun PendingMessage.toEntity(): PendingMessageEntity {
@@ -2077,6 +2209,144 @@ object WebSocketManager {
                         _events.emit(WebSocketEvent.BanNotification(message))
                     }
                 }
+                "match_found" -> {
+                    Log.i("WebSocketManager", "match_found received")
+                    val matchJson = json.optJSONObject("match") ?: json
+                    val match = com.example.anonychat.network.MatchResponse(
+                        username = matchJson.optString("username"),
+                        gmail = matchJson.optString("gmail"),
+                        age = matchJson.optInt("age"),
+                        gender = matchJson.optString("gender"),
+                        preferredGender = matchJson.optString("preferredGender") ?: matchJson.optString("preferred_gender"),
+                        romanceRange = matchJson.optJSONObject("romanceRange")?.let {
+                            com.example.anonychat.network.RomanceRange(it.getInt("min"), it.getInt("max"))
+                        },
+                        random = matchJson.optBoolean("random"),
+                        preferredAgeRange = matchJson.optJSONObject("preferredAgeRange")?.let {
+                            com.example.anonychat.network.AgeRange(it.getInt("min"), it.getInt("max"))
+                        },
+                        pickBestflag = matchJson.optBoolean("pickBestflag"),
+                        isOnline = matchJson.optBoolean("isOnline"),
+                        lastOnline = matchJson.optLong("lastOnline"),
+                        match = matchJson.optString("match"),
+                        giftedMeARose = matchJson.optBoolean("giftedMeARose"),
+                        hasTakenBackRose = matchJson.optBoolean("hasTakenBackRose")
+                    )
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.MatchFound(match))
+                    }
+                }
+                "match_error", "find_match_error" -> {
+                    val error = json.optString("error", json.optString("message", "Match error"))
+                    Log.e("WebSocketManager", "match_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.MatchError(error))
+                    }
+                }
+                "skip_user_success" -> {
+                    val message = json.optString("message", "User skipped successfully")
+                    Log.i("WebSocketManager", "skip_user_success received")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SkipUserSuccess(message))
+                    }
+                }
+                "skip_user_error" -> {
+                    val error = json.optString("error", json.optString("message", "Skip user error"))
+                    Log.e("WebSocketManager", "skip_user_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SkipUserError(error))
+                    }
+                }
+                "accept_user_success" -> {
+                    val message = json.optString("message", "User accepted successfully")
+                    Log.i("WebSocketManager", "accept_user_success received")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.AcceptUserSuccess(message))
+                    }
+                }
+                "accept_user_error" -> {
+                    val error = json.optString("error", json.optString("message", "Accept user error"))
+                    Log.e("WebSocketManager", "accept_user_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.AcceptUserError(error))
+                    }
+                }
+                "delete_all_matches_success" -> {
+                    val message = json.optString("message", "All matches deleted successfully")
+                    val deleted = json.optBoolean("deleted", false)
+                    Log.i("WebSocketManager", "delete_all_matches_success received")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.DeleteAllMatchesSuccess(message, deleted))
+                    }
+                }
+                "delete_all_matches_error" -> {
+                    val error = json.optString("error", json.optString("message", "Delete all matches error"))
+                    Log.e("WebSocketManager", "delete_all_matches_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.DeleteAllMatchesError(error))
+                    }
+                }
+                "preferences_data" -> {
+                    Log.i("WebSocketManager", "preferences_data received")
+                    val prefsJson = json.optJSONObject("preferences") ?: json
+                    val preferences = com.example.anonychat.network.GetPreferencesResponse(
+                        username = prefsJson.optString("username"),
+                        gmail = prefsJson.optString("gmail"),
+                        age = prefsJson.optInt("age"),
+                        gender = prefsJson.optString("gender"),
+                        preferredGender = prefsJson.optString("preferredGender"),
+                        romanceRange = prefsJson.optJSONObject("romanceRange")?.let {
+                            com.example.anonychat.network.RomanceRange(it.getInt("min"), it.getInt("max"))
+                        },
+                        preferredAgeRange = prefsJson.optJSONObject("preferredAgeRange")?.let {
+                            com.example.anonychat.network.AgeRange(it.getInt("min"), it.getInt("max"))
+                        },
+                        random = prefsJson.optBoolean("random"),
+                        isOnline = prefsJson.optBoolean("isOnline"),
+                        lastOnline = prefsJson.optLong("lastOnline"),
+                        sparks = prefsJson.optInt("sparks"),
+                        totalRosesReceived = prefsJson.optInt("totalRosesReceived"),
+                        availableRoses = prefsJson.optInt("availableRoses")
+                    )
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.PreferencesData(preferences))
+                    }
+                }
+                "preferences_error", "get_preferences_error" -> {
+                    val error = json.optString("error", json.optString("message", "Preferences error"))
+                    Log.e("WebSocketManager", "preferences_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.PreferencesError(error))
+                    }
+                }
+                "update_preferences_success" -> {
+                    val message = json.optString("message", "Preferences updated successfully")
+                    Log.i("WebSocketManager", "update_preferences_success received")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.UpdatePreferencesSuccess(message))
+                    }
+                }
+                "update_preferences_error" -> {
+                    val error = json.optString("error", json.optString("message", "Update preferences error"))
+                    Log.e("WebSocketManager", "update_preferences_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.UpdatePreferencesError(error))
+                    }
+                }
+                "toggle_pick_best_success" -> {
+                    val enabled = json.optBoolean("enabled", false)
+                    Log.i("WebSocketManager", "toggle_pick_best_success received: enabled=$enabled")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.TogglePickBestSuccess(enabled))
+                    }
+                }
+                "toggle_pick_best_error" -> {
+                    val error = json.optString("error", json.optString("message", "Toggle pick best error"))
+                    Log.e("WebSocketManager", "toggle_pick_best_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.TogglePickBestError(error))
+                    }
+                }
                 else -> {
                     // Unknown type — ignore or log
                     Log.w("WebSocketManager", "Unknown message type: $type")
@@ -2390,6 +2660,249 @@ object WebSocketManager {
                 }
             } catch (e: Exception) {
                 Log.e("WebSocketManager", "Exception sending rose_taken_back", e)
+            }
+        }
+    }
+
+    /* ---------------------------------------------------
+       MATCHMAKING WEBSOCKET METHODS
+    --------------------------------------------------- */
+    
+    /**
+     * Request to find a match via WebSocket
+     */
+    fun sendFindMatch(token: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "find_match")
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending find_match request")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "find_match sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send find_match")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send find_match - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending find_match", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to skip a user via WebSocket
+     */
+    fun sendSkipUser(candGmail: String, token: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "skip_user")
+            .put("candGmail", candGmail)
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending skip_user request for: $candGmail")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "skip_user sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send skip_user")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send skip_user - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending skip_user", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to accept a user via WebSocket
+     */
+    fun sendAcceptUser(candGmail: String, token: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "accept_user")
+            .put("candGmail", candGmail)
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending accept_user request for: $candGmail")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "accept_user sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send accept_user")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send accept_user - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending accept_user", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to delete all matches via WebSocket
+     */
+    fun sendDeleteAllMatches(token: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "delete_all_matches")
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending delete_all_matches request")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "delete_all_matches sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send delete_all_matches")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send delete_all_matches - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending delete_all_matches", e)
+            }
+        }
+    }
+    
+    /* ---------------------------------------------------
+       PREFERENCE WEBSOCKET METHODS
+    --------------------------------------------------- */
+    
+    /**
+     * Request to get preferences via WebSocket
+     */
+    fun sendGetPreferences(token: String, targetGmail: String? = null) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "get_preferences")
+            .put("authorization", "Bearer $token")
+        
+        targetGmail?.let {
+            payload.put("targetGmail", it)
+        }
+        
+        val payloadStr = payload.toString()
+        Log.i("WebSocketManager", "Sending get_preferences request${targetGmail?.let { " for: $it" } ?: ""}")
+        
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payloadStr) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "get_preferences sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send get_preferences")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send get_preferences - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending get_preferences", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to update preferences via WebSocket
+     */
+    fun sendUpdatePreferences(
+        token: String,
+        age: Int? = null,
+        gender: String? = null,
+        preferredGender: String? = null,
+        preferredAgeRange: com.example.anonychat.network.AgeRange? = null,
+        romanceRange: com.example.anonychat.network.RomanceRange? = null,
+        random: Boolean? = null
+    ) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "update_preferences")
+            .put("authorization", "Bearer $token")
+        
+        age?.let { payload.put("age", it) }
+        gender?.let { payload.put("gender", it) }
+        preferredGender?.let { payload.put("preferredGender", it) }
+        preferredAgeRange?.let {
+            payload.put("preferredAgeRange", JSONObject()
+                .put("min", it.min)
+                .put("max", it.max))
+        }
+        romanceRange?.let {
+            payload.put("romanceRange", JSONObject()
+                .put("min", it.min)
+                .put("max", it.max))
+        }
+        random?.let { payload.put("random", it) }
+        
+        val payloadStr = payload.toString()
+        Log.i("WebSocketManager", "Sending update_preferences request")
+        
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payloadStr) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "update_preferences sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send update_preferences")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send update_preferences - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending update_preferences", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to toggle pick best feature via WebSocket
+     */
+    fun sendTogglePickBest(token: String, enable: Boolean) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "toggle_pick_best")
+            .put("enable", enable)
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending toggle_pick_best request: enable=$enable")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "toggle_pick_best sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send toggle_pick_best")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send toggle_pick_best - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending toggle_pick_best", e)
             }
         }
     }
@@ -2711,7 +3224,9 @@ object WebSocketManager {
         scope.launch {
             try {
                 if (!initialized) {
-                    init(context)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        init(context)
+                    }
                 }
 
                 // already connected or connecting

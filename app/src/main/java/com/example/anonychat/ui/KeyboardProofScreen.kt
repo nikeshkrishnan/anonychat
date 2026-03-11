@@ -158,6 +158,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 // Helper function to format numbers like YouTube (1k, 1.5k, 1M, etc.)
 private fun formatCount(count: Int): String {
     return when {
@@ -482,14 +483,25 @@ fun KeyboardProofScreen(
     // availableRoses: shown near text input box (availableRoses from server), decremented on gifting
     var availableRoses by remember { mutableStateOf(userPrefs.getInt("available_roses", 0)) }
 
-    // Fetch roses counts from server on load
+    // Fetch roses counts from server on load via WebSocket
     LaunchedEffect(Unit) {
         val userEmail = userPrefs.getString("user_email", null)
-        if (userEmail != null) {
+        val token = userPrefs.getString("access_token", null)
+        if (userEmail != null && token != null) {
             try {
-                val response = NetworkClient.api.getPreferences(userEmail)
-                if (response.isSuccessful && response.body() != null) {
-                    val serverPrefs = response.body()!!
+                android.util.Log.d("KeyboardProofScreen", "Fetching roses via WebSocket for current user: $userEmail")
+                WebSocketManager.sendGetPreferences(token)
+                
+                val prefEvent = withTimeoutOrNull(10_000) {
+                    WebSocketManager.events.first { event ->
+                        // Only process PreferencesData for the current user (not the matched user)
+                        (event is WebSocketEvent.PreferencesData && event.preferences.gmail == userEmail) ||
+                        event is WebSocketEvent.PreferencesError
+                    }
+                }
+                
+                val serverPrefs = (prefEvent as? WebSocketEvent.PreferencesData)?.preferences
+                if (serverPrefs != null) {
                     serverPrefs.totalRosesReceived?.let {
                         roses = it
                         userPrefs.edit().putInt("roses", it).apply()
@@ -559,34 +571,24 @@ fun KeyboardProofScreen(
             selectedGalleryImages.clear()
         }
     } else {
-        // Default back button behavior - call skip or accept endpoint only for new matches
+        // Default back button behavior - call skip or accept endpoint via WebSocket only for new matches
         BackHandler {
             if (isNewMatch) {
                 scope.launch {
                     try {
                         val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                        val myEmail = prefs.getString("user_email", "") ?: ""
+                        val token = prefs.getString("access_token", "") ?: ""
                         
                         if (hasMessageBeenSent) {
                             // Accept match if message was sent
-                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling ACCEPT match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
-                            val response = NetworkClient.api.acceptMatch(myEmail, matchedUserGmail)
-                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
-                            if (response.isSuccessful) {
-                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match SUCCESS for $matchedUserGmail")
-                            } else {
-                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match FAILED: ${response.errorBody()?.string()}")
-                            }
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling ACCEPT match via WebSocket: candGmail=$matchedUserGmail")
+                            WebSocketManager.sendAcceptUser(matchedUserGmail, token)
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Accept match request sent via WebSocket")
                         } else {
                             // Skip match if no message was sent
-                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling SKIP match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
-                            val response = NetworkClient.api.skipMatch(myEmail, matchedUserGmail)
-                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
-                            if (response.isSuccessful) {
-                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match SUCCESS for $matchedUserGmail")
-                            } else {
-                                Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match FAILED: ${response.errorBody()?.string()}")
-                            }
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling SKIP match via WebSocket: candGmail=$matchedUserGmail")
+                            WebSocketManager.sendSkipUser(matchedUserGmail, token)
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match request sent via WebSocket")
                         }
                     } catch (e: Exception) {
                         Log.e("KeyboardProofScreen", "[SYSTEM BACK] EXCEPTION calling match endpoint: ${e.message}", e)
@@ -840,25 +842,39 @@ fun KeyboardProofScreen(
     }
     var lastSeenTime by remember { mutableStateOf(matchedUserPrefs.lastSeen) }
     
-    // Fetch fresh preferences in background when screen opens
+    // Fetch fresh preferences in background when screen opens via WebSocket
     LaunchedEffect(matchedUserGmail) {
         try {
-            val response = NetworkClient.api.getPreferences(matchedUserGmail)
-            if (response.isSuccessful && response.body() != null) {
-                val freshPrefs = response.body()!!
-                currentMatchedPrefs = Preferences(
-                    romanceMin = freshPrefs.romanceRange?.min?.toFloat() ?: currentMatchedPrefs.romanceMin,
-                    romanceMax = freshPrefs.romanceRange?.max?.toFloat() ?: currentMatchedPrefs.romanceMax,
-                    gender = freshPrefs.gender ?: currentMatchedPrefs.gender,
-                    isOnline = freshPrefs.isOnline ?: currentMatchedPrefs.isOnline,
-                    lastSeen = freshPrefs.lastOnline ?: currentMatchedPrefs.lastSeen,
-                    giftedMeARose = currentMatchedPrefs.giftedMeARose,
-                    hasTakenBackRose = currentMatchedPrefs.hasTakenBackRose
-                )
-                // Update presence status and last seen time
-                presenceStatus = if (freshPrefs.isOnline == true) "online" else "offline"
-                lastSeenTime = freshPrefs.lastOnline ?: lastSeenTime
-                Log.d("KeyboardProofScreen", "Fresh prefs loaded for $matchedUserGmail: isOnline=${freshPrefs.isOnline}, lastOnline=${freshPrefs.lastOnline}")
+            val token = userPrefs.getString("access_token", null)
+            if (token != null) {
+                Log.d("KeyboardProofScreen", "Fetching fresh prefs via WebSocket for matched user: $matchedUserGmail")
+                WebSocketManager.sendGetPreferences(token, matchedUserGmail)
+                
+                val prefEvent = withTimeoutOrNull(10_000) {
+                    WebSocketManager.events.first { event ->
+                        // Only process PreferencesData for the matched user (not the current user)
+                        (event is WebSocketEvent.PreferencesData && event.preferences.gmail == matchedUserGmail) ||
+                        event is WebSocketEvent.PreferencesError
+                    }
+                }
+                
+                val freshPrefs = (prefEvent as? WebSocketEvent.PreferencesData)?.preferences
+                if (freshPrefs != null) {
+                    Log.d("KeyboardProofScreen", "Received prefs for gmail=${freshPrefs.gmail}, expected=$matchedUserGmail")
+                    currentMatchedPrefs = Preferences(
+                        romanceMin = freshPrefs.romanceRange?.min?.toFloat() ?: currentMatchedPrefs.romanceMin,
+                        romanceMax = freshPrefs.romanceRange?.max?.toFloat() ?: currentMatchedPrefs.romanceMax,
+                        gender = freshPrefs.gender ?: currentMatchedPrefs.gender,
+                        isOnline = freshPrefs.isOnline ?: currentMatchedPrefs.isOnline,
+                        lastSeen = freshPrefs.lastOnline ?: currentMatchedPrefs.lastSeen,
+                        giftedMeARose = currentMatchedPrefs.giftedMeARose,
+                        hasTakenBackRose = currentMatchedPrefs.hasTakenBackRose
+                    )
+                    // Update presence status and last seen time
+                    presenceStatus = if (freshPrefs.isOnline == true) "online" else "offline"
+                    lastSeenTime = freshPrefs.lastOnline ?: lastSeenTime
+                    Log.d("KeyboardProofScreen", "Fresh prefs loaded for $matchedUserGmail: isOnline=${freshPrefs.isOnline}, lastOnline=${freshPrefs.lastOnline}, gender=${freshPrefs.gender}")
+                }
             }
         } catch (e: Exception) {
             Log.e("KeyboardProofScreen", "Failed to fetch fresh prefs for $matchedUserGmail", e)
@@ -868,12 +884,13 @@ fun KeyboardProofScreen(
     val emotion = remember(currentMatchedPrefs.romanceMin, currentMatchedPrefs.romanceMax) {
         romanceRangeToEmotion(currentMatchedPrefs.romanceMin, currentMatchedPrefs.romanceMax)
     }
-    val avatarResName =
+    val avatarResName = remember(currentMatchedPrefs.gender, emotion) {
             if (currentMatchedPrefs.gender == "female") "female_exp$emotion" else "male_exp$emotion"
-    val avatarResId = remember(avatarResName) {
+    }
+    val avatarResId = remember(avatarResName, currentMatchedPrefs.gender, emotion) {
         context.resources.getIdentifier(avatarResName, "raw", context.packageName)
     }
-    val avatarUri = remember(avatarResId) {
+    val avatarUri = remember(avatarResId, currentMatchedPrefs.gender, emotion) {
         if (avatarResId != 0) Uri.parse("android.resource://${context.packageName}/$avatarResId")
         else Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
     }
@@ -1146,6 +1163,54 @@ fun KeyboardProofScreen(
                     // Ban notifications are handled globally in MainActivity
                     // No action needed here
                 }
+                // Handle new matchmaking and preference events
+                is WebSocketEvent.MatchFound -> {
+                    Log.d("KeyboardProofScreen", "Match found via WebSocket: ${event.match.gmail}")
+                }
+                is WebSocketEvent.MatchError -> {
+                    Log.e("KeyboardProofScreen", "Match error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.SkipUserSuccess -> {
+                    Log.d("KeyboardProofScreen", "Skip user success via WebSocket")
+                }
+                is WebSocketEvent.SkipUserError -> {
+                    Log.e("KeyboardProofScreen", "Skip user error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.AcceptUserSuccess -> {
+                    Log.d("KeyboardProofScreen", "Accept user success via WebSocket")
+                }
+                is WebSocketEvent.AcceptUserError -> {
+                    Log.e("KeyboardProofScreen", "Accept user error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.PreferencesData -> {
+                    Log.d("KeyboardProofScreen", "Preferences data received via WebSocket")
+                }
+                is WebSocketEvent.PreferencesError -> {
+                    Log.e("KeyboardProofScreen", "Preferences error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.UpdatePreferencesSuccess -> {
+                    Log.d("KeyboardProofScreen", "Update preferences success via WebSocket")
+                }
+                is WebSocketEvent.UpdatePreferencesError -> {
+                    Log.e("KeyboardProofScreen", "Update preferences error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.TogglePickBestSuccess -> {
+                    Log.d("KeyboardProofScreen", "Toggle pick best success via WebSocket")
+                }
+                is WebSocketEvent.TogglePickBestError -> {
+                    Log.e("KeyboardProofScreen", "Toggle pick best error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.DeleteAllMatchesSuccess -> {
+                    Log.d("KeyboardProofScreen", "Delete all matches success via WebSocket")
+                }
+                is WebSocketEvent.DeleteAllMatchesError -> {
+                    Log.e("KeyboardProofScreen", "Delete all matches error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.UsernameUpdated -> {
+                    // Update conversation list with fetched username
+                    // This event is emitted when a message arrives and username is fetched
+                    Log.d("KeyboardProofScreen", "Username updated: ${event.email} -> ${event.username}")
+                }
             }
         }
     }
@@ -1408,28 +1473,18 @@ fun KeyboardProofScreen(
                                             scope.launch {
                                                 try {
                                                     val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                                    val myEmail = prefs.getString("user_email", "") ?: ""
+                                                    val token = prefs.getString("access_token", "") ?: ""
                                                     
                                                     if (hasMessageBeenSent) {
                                                         // Accept match if message was sent
-                                                        Log.e("KeyboardProofScreen", "[UI BACK] Calling ACCEPT match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
-                                                        val response = NetworkClient.api.acceptMatch(myEmail, matchedUserGmail)
-                                                        Log.e("KeyboardProofScreen", "[UI BACK] Accept match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
-                                                        if (response.isSuccessful) {
-                                                            Log.e("KeyboardProofScreen", "[UI BACK] Accept match SUCCESS for $matchedUserGmail")
-                                                        } else {
-                                                            Log.e("KeyboardProofScreen", "[UI BACK] Accept match FAILED: ${response.errorBody()?.string()}")
-                                                        }
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Calling ACCEPT match via WebSocket: candGmail=$matchedUserGmail")
+                                                        WebSocketManager.sendAcceptUser(matchedUserGmail, token)
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Accept match request sent via WebSocket")
                                                     } else {
                                                         // Skip match if no message was sent
-                                                        Log.e("KeyboardProofScreen", "[UI BACK] Calling SKIP match API: myEmail=$myEmail, candGmail=$matchedUserGmail")
-                                                        val response = NetworkClient.api.skipMatch(myEmail, matchedUserGmail)
-                                                        Log.e("KeyboardProofScreen", "[UI BACK] Skip match response: isSuccessful=${response.isSuccessful}, code=${response.code()}, message=${response.message()}")
-                                                        if (response.isSuccessful) {
-                                                            Log.e("KeyboardProofScreen", "[UI BACK] Skip match SUCCESS for $matchedUserGmail")
-                                                        } else {
-                                                            Log.e("KeyboardProofScreen", "[UI BACK] Skip match FAILED: ${response.errorBody()?.string()}")
-                                                        }
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Calling SKIP match via WebSocket: candGmail=$matchedUserGmail")
+                                                        WebSocketManager.sendSkipUser(matchedUserGmail, token)
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Skip match request sent via WebSocket")
                                                     }
                                                 } catch (e: Exception) {
                                                     Log.e("KeyboardProofScreen", "[UI BACK] EXCEPTION calling match endpoint: ${e.message}", e)

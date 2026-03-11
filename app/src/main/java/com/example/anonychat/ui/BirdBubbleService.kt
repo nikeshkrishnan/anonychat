@@ -25,7 +25,10 @@ import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
 import com.example.anonychat.network.GetPreferencesResponse
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.network.WebSocketEvent
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 
 private const val TAG = "BirdBubbleService"
 private const val NOTIF_CHANNEL_ID = "bird_bubble_channel"
@@ -223,13 +226,14 @@ class BirdBubbleService : Service() {
         }
         startVibration()
 
-        // Launch matchmaking API call in serviceScope
+        // Launch matchmaking via WebSocket in serviceScope
         serviceScope.launch {
             val userPrefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
             val email = userPrefs.getString("user_email", null)
+            val token = userPrefs.getString("access_token", null)
 
-            if (email == null) {
-                Log.w(TAG, "No user email saved. Cannot call matchmaking.")
+            if (email == null || token == null) {
+                Log.w(TAG, "No user email or token saved. Cannot call matchmaking.")
                 // show heart for short duration then revert
                 delay(3000)
                 stopVibration()
@@ -237,55 +241,129 @@ class BirdBubbleService : Service() {
                 return@launch
             }
 
-            // Call the matchmaking API with a timeout. Adjust timeout as needed.
-            val matchResponse =
-                    withContext(Dispatchers.IO) {
-                        try {
-                            // keep the same timeout wrapper
-                            withTimeoutOrNull(30_000) {
-                                try {
-                                    NetworkClient.api.callMatch(email)
-                                } catch (t: Throwable) {
-                                    Log.e(TAG, "callMatch failed: $t")
-                                    null
-                                }
-                            }
-                        } catch (t: Throwable) {
-                            Log.e(TAG, "match request exception: $t")
-                            null
-                        }
-                    }
-
-            // --- Robust null check: API returns JSON like {"match":"..."} or {"match":null}
-            val matchObj = matchResponse?.takeIf { it.isSuccessful }?.body()
-            val matchedEmail = matchObj?.gmail ?: matchObj?.match
-
-            if (matchedEmail.isNullOrBlank()) {
-                Log.w(TAG, "No match found in API response. Reverting to bird.")
-                stopVibration() // Stop vibration since the search is over
-                revertToBird()
-                return@launch
-            }
-
-            Log.d(TAG, "Match found: $matchedEmail. Saving preferences...")
+            // Call matchmaking via WebSocket with timeout
             try {
-                // We still fetch our own preferences if needed, but matched user's prefs are
-                // already in matchObj
-                val myPrefsResponse =
-                        withContext(Dispatchers.IO) { NetworkClient.api.getPreferences(email) }
+                Log.d(TAG, "Calling findMatch via WebSocket for: $email")
+                
+                // Check if conversation list is empty, if so delete all matches first via WebSocket
+                if (ConversationRepository.conversations.isEmpty()) {
+                    try {
+                        Log.d(TAG, "Deleting all matches via WebSocket before finding new match")
+                        WebSocketManager.sendDeleteAllMatches(token)
+                        
+                        val deleteEvent = withTimeoutOrNull(10_000) {
+                            WebSocketManager.events.first { event ->
+                                event is WebSocketEvent.DeleteAllMatchesSuccess ||
+                                event is WebSocketEvent.DeleteAllMatchesError
+                            }
+                        }
+                        
+                        when (deleteEvent) {
+                            is WebSocketEvent.DeleteAllMatchesSuccess -> {
+                                Log.d(TAG, "All matches deleted before calling match API")
+                            }
+                            is WebSocketEvent.DeleteAllMatchesError -> {
+                                Log.e(TAG, "Failed to delete all matches: ${deleteEvent.error}")
+                            }
+                            null -> {
+                                Log.e(TAG, "Delete all matches request timed out")
+                            }
+                            else -> {
+                                Log.w(TAG, "Unexpected event type received: ${deleteEvent?.javaClass?.simpleName}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error deleting all matches: ${e.message}")
+                    }
+                    
+                    // After deleting, check if conversation list is still empty
+                    // If so, no matches exist, revert to bird immediately
+                    if (ConversationRepository.conversations.isEmpty()) {
+                        Log.w(TAG, "No existing matches found after delete. Reverting to bird.")
+                        stopVibration()
+                        revertToBird()
+                        return@launch
+                    }
+                }
+                
+                // Send the find match request
+                WebSocketManager.sendFindMatch(token)
+                
+                // Wait for the match response with timeout
+                val matchEvent = withTimeoutOrNull(30_000) {
+                    WebSocketManager.events.first { event ->
+                        event is WebSocketEvent.MatchFound || event is WebSocketEvent.MatchError
+                    }
+                }
 
-                // Stop vibration only after network call is complete
-                stopVibration()
-
-                if (!myPrefsResponse.isSuccessful) {
-                    Log.e(TAG, "Failed to fetch preferences for current user.")
+                if (matchEvent == null) {
+                    Log.w(TAG, "Match request timed out. Reverting to bird.")
+                    stopVibration()
                     revertToBird()
                     return@launch
                 }
 
-                // 4️⃣ Store all necessary data in SharedPreferences for the tap handler
+                // Handle error events
+                if (matchEvent is WebSocketEvent.MatchError) {
+                    Log.w(TAG, "Match request error: ${matchEvent.error}. Reverting to bird.")
+                    stopVibration()
+                    revertToBird()
+                    return@launch
+                }
+
+                // Extract match data from WebSocket event
+                val matchObj = (matchEvent as? WebSocketEvent.MatchFound)?.match
+
+                val matchedEmail = matchObj?.gmail
+
+                // Check if match object is empty or email is blank
+                if (matchObj == null || matchedEmail.isNullOrBlank()) {
+                    Log.w(TAG, "No match found in WebSocket response (empty match object or no email). Reverting to bird.")
+                    stopVibration()
+                    revertToBird()
+                    return@launch
+                }
+
+                Log.d(TAG, "Match found via WebSocket: $matchedEmail. Fetching preferences...")
+                
+                // Fetch current user's preferences via WebSocket
+                WebSocketManager.sendGetPreferences(token)
+                
+                val myPrefsEvent = withTimeoutOrNull(10_000) {
+                    WebSocketManager.events.first { event ->
+                        // Only process PreferencesData for the current user (filter by email)
+                        (event is WebSocketEvent.PreferencesData && event.preferences.gmail == email) ||
+                        event is WebSocketEvent.PreferencesError
+                    }
+                }
+
+                // Stop vibration after network call completes
+                stopVibration()
+
+                if (myPrefsEvent == null) {
+                    Log.e(TAG, "Failed to fetch preferences via WebSocket (timeout).")
+                    revertToBird()
+                    return@launch
+                }
+
+                // Handle error events
+                if (myPrefsEvent is WebSocketEvent.PreferencesError) {
+                    Log.e(TAG, "Preferences request error: ${myPrefsEvent.error}")
+                    revertToBird()
+                    return@launch
+                }
+
+                val myPrefsData = (myPrefsEvent as? WebSocketEvent.PreferencesData)?.preferences
+
+                if (myPrefsData == null) {
+                    Log.e(TAG, "Failed to extract preferences data")
+                    revertToBird()
+                    return@launch
+                }
+
+                // Store all necessary data in SharedPreferences for the tap handler
                 val gson = com.google.gson.Gson()
-                val myPrefsJson = gson.toJson(myPrefsResponse.body())
+                val myPrefsJson = gson.toJson(myPrefsData)
 
                 // Convert matchObj (which has the matched user's prefs) to the format expected by
                 // the app
@@ -672,10 +750,17 @@ class BirdBubbleService : Service() {
                     while (isActive) {
                         try {
                             if (vibrator.hasVibrator()) {
-
-                                vibrator.vibrate(VibrationEffect.createOneShot(55, 180))
-                                delay(200)
-                                vibrator.vibrate(VibrationEffect.createOneShot(35, 120))
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    vibrator.vibrate(VibrationEffect.createOneShot(55, 180))
+                                    delay(200)
+                                    vibrator.vibrate(VibrationEffect.createOneShot(35, 120))
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    vibrator.vibrate(55)
+                                    delay(200)
+                                    @Suppress("DEPRECATION")
+                                    vibrator.vibrate(35)
+                                }
                                 delay(1000)
                             }
                         } catch (_: Exception) {}
@@ -687,11 +772,15 @@ class BirdBubbleService : Service() {
         vibrationJob?.cancel()
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     private fun vibrateShort() {
         if (!vibrator.hasVibrator()) return
         try {
-            vibrator.vibrate(VibrationEffect.createOneShot(40, 100))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(40, 100))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(40)
+            }
         } catch (_: Exception) {}
     }
 

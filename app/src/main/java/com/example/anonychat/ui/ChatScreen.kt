@@ -94,6 +94,8 @@ import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketEvent
 import com.example.anonychat.network.WebSocketManager
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.first
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -437,14 +439,22 @@ fun ChatScreen(
                 }
         }
 
-        // Fetch preferences from server on load — update sparks/roses state + SharedPreferences
+        // Fetch preferences from server on load via WebSocket — update sparks/roses state + SharedPreferences
         LaunchedEffect(Unit) {
                 val userEmail = userPrefsForCounts.getString("user_email", null)
-                if (userEmail != null) {
+                val token = userPrefsForCounts.getString("access_token", null)
+                if (userEmail != null && token != null) {
                         try {
-                                val response = NetworkClient.api.getPreferences(userEmail)
-                                if (response.isSuccessful && response.body() != null) {
-                                        val serverPrefs = response.body()!!
+                                WebSocketManager.sendGetPreferences(token)
+                                
+                                val prefEvent = withTimeoutOrNull(10_000) {
+                                        WebSocketManager.events.first { event ->
+                                                event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                        }
+                                }
+                                
+                                if (prefEvent is WebSocketEvent.PreferencesData) {
+                                        val serverPrefs = prefEvent.preferences
                                         serverPrefs.sparks?.let {
                                                 sparks = it
                                                 userPrefsForCounts.edit().putInt("sparks_self", it).apply()
@@ -456,21 +466,64 @@ fun ChatScreen(
                                         serverPrefs.availableRoses?.let {
                                                 userPrefsForCounts.edit().putInt("available_roses", it).apply()
                                         }
-                                        android.util.Log.d("ChatScreen", "Prefs fetched: sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
+                                        android.util.Log.d("ChatScreen", "Prefs fetched via WS: sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
                                 }
                         } catch (e: Exception) {
-                                android.util.Log.e("ChatScreen", "Error fetching prefs: ${e.message}")
+                                android.util.Log.e("ChatScreen", "Error fetching prefs via WS: ${e.message}")
                         }
                 }
         }
 
         // Listen for live WebSocket events: update sparks + conversation list
+        // State to hold matched user info for navigation
+        var pendingMatchNavigation by remember { mutableStateOf<Pair<User, Preferences>?>(null) }
+        
         LaunchedEffect(Unit) {
                 val myEmail = userPrefsForCounts.getString("user_email", "") ?: ""
                 WebSocketManager.events.collect { event ->
                         when (event) {
                                 is WebSocketEvent.SparkRight -> {
                                         sparks = userPrefsForCounts.getInt("sparks_self", sparks)
+                                }
+                                is WebSocketEvent.MatchFound -> {
+                                        Log.d("ChatScreen", "Match found via WebSocket: ${event.match.gmail}")
+                                        val matchObj = event.match
+                                        val matchedEmail = matchObj.gmail ?: matchObj.match
+                                        
+                                        if (!matchedEmail.isNullOrBlank()) {
+                                                // Build matched user and prefs from WebSocket event
+                                                val matchedUsername = matchObj.username ?: ""
+                                                val matchedRomanceMin = matchObj.romanceRange?.min?.toFloat() ?: 1f
+                                                val matchedRomanceMax = matchObj.romanceRange?.max?.toFloat() ?: 5f
+                                                val matchedGender = matchObj.gender ?: "male"
+                                                
+                                                val matchedPrefs = Preferences(
+                                                        romanceMin = matchedRomanceMin,
+                                                        romanceMax = matchedRomanceMax,
+                                                        gender = matchedGender,
+                                                        isOnline = matchObj.isOnline ?: false,
+                                                        lastSeen = matchObj.lastOnline ?: 0L,
+                                                        giftedMeARose = matchObj.giftedMeARose ?: false,
+                                                        hasTakenBackRose = matchObj.hasTakenBackRose ?: false
+                                                )
+                                                
+                                                val matchedUser = User(
+                                                        username = matchedUsername,
+                                                        profilePictureUrl = null,
+                                                        id = matchedEmail
+                                                )
+                                                
+                                                // Store for navigation trigger
+                                                pendingMatchNavigation = Pair(matchedUser, matchedPrefs)
+                                        } else {
+                                                // No match found (empty match object), stop the heart overlay
+                                                Log.w("ChatScreen", "No match found (empty match object). Stopping heart overlay.")
+                                                isLoading = false
+                                        }
+                                }
+                                is WebSocketEvent.MatchError -> {
+                                        Log.e("ChatScreen", "Match error via WebSocket: ${event.error}")
+                                        isLoading = false
                                 }
                                 is WebSocketEvent.NewMessage -> {
                                         val msg = event.message
@@ -487,23 +540,45 @@ fun ChatScreen(
                                         // Fetch actual username from API in background
                                         scope.launch {
                                             try {
-                                                val peerPrefsResponse = NetworkClient.api.getPreferences(peerEmail)
-                                                val peerPrefs = peerPrefsResponse.takeIf { it.isSuccessful }?.body()
-                                                val actualUsername = peerPrefs?.username ?: peerEmail.substringBefore('@')
+                                                val token = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                    .getString("access_token", null)
                                                 
-                                                ConversationRepository.upsert(
-                                                    myEmail = myEmail,
-                                                    peerEmail = peerEmail,
-                                                    peerUsername = actualUsername,
-                                                    preview = preview,
-                                                    timestamp = msg.timestamp,
-                                                    isIncoming = isIncoming,
-                                                    peerGender = peerPrefs?.gender,
-                                                    peerRomanceMin = peerPrefs?.romanceRange?.min?.toFloat(),
-                                                    peerRomanceMax = peerPrefs?.romanceRange?.max?.toFloat()
-                                                )
+                                                if (token != null) {
+                                                    WebSocketManager.sendGetPreferences(token, peerEmail)
+                                                    
+                                                    val prefEvent = withTimeoutOrNull(10_000) {
+                                                        WebSocketManager.events.first { event ->
+                                                            event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                                        }
+                                                    }
+                                                    
+                                                    val peerPrefs = (prefEvent as? WebSocketEvent.PreferencesData)?.preferences
+                                                    val actualUsername = peerPrefs?.username ?: peerEmail.substringBefore('@')
+                                                    
+                                                    ConversationRepository.upsert(
+                                                        myEmail = myEmail,
+                                                        peerEmail = peerEmail,
+                                                        peerUsername = actualUsername,
+                                                        preview = preview,
+                                                        timestamp = msg.timestamp,
+                                                        isIncoming = isIncoming,
+                                                        peerGender = peerPrefs?.gender,
+                                                        peerRomanceMin = peerPrefs?.romanceRange?.min?.toFloat(),
+                                                        peerRomanceMax = peerPrefs?.romanceRange?.max?.toFloat()
+                                                    )
+                                                } else {
+                                                    // No token - fallback
+                                                    ConversationRepository.upsert(
+                                                        myEmail = myEmail,
+                                                        peerEmail = peerEmail,
+                                                        peerUsername = peerEmail.substringBefore('@'),
+                                                        preview = preview,
+                                                        timestamp = msg.timestamp,
+                                                        isIncoming = isIncoming
+                                                    )
+                                                }
                                             } catch (e: Exception) {
-                                                // Fallback to email prefix if API call fails
+                                                // Fallback to email prefix if WS call fails
                                                 ConversationRepository.upsert(
                                                     myEmail = myEmail,
                                                     peerEmail = peerEmail,
@@ -512,7 +587,7 @@ fun ChatScreen(
                                                     timestamp = msg.timestamp,
                                                     isIncoming = isIncoming
                                                 )
-                                                Log.e("ChatScreen", "Failed to fetch username for $peerEmail", e)
+                                                Log.e("ChatScreen", "Failed to fetch username for $peerEmail via WS", e)
                                             }
                                         }
                                 }
@@ -520,6 +595,46 @@ fun ChatScreen(
                         }
                 }
         }
+        
+        // Handle navigation when match is found
+        LaunchedEffect(pendingMatchNavigation) {
+                pendingMatchNavigation?.let { (matchedUser, matchedPrefs) ->
+                        // Get current user info from prefs
+                        val myEmail = userPrefsForCounts.getString("user_email", null)
+                        val myUsername = userPrefsForCounts.getString("username", null)
+                                ?: myEmail?.substringBefore('@') ?: ""
+                        val myGender = userPrefsForCounts.getString("gender", "male") ?: "male"
+                        val myRomanceMin = userPrefsForCounts.getFloat("romance_min", 1f)
+                        val myRomanceMax = userPrefsForCounts.getFloat("romance_max", 5f)
+                        
+                        if (myEmail != null) {
+                                val currentUserForNav = User(
+                                        id = myEmail,
+                                        username = myUsername,
+                                        profilePictureUrl = null
+                                )
+                                val myPrefsForNav = Preferences(
+                                        romanceMin = myRomanceMin,
+                                        romanceMax = myRomanceMax,
+                                        gender = myGender
+                                )
+                                
+                                // Navigate to direct chat
+                                onNavigateToDirectChat(
+                                        currentUserForNav,
+                                        myPrefsForNav,
+                                        matchedUser,
+                                        matchedPrefs,
+                                        true // From match
+                                )
+                                
+                                // Clear the pending navigation
+                                pendingMatchNavigation = null
+                                isLoading = false
+                        }
+                }
+        }
+        
         DisposableEffect(exoPlayer) {
                 onDispose {
                         ChatScreenPipController.onBeforeEnterPip = null
@@ -927,37 +1042,48 @@ fun ChatScreen(
                                                                                 false // From conversation list
                                                                         )
 
-                                                                        // Asynchronously fetch fresh peer preferences in background
+                                                                        // Asynchronously fetch fresh peer preferences in background via WebSocket
                                                                         scope.launch {
                                                                                 try {
-                                                                                        val peerPrefsResponse = NetworkClient.api.getPreferences(entry.userEmail)
-                                                                                        val peerPrefsBody = peerPrefsResponse.takeIf { it.isSuccessful }?.body()
+                                                                                        val token = prefs.getString("access_token", null)
+                                                                                        if (token != null) {
+                                                                                                android.util.Log.d("ChatScreen", "Fetching peer preferences via WebSocket for ${entry.userEmail}")
+                                                                                                WebSocketManager.sendGetPreferences(token, entry.userEmail)
+                                                                                                
+                                                                                                val prefEvent = withTimeoutOrNull(10_000) {
+                                                                                                        WebSocketManager.events.first { event ->
+                                                                                                                event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                                                                                        }
+                                                                                                }
+                                                                                                
+                                                                                                val peerPrefsBody = (prefEvent as? WebSocketEvent.PreferencesData)?.preferences
 
-                                                                                        if (peerPrefsBody != null) {
-                                                                                                // Update conversation repository with fresh data
-                                                                                                ConversationRepository.upsert(
-                                                                                                        myEmail = myEmail,
-                                                                                                        peerEmail = entry.userEmail,
-                                                                                                        peerUsername = peerPrefsBody.username ?: entry.username,
-                                                                                                        preview = entry.lastMessage,
-                                                                                                        timestamp = entry.lastMessageTimestamp,
-                                                                                                        isIncoming = false,
-                                                                                                        peerGender = peerPrefsBody.gender,
-                                                                                                        peerRomanceMin = peerPrefsBody.romanceRange?.min?.toFloat(),
-                                                                                                        peerRomanceMax = peerPrefsBody.romanceRange?.max?.toFloat()
-                                                                                                )
-                                                                                                
-                                                                                                // Update sparks and roses in SharedPreferences
-                                                                                                peerPrefsBody.sparks?.let { sparksValue ->
-                                                                                                        prefs.edit().putInt("sparks_self", sparksValue).apply()
-                                                                                                         sparks = sparksValue
+                                                                                                if (peerPrefsBody != null) {
+                                                                                                        // Update conversation repository with fresh data
+                                                                                                        ConversationRepository.upsert(
+                                                                                                                myEmail = myEmail,
+                                                                                                                peerEmail = entry.userEmail,
+                                                                                                                peerUsername = peerPrefsBody.username ?: entry.username,
+                                                                                                                preview = entry.lastMessage,
+                                                                                                                timestamp = entry.lastMessageTimestamp,
+                                                                                                                isIncoming = false,
+                                                                                                                peerGender = peerPrefsBody.gender,
+                                                                                                                peerRomanceMin = peerPrefsBody.romanceRange?.min?.toFloat(),
+                                                                                                                peerRomanceMax = peerPrefsBody.romanceRange?.max?.toFloat()
+                                                                                                        )
+                                                                                                        
+                                                                                                        // Update sparks and roses in SharedPreferences
+                                                                                                        peerPrefsBody.sparks?.let { sparksValue ->
+                                                                                                                prefs.edit().putInt("sparks_self", sparksValue).apply()
+                                                                                                                sparks = sparksValue
+                                                                                                        }
+                                                                                                        peerPrefsBody.totalRosesReceived?.let { rosesValue ->
+                                                                                                                prefs.edit().putInt("roses", rosesValue).apply()
+                                                                                                                roses = rosesValue
+                                                                                                        }
+                                                                                                        
+                                                                                                        Log.d("ChatScreen", "Background refresh: Updated prefs for ${entry.userEmail}, sparks=$sparks, roses=$roses")
                                                                                                 }
-                                                                                                peerPrefsBody.totalRosesReceived?.let { rosesValue ->
-                                                                                                        prefs.edit().putInt("roses", rosesValue).apply()
-                                                                                                        roses = rosesValue
-                                                                                                }
-                                                                                                
-                                                                                                Log.d("ChatScreen", "Background refresh: Updated prefs for ${entry.userEmail}, sparks=$sparks, roses=$roses")
                                                                                         }
                                                                                 } catch (e: Exception) {
                                                                                         Log.e("ChatScreen", "Background refresh failed for ${entry.userEmail}", e)
@@ -1070,153 +1196,59 @@ fun ChatScreen(
                                                                         return@launch
                                                                 }
 
-                                                                // Check if conversation list is empty, if so delete all matches first
-                                                                if (conversationList.isEmpty()) {
+                                                                // Get auth token for WebSocket request
+                                                                val token = prefs.getString("access_token", null)
+                                                                
+                                                                // Check if conversation list is empty, if so delete all matches first via WebSocket
+                                                                if (conversationList.isEmpty() && token != null) {
                                                                         try {
-                                                                                val deleteAllResponse = NetworkClient.api.deleteAllMatches(myEmail)
-                                                                                if (deleteAllResponse.isSuccessful) {
-                                                                                        Log.d("ChatScreen", "All matches deleted before calling match API")
-                                                                                } else {
-                                                                                        Log.e("ChatScreen", "Failed to delete all matches: ${deleteAllResponse.code()}")
+                                                                                Log.d("ChatScreen", "Deleting all matches via WebSocket before finding new match")
+                                                                                WebSocketManager.sendDeleteAllMatches(token)
+                                                                                
+                                                                                val deleteEvent = withTimeoutOrNull(10_000) {
+                                                                                        WebSocketManager.events.first { event ->
+                                                                                                event is WebSocketEvent.DeleteAllMatchesSuccess ||
+                                                                                                event is WebSocketEvent.DeleteAllMatchesError
+                                                                                        }
+                                                                                }
+                                                                                
+                                                                                when (deleteEvent) {
+                                                                                        is WebSocketEvent.DeleteAllMatchesSuccess -> {
+                                                                                                Log.d("ChatScreen", "All matches deleted before calling match API")
+                                                                                        }
+                                                                                        is WebSocketEvent.DeleteAllMatchesError -> {
+                                                                                                Log.e("ChatScreen", "Failed to delete all matches: ${deleteEvent.error}")
+                                                                                        }
+                                                                                        null -> {
+                                                                                                Log.e("ChatScreen", "Delete all matches request timed out")
+                                                                                        }
+                                                                                        else -> {
+                                                                                                Log.w("ChatScreen", "Unexpected event type received: ${deleteEvent?.javaClass?.simpleName}")
+                                                                                        }
                                                                                 }
                                                                         } catch (e: Exception) {
                                                                                 Log.e("ChatScreen", "Error deleting all matches: ${e.message}")
                                                                         }
                                                                 }
-
-                                                                // 1️⃣ Call match API
-                                                                val matchResponse =
-                                                                        NetworkClient.api.callMatch(
-                                                                                myEmail
-                                                                        )
-
-                                                                val matchObj =
-                                                                        matchResponse
-                                                                                ?.takeIf {
-                                                                                        it.isSuccessful
-                                                                                }
-                                                                                ?.body()
-
-                                                                val matchedEmail =
-                                                                        matchObj?.gmail
-                                                                                ?: matchObj?.match
-
-                                                                if (matchedEmail.isNullOrBlank() ||
-                                                                                matchObj == null
-                                                                ) {
-                                                                        Log.e(
-                                                                                "ChatScreen",
-                                                                                "No match found"
-                                                                        )
+                                                                
+                                                                if (token == null) {
+                                                                        Log.e("ChatScreen", "No auth token found")
+                                                                        isLoading = false
                                                                         return@launch
                                                                 }
 
-                                                                // 2️⃣ Build matched user and prefs
-                                                                // from matchObj
-                                                                val matchedUsername =
-                                                                        matchObj.username ?: ""
-                                                                val matchedRomanceMin =
-                                                                        matchObj.romanceRange?.min
-                                                                                ?.toFloat()
-                                                                                ?: 1f
-                                                                val matchedRomanceMax =
-                                                                        matchObj.romanceRange?.max
-                                                                                ?.toFloat()
-                                                                                ?: 5f
-                                                                val matchedGender =
-                                                                        matchObj.gender ?: "male"
-
-                                                                val matchedPrefs =
-                                                                        Preferences(
-                                                                                romanceMin =
-                                                                                        matchedRomanceMin,
-                                                                                romanceMax =
-                                                                                        matchedRomanceMax,
-                                                                                gender =
-                                                                                        matchedGender,
-                                                                                isOnline =
-                                                                                        matchObj.isOnline
-                                                                                                ?: false,
-                                                                                lastSeen =
-                                                                                        matchObj.lastOnline
-                                                                                                ?: 0L,
-                                                                                giftedMeARose =
-                                                                                        matchObj.giftedMeARose
-                                                                                                ?: false,
-                                                                                hasTakenBackRose =
-                                                                                        matchObj.hasTakenBackRose
-                                                                                                ?: false
-                                                                        )
-
-                                                                val matchedUser =
-                                                                        User(
-                                                                                username =
-                                                                                        matchedUsername,
-                                                                                profilePictureUrl =
-                                                                                        null,
-                                                                                id = matchedEmail
-                                                                        )
-
-                                                                // 3️⃣ Get current user info from
-                                                                // prefs (NOT from matched user
-                                                                // response!)
-                                                                val myUsername =
-                                                                        prefs.getString(
-                                                                                "username",
-                                                                                null
-                                                                        )
-                                                                                ?: myEmail.substringBefore(
-                                                                                        '@'
-                                                                                )
-                                                                val myGender =
-                                                                        prefs.getString(
-                                                                                "gender",
-                                                                                "male"
-                                                                        )
-                                                                                ?: "male"
-                                                                val myRomanceMin =
-                                                                        prefs.getFloat(
-                                                                                "romance_min",
-                                                                                1f
-                                                                        )
-                                                                val myRomanceMax =
-                                                                        prefs.getFloat(
-                                                                                "romance_max",
-                                                                                5f
-                                                                        )
-
-                                                                val currentUserForNav =
-                                                                        User(
-                                                                                id = myEmail,
-                                                                                username =
-                                                                                        myUsername,
-                                                                                profilePictureUrl =
-                                                                                        null
-                                                                        )
-                                                                val myPrefsForNav =
-                                                                        Preferences(
-                                                                                romanceMin =
-                                                                                        myRomanceMin,
-                                                                                romanceMax =
-                                                                                        myRomanceMax,
-                                                                                gender = myGender
-                                                                        )
-
-                                                                // 4️⃣ NAVIGATE TO DIRECT CHAT
-                                                                onNavigateToDirectChat(
-                                                                        currentUserForNav,
-                                                                        myPrefsForNav,
-                                                                        matchedUser,
-                                                                        matchedPrefs,
-                                                                        true // From match API
-                                                                )
+                                                                // Send find match request via WebSocket
+                                                                Log.d("ChatScreen", "Sending find_match via WebSocket")
+                                                                WebSocketManager.sendFindMatch(token)
+                                                                
+                                                                // isLoading will be set to false when navigation to KeyboardProofScreen happens
+                                                                // or when MatchError event is received
                                                         } catch (e: Exception) {
                                                                 Log.e(
                                                                         "ChatScreen",
                                                                         "Match flow failed",
                                                                         e
                                                                 )
-                                                        } finally {
                                                                 isLoading = false
                                                         }
                                                 }

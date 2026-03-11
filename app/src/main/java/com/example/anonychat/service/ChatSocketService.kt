@@ -65,9 +65,8 @@ class ChatSocketService : Service() {
         ProcessLifecycleOwner.Companion.get().lifecycle.addObserver(appLifecycleObserver)
 
         serviceScope.launch {
-            WebSocketManager.init(applicationContext)
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                WebSocketManager.init(applicationContext)
                 WebSocketManager.registerNetworkCallback(applicationContext)
             }
 

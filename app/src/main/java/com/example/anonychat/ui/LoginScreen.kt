@@ -88,6 +88,9 @@ import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.PreferencesRequest
 import com.example.anonychat.network.RomanceRange
 import com.example.anonychat.network.UserLoginRequest
+import com.example.anonychat.service.WebSocketMonitorService
+import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.network.WebSocketEvent
 import com.example.anonychat.network.UserRegistrationRequest
 import com.example.anonychat.network.UserResetPasswordRequest
 import com.example.anonychat.service.ChatSocketService
@@ -98,6 +101,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.first
 
 @ExperimentalFoundationApi
 @ExperimentalLayoutApi
@@ -484,76 +489,129 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                                             }
                                                             val intent = Intent(context, ChatSocketService::class.java)
                                                             ContextCompat.startForegroundService(context, intent)
+                                                            
+                                                            // Force WebSocket reconnection with new token
+                                                            Log.d("LoginScreen", "Forcing WebSocket reconnection with new token")
+                                                            WebSocketManager.disconnect()
+                                                            WebSocketManager.connect(loginResponse.accessToken, loginResponse.user.email)
+                                                            
+                                                            // Wait for initial connection (pong) within 3 seconds
+                                                            Log.d("LoginScreen", "Waiting for WebSocket connection...")
+                                                            val connected = WebSocketManager.sendPingAndWaitForPong(3000L)
+                                                            if (connected) {
+                                                                Log.d("LoginScreen", "WebSocket connected successfully")
+                                                            } else {
+                                                                Log.w("LoginScreen", "WebSocket connection timeout (3s), but continuing...")
+                                                            }
+                                                            
+                                                            // Start WebSocket Monitor Service
+                                                            val monitorIntent = Intent(context, WebSocketMonitorService::class.java)
+                                                            context.startService(monitorIntent)
+                                                            Log.d("LoginScreen", "Started WebSocketMonitorService after login")
                                                         } catch (e: Exception) {
                                                             android.util.Log.e("LoginPrefs", "Error during success processing", e)
                                                         }
                                                     }
 
-                                                    // Fetch Preferences
+                                                    // Fetch Preferences via WebSocket
                                                     val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
                                                     if (!prefs.contains("gender")) {
-                                                        val prefResponse = withContext(Dispatchers.IO) {
-                                                            NetworkClient.api.getPreferences(loginResponse.user.email)
+                                                        Log.d("LoginScreen", "Fetching preferences via WebSocket")
+                                                        
+                                                        // Send WebSocket request
+                                                        WebSocketManager.sendGetPreferences(loginResponse.accessToken)
+                                                        
+                                                        // Wait for response with timeout
+                                                        val prefEvent = withTimeoutOrNull(10_000) {
+                                                            WebSocketManager.events.first { event ->
+                                                                event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                                            }
                                                         }
 
-                                                        if (prefResponse.isSuccessful && prefResponse.body() != null) {
-                                                            val serverPrefs = prefResponse.body()!!
-                                                            withContext(Dispatchers.Main) {
-                                                                prefs.edit().apply {
-                                                                    serverPrefs.username.let { putString("username", it) }
-                                                                    serverPrefs.gender?.let { putString("gender", it) }
-                                                                    serverPrefs.age?.let { putInt("age", it) }
-                                                                    serverPrefs.preferredGender?.let { putString("preferred_gender", it) }
-                                                                    serverPrefs.preferredAgeRange?.let {
-                                                                        putFloat("preferred_age_min", it.min.toFloat())
-                                                                        putFloat("preferred_age_max", it.max.toFloat())
-                                                                    }
-                                                                    serverPrefs.romanceRange?.let {
-                                                                        putFloat("romance_min", it.min.toFloat())
-                                                                        putFloat("romance_max", it.max.toFloat())
-                                                                    }
-                                                                    putBoolean("random_match", serverPrefs.random ?: true)
-                                                                    apply()
-                                                                }
-                                                                isLoading = false
-                                                                onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
-                                                            }
-                                                        } else if (prefResponse.code() == 404) {
-                                                            val defaultRequest = PreferencesRequest(
-                                                                userId = loginResponse.user.id,
-                                                                age = 18,
-                                                                gender = "male",
-                                                                preferredGender = "any",
-                                                                preferredAgeRange = AgeRange(min = 18, max = 100),
-                                                                romanceRange = RomanceRange(min = 1, max = 5),
-                                                                random = true
-                                                            )
-                                                            val setResponse = withContext(Dispatchers.IO) {
-                                                                NetworkClient.api.setPreferences(defaultRequest)
-                                                            }
-                                                            withContext(Dispatchers.Main) {
-                                                                isLoading = false
-                                                                if (setResponse.isSuccessful) {
+                                                        when (prefEvent) {
+                                                            is WebSocketEvent.PreferencesData -> {
+                                                                val serverPrefs = prefEvent.preferences
+                                                                withContext(Dispatchers.Main) {
                                                                     prefs.edit().apply {
-                                                                        putString("gender", defaultRequest.gender)
-                                                                        putInt("age", defaultRequest.age)
-                                                                        putString("preferred_gender", defaultRequest.preferredGender)
-                                                                        putFloat("preferred_age_min", defaultRequest.preferredAgeRange.min.toFloat())
-                                                                        putFloat("preferred_age_max", defaultRequest.preferredAgeRange.max.toFloat())
-                                                                        putFloat("romance_min", defaultRequest.romanceRange.min.toFloat())
-                                                                        putFloat("romance_max", defaultRequest.romanceRange.max.toFloat())
+                                                                        serverPrefs.username.let { putString("username", it) }
+                                                                        serverPrefs.gender?.let { putString("gender", it) }
+                                                                        serverPrefs.age?.let { putInt("age", it) }
+                                                                        serverPrefs.preferredGender?.let { putString("preferred_gender", it) }
+                                                                        serverPrefs.preferredAgeRange?.let {
+                                                                            putFloat("preferred_age_min", it.min.toFloat())
+                                                                            putFloat("preferred_age_max", it.max.toFloat())
+                                                                        }
+                                                                        serverPrefs.romanceRange?.let {
+                                                                            putFloat("romance_min", it.min.toFloat())
+                                                                            putFloat("romance_max", it.max.toFloat())
+                                                                        }
+                                                                        putBoolean("random_match", serverPrefs.random ?: true)
                                                                         apply()
                                                                     }
+                                                                    isLoading = false
                                                                     onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
-                                                                } else {
-                                                                    Toast.makeText(context, "Failed to set defaults", Toast.LENGTH_SHORT).show()
                                                                 }
                                                             }
-                                                        }
-                                                    } else {
-                                                        withContext(Dispatchers.Main) {
-                                                            isLoading = false
-                                                            onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                            is WebSocketEvent.PreferencesError -> {
+                                                                Log.w("LoginScreen", "Preferences error: ${(prefEvent as WebSocketEvent.PreferencesError).error}, checking if 404")
+                                                                // Treat as 404 - user needs to set preferences via WebSocket
+                                                                WebSocketManager.sendUpdatePreferences(
+                                                                    token = loginResponse.accessToken,
+                                                                    age = 18,
+                                                                    gender = "male",
+                                                                    preferredGender = "any",
+                                                                    preferredAgeRange = AgeRange(min = 18, max = 100),
+                                                                    romanceRange = RomanceRange(min = 1, max = 5),
+                                                                    random = true
+                                                                )
+                                                                
+                                                                // Wait for update response
+                                                                val updateEvent = withTimeoutOrNull(10_000) {
+                                                                    WebSocketManager.events.first { event ->
+                                                                        event is WebSocketEvent.UpdatePreferencesSuccess || event is WebSocketEvent.UpdatePreferencesError
+                                                                    }
+                                                                }
+                                                                
+                                                                withContext(Dispatchers.Main) {
+                                                                    isLoading = false
+                                                                    when (updateEvent) {
+                                                                        is WebSocketEvent.UpdatePreferencesSuccess -> {
+                                                                            prefs.edit().apply {
+                                                                                putString("gender", "male")
+                                                                                putInt("age", 18)
+                                                                                putString("preferred_gender", "any")
+                                                                                putFloat("preferred_age_min", 18f)
+                                                                                putFloat("preferred_age_max", 100f)
+                                                                                putFloat("romance_min", 1f)
+                                                                                putFloat("romance_max", 5f)
+                                                                                apply()
+                                                                            }
+                                                                            onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                        }
+                                                                        is WebSocketEvent.UpdatePreferencesError -> {
+                                                                            Toast.makeText(context, "Failed to set defaults", Toast.LENGTH_SHORT).show()
+                                                                        }
+                                                                        else -> {
+                                                                            // Timeout or other event - proceed anyway
+                                                                            onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            null -> {
+                                                                // Timeout - proceed anyway
+                                                                withContext(Dispatchers.Main) {
+                                                                    isLoading = false
+                                                                    onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                }
+                                                            }
+                                                            else -> {
+                                                                // Other event types - proceed anyway
+                                                                withContext(Dispatchers.Main) {
+                                                                    isLoading = false
+                                                                    onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 } else {

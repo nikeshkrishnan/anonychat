@@ -37,6 +37,7 @@ import androidx.navigation.navArgument
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
 import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.service.WebSocketMonitorService
 import com.example.anonychat.ui.BirdBubbleService
 import com.example.anonychat.ui.ChatScreen
 import com.example.anonychat.ui.KeyboardProofScreen
@@ -335,6 +336,9 @@ class MainActivity : ComponentActivity() {
             )
         }
 
+        // Start WebSocket Monitor Service
+        startWebSocketMonitorService()
+
         setContent {
             AnonychatTheme {
                 NavGraph(
@@ -344,6 +348,22 @@ class MainActivity : ComponentActivity() {
                         onNavControllerReady = { navControllerHolder = it }
                 )
             }
+        }
+    }
+
+    private fun startWebSocketMonitorService() {
+        // Check if user is logged in by checking for stored credentials
+        val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val token = prefs.getString("token", null)
+        val email = prefs.getString("email", null)
+        
+        // Only start the monitor service if user has valid credentials
+        if (!token.isNullOrEmpty() && !email.isNullOrEmpty()) {
+            Log.d("MainActivity", "Starting WebSocketMonitorService")
+            val intent = Intent(this, WebSocketMonitorService::class.java)
+            startService(intent)
+        } else {
+            Log.d("MainActivity", "Skipping WebSocketMonitorService - no credentials found")
         }
     }
 
@@ -395,7 +415,10 @@ class MainActivity : ComponentActivity() {
         if (intent?.action == "NAVIGATE_TO_ROUTE" && intent.data != null) {
             val route = intent.data.toString().substringAfter("anonychat://")
             if (route.isNotBlank()) {
-                navController.navigate(route)
+                navController.navigate(route) {
+                    launchSingleTop = true
+                    restoreState = true
+                }
             }
             intent.action = null // Clear action to prevent re-triggering
         } else if (intent?.getStringExtra("NAVIGATE_TO") == "CHAT") {
