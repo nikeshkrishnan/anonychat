@@ -369,6 +369,11 @@ fun ChatScreen(
         var sparks by remember { mutableStateOf(userPrefsForCounts.getInt("sparks_self", 0)) }
         var flowerKey by remember { mutableStateOf(0) }
         var thunderKey by remember { mutableStateOf(0) }
+        
+        // State for user profile picture - will be updated from server
+        var userGender by remember { mutableStateOf(userPrefsForCounts.getString("gender", "male") ?: "male") }
+        var userRomanceMin by remember { mutableStateOf(userPrefsForCounts.getFloat("romance_min", 1f)) }
+        var userRomanceMax by remember { mutableStateOf(userPrefsForCounts.getFloat("romance_max", 5f)) }
         val themePrefs = remember {
                 context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE)
         }
@@ -455,18 +460,38 @@ fun ChatScreen(
                                 
                                 if (prefEvent is WebSocketEvent.PreferencesData) {
                                         val serverPrefs = prefEvent.preferences
-                                        serverPrefs.sparks?.let {
-                                                sparks = it
-                                                userPrefsForCounts.edit().putInt("sparks_self", it).apply()
+                                        
+                                        // Update state variables immediately for reactive UI
+                                        serverPrefs.sparks?.let { sparks = it }
+                                        serverPrefs.totalRosesReceived?.let { roses = it }
+                                        serverPrefs.gender?.let { userGender = it }
+                                        serverPrefs.romanceRange?.let {
+                                                userRomanceMin = it.min.toFloat()
+                                                userRomanceMax = it.max.toFloat()
                                         }
-                                        serverPrefs.totalRosesReceived?.let {
-                                                roses = it
-                                                userPrefsForCounts.edit().putInt("roses", it).apply()
+                                        
+                                        // Update SharedPreferences with all fetched values
+                                        with(userPrefsForCounts.edit()) {
+                                                serverPrefs.sparks?.let { putInt("sparks_self", it) }
+                                                serverPrefs.totalRosesReceived?.let { putInt("roses", it) }
+                                                serverPrefs.availableRoses?.let { putInt("available_roses", it) }
+                                                // Save gender and romanceRange to fix profile picture inconsistency
+                                                serverPrefs.gender?.let { putString("gender", it) }
+                                                serverPrefs.romanceRange?.let {
+                                                        putFloat("romance_min", it.min.toFloat())
+                                                        putFloat("romance_max", it.max.toFloat())
+                                                }
+                                                // Save other user info
+                                                serverPrefs.username?.takeIf { it.isNotBlank() }?.let { putString("username", it) }
+                                                serverPrefs.age?.let { putInt("age", it) }
+                                                serverPrefs.preferredGender?.let { putString("preferred_gender", it) }
+                                                serverPrefs.preferredAgeRange?.let {
+                                                        putFloat("preferred_age_min", it.min.toFloat())
+                                                        putFloat("preferred_age_max", it.max.toFloat())
+                                                }
+                                                apply()
                                         }
-                                        serverPrefs.availableRoses?.let {
-                                                userPrefsForCounts.edit().putInt("available_roses", it).apply()
-                                        }
-                                        android.util.Log.d("ChatScreen", "Prefs fetched via WS: sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
+                                        android.util.Log.d("ChatScreen", "Prefs fetched via WS: sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}, gender=${serverPrefs.gender}, romanceRange=${serverPrefs.romanceRange}")
                                 }
                         } catch (e: Exception) {
                                 android.util.Log.e("ChatScreen", "Error fetching prefs via WS: ${e.message}")
@@ -682,20 +707,10 @@ fun ChatScreen(
                                                                 onNavigateToProfile(user.username)
                                                         }
                                 ) {
-                                        val userPrefs = remember {
-                                                context.getSharedPreferences(
-                                                        "user_prefs",
-                                                        Context.MODE_PRIVATE
-                                                )
-                                        }
-                                        val gender = userPrefs.getString("gender", "male") ?: "male"
-                                        val romanceStart = userPrefs.getFloat("romance_min", 2f)
-                                        val romanceEnd = userPrefs.getFloat("romance_max", 9f)
-
-                                        val emotion =
-                                                romanceRangeToEmotion(romanceStart, romanceEnd)
+                                        // Use state variables that are updated from server
+                                        val emotion = romanceRangeToEmotion(userRomanceMin, userRomanceMax)
                                         val resName =
-                                                if (gender == "female") "female_exp$emotion"
+                                                if (userGender == "female") "female_exp$emotion"
                                                 else "male_exp$emotion"
                                         val imageResId =
                                                 context.resources.getIdentifier(

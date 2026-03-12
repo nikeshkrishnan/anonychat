@@ -1211,6 +1211,31 @@ fun KeyboardProofScreen(
                     // This event is emitted when a message arrives and username is fetched
                     Log.d("KeyboardProofScreen", "Username updated: ${event.email} -> ${event.username}")
                 }
+                // Rating events - handled in RatingsScreen and ProfileScreen
+                is WebSocketEvent.AddRatingSuccess -> {
+                    Log.d("KeyboardProofScreen", "Add rating success via WebSocket")
+                }
+                is WebSocketEvent.AddRatingError -> {
+                    Log.e("KeyboardProofScreen", "Add rating error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.AverageRatingData -> {
+                    Log.d("KeyboardProofScreen", "Average rating data received via WebSocket")
+                }
+                is WebSocketEvent.AverageRatingError -> {
+                    Log.e("KeyboardProofScreen", "Average rating error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.RatingsData -> {
+                    Log.d("KeyboardProofScreen", "Ratings data received via WebSocket")
+                }
+                is WebSocketEvent.RatingsError -> {
+                    Log.e("KeyboardProofScreen", "Ratings error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.SpecificRatingData -> {
+                    Log.d("KeyboardProofScreen", "Specific rating data received via WebSocket")
+                }
+                is WebSocketEvent.SpecificRatingError -> {
+                    Log.e("KeyboardProofScreen", "Specific rating error via WebSocket: ${event.error}")
+                }
             }
         }
     }

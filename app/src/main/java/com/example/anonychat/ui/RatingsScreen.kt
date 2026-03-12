@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,8 +51,11 @@ import coil.request.ImageRequest
 import com.example.anonychat.R
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.Rating
+import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.network.WebSocketEvent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -68,6 +72,17 @@ fun RatingsScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val themePrefs = remember { context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE) }
+    
+    // Track active jobs for cleanup
+    val activeJobs = remember { mutableListOf<Job>() }
+    
+    // Cleanup when composable is disposed
+    DisposableEffect(Unit) {
+        onDispose {
+            activeJobs.forEach { it.cancel() }
+            activeJobs.clear()
+        }
+    }
     val userPrefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
     val isDarkTheme by remember { mutableStateOf(themePrefs.getBoolean("is_dark_theme", false)) }
     val textColor = if (isDarkTheme) Color.White else Color.Black
@@ -107,6 +122,11 @@ fun RatingsScreen(
     var sortOption by remember { mutableStateOf("Most relevant") }
     var showSortMenu by remember { mutableStateOf(false) }
     
+    // Trigger states for LaunchedEffect-based operations
+    var fetchExistingRatingTrigger by remember { mutableStateOf(0) }
+    var submitRatingTrigger by remember { mutableStateOf(0) }
+    var pendingRatingData by remember { mutableStateOf<Triple<Int, String, String>?>(null) } // rating, comment, toParam
+    
     // Filter states
     var genderFilter by remember { mutableStateOf("All Genders") }
     var showGenderMenu by remember { mutableStateOf(false) }
@@ -124,6 +144,21 @@ fun RatingsScreen(
     // Get current user's romance range for "Match my romance range" filter
     val myRomanceMin = remember { userPrefs.getFloat("romance_min", 1f) }
     val myRomanceMax = remember { userPrefs.getFloat("romance_max", 5f) }
+    
+    // Clean up state when navigating away to prevent visual artifacts
+    DisposableEffect(Unit) {
+        onDispose {
+            ratings = null
+            isLoading = true
+        }
+    }
+    
+    // Handle back press to clear state before navigation
+    BackHandler {
+        ratings = null
+        isLoading = true
+        navController.popBackStack()
+    }
     
     // Filtered and sorted ratings
     val filteredAndSortedRatings = remember(ratings, sortOption, genderFilter, romanceFilter, myRomanceMin, myRomanceMax) {
@@ -179,33 +214,62 @@ fun RatingsScreen(
         filteredAndSortedRatings?.size ?: ratingCount
     }
     
-    // Fetch ratings on load
+    // Fetch ratings on load via WebSocket
     LaunchedEffect(displayEmail) {
         if (displayEmail != null) {
-            android.util.Log.d("RatingsScreen", "Fetching ratings for $displayEmail")
+            android.util.Log.d("RatingsScreen", "Fetching ratings for $displayEmail via WebSocket")
+            
+            val token = userPrefs.getString("access_token", null)
+            if (token == null) {
+                android.util.Log.e("RatingsScreen", "No access token found")
+                ratings = emptyList()
+                isLoading = false
+                return@LaunchedEffect
+            }
             
             try {
-                // Fetch average rating
-                val avgResponse = NetworkClient.api.getAverageRating(displayEmail)
-                if (avgResponse.isSuccessful && avgResponse.body() != null) {
-                    val avgData = avgResponse.body()!!
-                    avgData.avgRating?.let { averageRating = it }
-                    avgData.count?.let { ratingCount = it }
-                    android.util.Log.d("RatingsScreen", "Average: $averageRating, Count: $ratingCount")
+                // Send WebSocket requests
+                WebSocketManager.sendGetAverageRating(token, displayEmail)
+                WebSocketManager.sendGetRatingsForUser(token, displayEmail)
+                
+                // Collect WebSocket events using LaunchedEffect's coroutine scope
+                val job = launch {
+                    WebSocketManager.events.collect { event ->
+                        when (event) {
+                            is WebSocketEvent.AverageRatingData -> {
+                                event.avgRating?.let { averageRating = it }
+                                event.count?.let { ratingCount = it }
+                                android.util.Log.d("RatingsScreen", "Average: $averageRating, Count: $ratingCount")
+                            }
+                            is WebSocketEvent.RatingsData -> {
+                                ratings = event.ratings
+                                android.util.Log.d("RatingsScreen", "Fetched ${ratings?.size ?: 0} ratings via WebSocket")
+                                isLoading = false
+                            }
+                            is WebSocketEvent.AverageRatingError -> {
+                                android.util.Log.e("RatingsScreen", "Error fetching average rating: ${event.error}")
+                            }
+                            is WebSocketEvent.RatingsError -> {
+                                android.util.Log.e("RatingsScreen", "Error fetching ratings: ${event.error}")
+                                ratings = emptyList()
+                                isLoading = false
+                            }
+                            else -> {}
+                        }
+                    }
                 }
                 
-                // Fetch all ratings
-                val ratingsResponse = NetworkClient.api.getRatings(displayEmail)
-                if (ratingsResponse.isSuccessful && ratingsResponse.body() != null) {
-                    ratings = ratingsResponse.body()!!
-                    android.util.Log.d("RatingsScreen", "Fetched ${ratings?.size ?: 0} ratings: $ratings")
-                } else {
-                    android.util.Log.e("RatingsScreen", "Failed to fetch ratings: ${ratingsResponse.code()}, ${ratingsResponse.errorBody()?.string()}")
+                // Timeout after 10 seconds
+                delay(10000)
+                job.cancel()
+                if (isLoading) {
+                    android.util.Log.w("RatingsScreen", "Timeout fetching ratings")
+                    ratings = emptyList()
+                    isLoading = false
                 }
             } catch (e: Exception) {
                 android.util.Log.e("RatingsScreen", "Error fetching ratings: ${e.message}")
-                ratings = emptyList() // Set to empty list on error
-            } finally {
+                ratings = emptyList()
                 isLoading = false
             }
         } else {
@@ -303,7 +367,11 @@ fun RatingsScreen(
                         }
                     },
                     navigationIcon = {
-                        IconButton(onClick = { navController.popBackStack() }) {
+                        IconButton(onClick = {
+                            ratings = null
+                            isLoading = true
+                            navController.popBackStack()
+                        }) {
                             Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = textColor)
                         }
                     },
@@ -354,34 +422,62 @@ fun RatingsScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
                             onClick = {
-                                // Fetch existing rating before showing dialog
-                                scope.launch {
+                                // Fetch existing rating before showing dialog via WebSocket
+                                val job = scope.launch {
                                     isLoadingExistingReview = true
                                     try {
                                         val myEmail = userPrefs.getString("user_email", null)
-                                        if (myEmail != null && displayEmail != null) {
-                                            android.util.Log.d("RatingsScreen", "Fetching existing rating from $myEmail to $displayEmail")
-                                            val response = NetworkClient.api.getSpecificRating(myEmail, displayEmail)
+                                        val token = userPrefs.getString("access_token", null)
+                                        if (myEmail != null && displayEmail != null && token != null) {
+                                            android.util.Log.d("RatingsScreen", "Fetching existing rating from $myEmail to $displayEmail via WebSocket")
                                             
-                                            if (response.isSuccessful && response.body() != null) {
-                                                // Found existing rating - pre-fill dialog (edit mode)
-                                                val existingRating = response.body()!!
-                                                reviewRating = existingRating.rating
-                                                reviewComment = existingRating.comment ?: ""
-                                                isEditMode = true
-                                                android.util.Log.d("RatingsScreen", "Found existing rating: ${existingRating.rating} stars")
-                                            } else if (response.code() == 404) {
-                                                // No existing rating - show empty dialog (create mode)
+                                            WebSocketManager.sendGetSpecificRating(token, myEmail, displayEmail)
+                                            
+                                            // Collect WebSocket events with timeout
+                                            val eventJob = launch {
+                                                WebSocketManager.events.collect { event ->
+                                                    when (event) {
+                                                        is WebSocketEvent.SpecificRatingData -> {
+                                                            if (event.rating != null) {
+                                                                // Found existing rating - pre-fill dialog (edit mode)
+                                                                reviewRating = event.rating.rating
+                                                                reviewComment = event.rating.comment ?: ""
+                                                                isEditMode = true
+                                                                android.util.Log.d("RatingsScreen", "Found existing rating: ${event.rating.rating} stars")
+                                                            } else {
+                                                                // No existing rating - show empty dialog (create mode)
+                                                                reviewRating = 0
+                                                                reviewComment = ""
+                                                                isEditMode = false
+                                                                android.util.Log.d("RatingsScreen", "No existing rating found")
+                                                            }
+                                                            isLoadingExistingReview = false
+                                                            showWriteReviewDialog = true
+                                                        }
+                                                        is WebSocketEvent.SpecificRatingError -> {
+                                                            android.util.Log.e("RatingsScreen", "Error fetching rating: ${event.error}")
+                                                            // Show empty dialog on error
+                                                            reviewRating = 0
+                                                            reviewComment = ""
+                                                            isEditMode = false
+                                                            isLoadingExistingReview = false
+                                                            showWriteReviewDialog = true
+                                                        }
+                                                        else -> {}
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Timeout after 5 seconds
+                                            delay(5000)
+                                            eventJob.cancel()
+                                            if (isLoadingExistingReview) {
+                                                android.util.Log.w("RatingsScreen", "Timeout fetching existing rating")
                                                 reviewRating = 0
                                                 reviewComment = ""
                                                 isEditMode = false
-                                                android.util.Log.d("RatingsScreen", "No existing rating found (404)")
-                                            } else {
-                                                android.util.Log.e("RatingsScreen", "Error fetching rating: ${response.code()}")
-                                                // Show empty dialog on error
-                                                reviewRating = 0
-                                                reviewComment = ""
-                                                isEditMode = false
+                                                isLoadingExistingReview = false
+                                                showWriteReviewDialog = true
                                             }
                                         }
                                     } catch (e: Exception) {
@@ -390,7 +486,6 @@ fun RatingsScreen(
                                         reviewRating = 0
                                         reviewComment = ""
                                         isEditMode = false
-                                    } finally {
                                         isLoadingExistingReview = false
                                         showWriteReviewDialog = true
                                     }
@@ -737,19 +832,28 @@ fun RatingsScreen(
                 confirmButton = {
                     Button(
                         onClick = {
-                            scope.launch {
+                            val job = scope.launch {
                                 isSubmittingReview = true
                                 showWriteReviewDialog = false
                                 try {
-                                    android.util.Log.d("RatingsScreen", "Submitting review: rating=$reviewRating, comment=$reviewComment")
+                                    android.util.Log.d("RatingsScreen", "Submitting review via WebSocket: rating=$reviewRating, comment=$reviewComment")
+                                    
+                                    val token = userPrefs.getString("access_token", null)
+                                    if (token == null || displayEmail == null) {
+                                        android.util.Log.e("RatingsScreen", "Missing token or displayEmail")
+                                        isSubmittingReview = false
+                                        return@launch
+                                    }
                                     
                                     // Get user's romance range and random flag from SharedPreferences
                                     val romanceMin = userPrefs.getFloat("romance_min", 1f).toInt()
                                     val romanceMax = userPrefs.getFloat("romance_max", 5f).toInt()
                                     val random = userPrefs.getBoolean("random_match", true)
                                     
-                                    // Build the request
-                                    val request = com.example.anonychat.network.SubmitRatingRequest(
+                                    // Submit via WebSocket
+                                    WebSocketManager.sendAddRating(
+                                        token = token,
+                                        toParam = displayEmail,
                                         rating = reviewRating,
                                         comment = reviewComment.ifBlank { null },
                                         romanceRange = com.example.anonychat.network.RomanceRange(
@@ -759,54 +863,66 @@ fun RatingsScreen(
                                         random = random
                                     )
                                     
-                                    // Submit to backend
-                                    if (displayEmail != null) {
-                                        val response = NetworkClient.api.submitRating(displayEmail, request)
-                                        
-                                        if (response.isSuccessful) {
-                                            android.util.Log.d("RatingsScreen", "Rating submitted successfully")
-//                                            android.widget.Toast.makeText(
-//                                                context,
-//                                                if (isEditMode) "Review updated!" else "Review posted!",
-//                                                android.widget.Toast.LENGTH_SHORT
-//                                            ).show()
-//
-                                            // Refresh ratings list
-                                            isLoading = true
-                                            try {
-                                                val ratingsResponse = NetworkClient.api.getRatings(displayEmail)
-                                                val avgResponse = NetworkClient.api.getAverageRating(displayEmail)
-                                                
-                                                if (ratingsResponse.isSuccessful && avgResponse.isSuccessful) {
-                                                    ratings = ratingsResponse.body()
-                                                    avgResponse.body()?.let {
-                                                        averageRating = it.avgRating ?: 0f
-                                                        ratingCount = it.count ?: 0
-                                                    }
+                                    // Collect WebSocket events
+                                    val eventJob = launch {
+                                        WebSocketManager.events.collect { event ->
+                                            when (event) {
+                                                is WebSocketEvent.AddRatingSuccess -> {
+                                                    android.util.Log.d("RatingsScreen", "Rating submitted successfully via WebSocket")
+                                                    
+                                                    // Refresh ratings list via WebSocket
+                                                    isLoading = true
+                                                    WebSocketManager.sendGetRatingsForUser(token, displayEmail)
+                                                    WebSocketManager.sendGetAverageRating(token, displayEmail)
                                                 }
-                                            } catch (e: Exception) {
-                                                android.util.Log.e("RatingsScreen", "Error refreshing ratings: ${e.message}")
-                                            } finally {
-                                                isLoading = false
+                                                is WebSocketEvent.AddRatingError -> {
+                                                    android.util.Log.e("RatingsScreen", "Failed to submit rating: ${event.error}")
+                                                    android.widget.Toast.makeText(
+                                                        context,
+                                                        "Failed to submit review. Please try again.",
+                                                        android.widget.Toast.LENGTH_SHORT
+                                                    ).show()
+                                                    isSubmittingReview = false
+                                                }
+                                                is WebSocketEvent.RatingsData -> {
+                                                    ratings = event.ratings
+                                                    android.util.Log.d("RatingsScreen", "Refreshed ${ratings?.size ?: 0} ratings after submit")
+                                                }
+                                                is WebSocketEvent.AverageRatingData -> {
+                                                    event.avgRating?.let { averageRating = it }
+                                                    event.count?.let { ratingCount = it }
+                                                    isLoading = false
+                                                    isSubmittingReview = false
+                                                }
+                                                else -> {}
                                             }
-                                        } else {
-                                            android.util.Log.e("RatingsScreen", "Failed to submit rating: ${response.code()}")
-                                            android.widget.Toast.makeText(
-                                                context,
-                                                "Failed to submit review. Please try again.",
-                                                android.widget.Toast.LENGTH_SHORT
-                                            ).show()
                                         }
+                                    }
+                                    
+                                    // Timeout after 10 seconds
+                                    delay(10000)
+                                    eventJob.cancel()
+                                    if (isSubmittingReview) {
+                                        android.util.Log.w("RatingsScreen", "Timeout submitting rating")
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Request timeout. Please try again.",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        isSubmittingReview = false
                                     }
                                 } catch (e: Exception) {
                                     android.util.Log.e("RatingsScreen", "Exception submitting rating: ${e.message}")
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        "Error: ${e.message}",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                } finally {
+                                    // Don't show toast for coroutine scope errors (can be ignored)
+                                    if (e.message?.contains("rememberCoroutineScope") != true) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Error: ${e.message}",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                                     isSubmittingReview = false
+                                } finally {
                                     reviewRating = 0
                                     reviewComment = ""
                                 }

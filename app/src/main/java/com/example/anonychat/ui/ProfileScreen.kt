@@ -56,6 +56,8 @@ import coil.request.ImageRequest
 import com.example.anonychat.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -198,57 +200,85 @@ fun ProfileScreen(
         // --- FETCH RATINGS FROM SERVER ON LOAD ---
         LaunchedEffect(Unit) {
             val userEmail = userPrefs.getString("user_email", null)
-            if (userEmail != null) {
-                android.util.Log.d("ProfileRatings", "Fetching ratings for $userEmail")
+            val token = userPrefs.getString("access_token", null)
+            if (userEmail != null && token != null) {
+                android.util.Log.d("ProfileRatings", "Fetching ratings for $userEmail via WebSocket")
                 try {
-                    val avgResponse = NetworkClient.api.getAverageRating(userEmail)
-                    if (avgResponse.isSuccessful && avgResponse.body() != null) {
-                        val avgData = avgResponse.body()!!
-                        rating = avgData.avgRating ?: 0f
-                        ratingCount = avgData.count ?: 0
-                        android.util.Log.d("ProfileRatings", "Fetched ratings: avg=$rating, count=$ratingCount")
-                    } else {
-                        android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${avgResponse.code()}")
+                    WebSocketManager.sendGetAverageRating(token, userEmail)
+                    
+                    // Collect WebSocket events
+                    val job = scope.launch {
+                        WebSocketManager.events.collect { event ->
+                            when (event) {
+                                is WebSocketEvent.AverageRatingData -> {
+                                    event.avgRating?.let { rating = it }
+                                    event.count?.let { ratingCount = it }
+                                    android.util.Log.d("ProfileRatings", "Fetched ratings via WebSocket: avg=$rating, count=$ratingCount")
+                                }
+                                is WebSocketEvent.AverageRatingError -> {
+                                    android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${event.error}")
+                                }
+                                else -> {}
+                            }
+                        }
                     }
+                    
+                    // Timeout after 5 seconds
+                    delay(5000)
+                    job.cancel()
                 } catch (e: Exception) {
                     android.util.Log.e("ProfileRatings", "Error fetching ratings: ${e.message}")
                 }
             } else {
-                android.util.Log.w("ProfileRatings", "User email not found, cannot fetch ratings.")
+                android.util.Log.w("ProfileRatings", "User email or token not found, cannot fetch ratings.")
             }
         }
 
         // --- FETCH RATINGS FROM SERVER ON LOAD ---
         LaunchedEffect(Unit) {
             val userEmail = userPrefs.getString("user_email", null)
-            if (userEmail != null) {
-                android.util.Log.d("ProfileRatings", "Fetching ratings for $userEmail")
+            val token = userPrefs.getString("access_token", null)
+            if (userEmail != null && token != null) {
+                android.util.Log.d("ProfileRatings", "Fetching ratings for $userEmail via WebSocket")
                 try {
-                    // Fetch average rating
-                    val avgResponse = NetworkClient.api.getAverageRating(userEmail)
-                    if (avgResponse.isSuccessful && avgResponse.body() != null) {
-                        val avgData = avgResponse.body()!!
-                        avgData.avgRating?.let {
-                            rating = it
-                            // Persist to SharedPreferences
-                            userPrefs.edit().putFloat("user_rating", it).apply()
+                    // Fetch average rating via WebSocket
+                    WebSocketManager.sendGetAverageRating(token, userEmail)
+                    
+                    // Collect WebSocket events
+                    val job = scope.launch {
+                        WebSocketManager.events.collect { event ->
+                            when (event) {
+                                is WebSocketEvent.AverageRatingData -> {
+                                    event.avgRating?.let {
+                                        rating = it
+                                        // Persist to SharedPreferences
+                                        userPrefs.edit().putFloat("user_rating", it).apply()
+                                    }
+                                    event.count?.let {
+                                        ratingCount = it
+                                        // Persist to SharedPreferences
+                                        userPrefs.edit().putInt("user_rating_count", it).apply()
+                                    }
+                                    android.util.Log.d("ProfileRatings", "Fetched and persisted ratings via WebSocket: avg=$rating, count=$ratingCount")
+                                }
+                                            is WebSocketEvent.AverageRatingError -> {
+                                                android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${event.error}")
+                                            }
+                                            else -> {}
+                                        }
+                                    }
+                                }
+                                
+                                // Timeout after 5 seconds
+                                delay(5000)
+                                job.cancel()
+                            } catch (e: Exception) {
+                                android.util.Log.e("ProfileRatings", "Error fetching ratings: ${e.message}")
+                            }
+                        } else {
+                            android.util.Log.w("ProfileRatings", "User email or token not found, cannot fetch ratings.")
                         }
-                        avgData.count?.let {
-                            ratingCount = it
-                            // Persist to SharedPreferences
-                            userPrefs.edit().putInt("user_rating_count", it).apply()
-                        }
-                        android.util.Log.d("ProfileRatings", "Fetched and persisted average rating: $rating, count: $ratingCount")
-                    } else {
-                        android.util.Log.e("ProfileRatings", "Failed to fetch average rating: ${avgResponse.errorBody()?.string()}")
                     }
-                } catch (e: Exception) {
-                    android.util.Log.e("ProfileRatings", "Error fetching ratings: ${e.message}")
-                }
-            } else {
-                android.util.Log.w("ProfileRatings", "User email not found in SharedPreferences")
-            }
-        }
 
 
 

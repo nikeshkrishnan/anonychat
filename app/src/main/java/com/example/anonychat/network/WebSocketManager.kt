@@ -210,6 +210,16 @@ sealed class WebSocketEvent {
     data class TogglePickBestSuccess(val enabled: Boolean) : WebSocketEvent()
     data class TogglePickBestError(val error: String) : WebSocketEvent()
     
+    // Rating events
+    data class AddRatingSuccess(val message: String) : WebSocketEvent()
+    data class AddRatingError(val error: String) : WebSocketEvent()
+    data class AverageRatingData(val avgRating: Float?, val count: Int?) : WebSocketEvent()
+    data class AverageRatingError(val error: String) : WebSocketEvent()
+    data class RatingsData(val ratings: List<com.example.anonychat.network.Rating>) : WebSocketEvent()
+    data class RatingsError(val error: String) : WebSocketEvent()
+    data class SpecificRatingData(val rating: com.example.anonychat.network.Rating?) : WebSocketEvent()
+    data class SpecificRatingError(val error: String) : WebSocketEvent()
+    
     // Username update event for chat list
     data class UsernameUpdated(val email: String, val username: String) : WebSocketEvent()
 }
@@ -2347,6 +2357,91 @@ object WebSocketManager {
                         _events.emit(WebSocketEvent.TogglePickBestError(error))
                     }
                 }
+                "add_rating_success" -> {
+                    val message = json.optString("message", "Rating added successfully")
+                    Log.i("WebSocketManager", "add_rating_success received")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.AddRatingSuccess(message))
+                    }
+                }
+                "add_rating_error" -> {
+                    val error = json.optString("error", json.optString("message", "Add rating error"))
+                    Log.e("WebSocketManager", "add_rating_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.AddRatingError(error))
+                    }
+                }
+                "average_rating_data" -> {
+                    Log.i("WebSocketManager", "average_rating_data received")
+                    val avgRating = if (json.has("avgRating") && !json.isNull("avgRating")) json.getDouble("avgRating").toFloat() else null
+                    val count = if (json.has("count") && !json.isNull("count")) json.getInt("count") else null
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.AverageRatingData(avgRating, count))
+                    }
+                }
+                "average_rating_error", "get_average_rating_error" -> {
+                    val error = json.optString("error", json.optString("message", "Average rating error"))
+                    Log.e("WebSocketManager", "average_rating_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.AverageRatingError(error))
+                    }
+                }
+                "ratings_data" -> {
+                    Log.i("WebSocketManager", "ratings_data received")
+                    val ratingsArray = json.optJSONArray("ratings") ?: org.json.JSONArray()
+                    val ratings = mutableListOf<com.example.anonychat.network.Rating>()
+                    for (i in 0 until ratingsArray.length()) {
+                        val ratingJson = ratingsArray.getJSONObject(i)
+                        ratings.add(com.example.anonychat.network.Rating(
+                            fromusername = ratingJson.optString("fromusername"),
+                            fromgender = ratingJson.optString("fromgender"),
+                            rating = ratingJson.optInt("rating"),
+                            comment = ratingJson.optString("comment"),
+                            createdAt = ratingJson.optString("createdAt"),
+                            romanceRange = ratingJson.optJSONObject("romanceRange")?.let {
+                                com.example.anonychat.network.RomanceRange(it.getInt("min"), it.getInt("max"))
+                            },
+                            random = ratingJson.optBoolean("random")
+                        ))
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.RatingsData(ratings))
+                    }
+                }
+                "ratings_error", "get_ratings_for_user_error" -> {
+                    val error = json.optString("error", json.optString("message", "Ratings error"))
+                    Log.e("WebSocketManager", "ratings_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.RatingsError(error))
+                    }
+                }
+                "specific_rating_data" -> {
+                    Log.i("WebSocketManager", "specific_rating_data received")
+                    val ratingJson = json.optJSONObject("rating")
+                    val rating = ratingJson?.let {
+                        com.example.anonychat.network.Rating(
+                            fromusername = it.optString("fromusername"),
+                            fromgender = it.optString("fromgender"),
+                            rating = it.optInt("rating"),
+                            comment = it.optString("comment"),
+                            createdAt = it.optString("createdAt"),
+                            romanceRange = it.optJSONObject("romanceRange")?.let { range ->
+                                com.example.anonychat.network.RomanceRange(range.getInt("min"), range.getInt("max"))
+                            },
+                            random = it.optBoolean("random")
+                        )
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SpecificRatingData(rating))
+                    }
+                }
+                "specific_rating_error", "get_specific_rating_error" -> {
+                    val error = json.optString("error", json.optString("message", "Specific rating error"))
+                    Log.e("WebSocketManager", "specific_rating_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.SpecificRatingError(error))
+                    }
+                }
                 else -> {
                     // Unknown type — ignore or log
                     Log.w("WebSocketManager", "Unknown message type: $type")
@@ -2903,6 +2998,146 @@ object WebSocketManager {
                 }
             } catch (e: Exception) {
                 Log.e("WebSocketManager", "Exception sending toggle_pick_best", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to add a rating via WebSocket
+     */
+    fun sendAddRating(
+        token: String,
+        toParam: String,
+        rating: Int,
+        comment: String? = null,
+        romanceRange: com.example.anonychat.network.RomanceRange? = null,
+        random: Boolean? = null
+    ) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "add_rating")
+            .put("toParam", toParam)
+            .put("rating", rating)
+            .put("authorization", "Bearer $token")
+        
+        if (comment != null) {
+            payload.put("comment", comment)
+        }
+        if (romanceRange != null) {
+            payload.put("romanceRange", JSONObject()
+                .put("min", romanceRange.min)
+                .put("max", romanceRange.max))
+        }
+        if (random != null) {
+            payload.put("random", random)
+        }
+        
+        Log.i("WebSocketManager", "Sending add_rating request: toParam=$toParam, rating=$rating")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload.toString()) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "add_rating sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send add_rating")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send add_rating - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending add_rating", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to get average rating via WebSocket
+     */
+    fun sendGetAverageRating(token: String, toParam: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "get_average_rating")
+            .put("toParam", toParam)
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending get_average_rating request: toParam=$toParam")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "get_average_rating sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send get_average_rating")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send get_average_rating - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending get_average_rating", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to get all ratings for a user via WebSocket
+     */
+    fun sendGetRatingsForUser(token: String, toParam: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "get_ratings_for_user")
+            .put("toParam", toParam)
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending get_ratings_for_user request: toParam=$toParam")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "get_ratings_for_user sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send get_ratings_for_user")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send get_ratings_for_user - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending get_ratings_for_user", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to get a specific rating via WebSocket
+     */
+    fun sendGetSpecificRating(token: String, fromParam: String, toParam: String) {
+        ensureInit()
+        val payload = JSONObject()
+            .put("type", "get_specific_rating")
+            .put("fromParam", fromParam)
+            .put("toParam", toParam)
+            .put("authorization", "Bearer $token")
+            .toString()
+        
+        Log.i("WebSocketManager", "Sending get_specific_rating request: from=$fromParam, to=$toParam")
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payload) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "get_specific_rating sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send get_specific_rating")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send get_specific_rating - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending get_specific_rating", e)
             }
         }
     }
