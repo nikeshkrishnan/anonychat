@@ -42,6 +42,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -363,6 +364,7 @@ fun ChatScreen(
 
         var searchQuery by remember { mutableStateOf("") }
         var ratingFilter by remember { mutableStateOf("None") } // "None", "Highest", "Lowest"
+        var showFavoritesOnly by remember { mutableStateOf(false) }
         val context = LocalContext.current
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -976,7 +978,7 @@ fun ChatScreen(
 
                         // --- Floating Glassy Card for Search and List ---
                         // Force recomposition by observing the list content, not just size
-                        val filteredConversations = remember(conversationList.toList(), searchQuery, ratingFilter) {
+                        val filteredConversations = remember(conversationList.toList(), searchQuery, ratingFilter, showFavoritesOnly) {
                             var filtered = if (searchQuery.isBlank()) {
                                 conversationList.toList()
                             } else {
@@ -984,6 +986,11 @@ fun ChatScreen(
                                     it.username.contains(searchQuery, ignoreCase = true) ||
                                     it.userEmail.contains(searchQuery, ignoreCase = true)
                                 }
+                            }
+                            
+                            // Apply favorites filter
+                            if (showFavoritesOnly) {
+                                filtered = filtered.filter { it.isFavorite }
                             }
                             
                             // Apply rating filter
@@ -1038,6 +1045,18 @@ fun ChatScreen(
                                                                         tint = if (isDarkTheme) Color(0xFF7A8FA9) else Color.Gray,
                                                                         modifier = Modifier.size(24.dp)
                                                                 )
+                                                        },
+                                                        trailingIcon = {
+                                                                IconButton(
+                                                                        onClick = { showFavoritesOnly = !showFavoritesOnly }
+                                                                ) {
+                                                                        Icon(
+                                                                                imageVector = if (showFavoritesOnly) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                                                                contentDescription = if (showFavoritesOnly) "Show all" else "Show favorites only",
+                                                                                tint = if (showFavoritesOnly) Color(0xFF9C27B0) else (if (isDarkTheme) Color(0xFF7A8FA9) else Color.Gray),
+                                                                                modifier = Modifier.size(24.dp)
+                                                                        )
+                                                                }
                                                         },
                                                         colors = if (isDarkTheme) {
                                                                 TextFieldDefaults.colors(
