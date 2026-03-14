@@ -214,6 +214,7 @@ fun RatingsScreen(
         filteredAndSortedRatings?.size ?: ratingCount
     }
     
+    // Don't fetch ratings - show empty list
     // Fetch ratings on load via WebSocket
     LaunchedEffect(displayEmail) {
         if (displayEmail != null) {
@@ -317,6 +318,12 @@ fun RatingsScreen(
                 TopAppBar(
                     title = {
                         if (isViewingOtherUser && targetUsername != null) {
+                            // Check if target user is deactivated - observe StateFlow for reactive updates
+                            val deactivatedEmails by com.example.anonychat.utils.DeactivatedUsersManager.deactivatedEmailsFlow.collectAsState()
+                            val isTargetDeactivated = remember(targetUserEmail, deactivatedEmails) {
+                                com.example.anonychat.utils.DeactivatedUsersManager.isDeactivated(targetUserEmail)
+                            }
+                            
                             // Show target user's profile info
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -332,11 +339,15 @@ fun RatingsScreen(
                                 val avatarResId = remember(avatarResName) {
                                     context.resources.getIdentifier(avatarResName, "raw", context.packageName)
                                 }
-                                val avatarUri = remember(avatarResId) {
-                                    if (avatarResId != 0)
+                                val avatarUri = remember(avatarResId, isTargetDeactivated) {
+                                    if (isTargetDeactivated) {
+                                        // Show ghost animation for deactivated users
+                                        Uri.parse("android.resource://${context.packageName}/${R.drawable.ghost_animation}")
+                                    } else if (avatarResId != 0) {
                                         Uri.parse("android.resource://${context.packageName}/$avatarResId")
-                                    else
+                                    } else {
                                         Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+                                    }
                                 }
                                 val avatarBgColor = if (isDarkTheme) Color(0xFF3A4552) else Color(0xFF87CEEB)
                                 
@@ -360,7 +371,7 @@ fun RatingsScreen(
                                     )
                                 }
                                 
-                                Text("$targetUsername's Ratings")
+                                Text("${if (isTargetDeactivated) "Deactivated" else targetUsername}'s Ratings")
                             }
                         } else {
                             Text("Your Ratings")
@@ -991,17 +1002,12 @@ private fun RatingCard(
         }
     }
     
-    // Avatar logic with animated WebP support
-    val emotion = remember(rating.romanceRange) {
+    val emotion = remember(rating.romanceRange?.min, rating.romanceRange?.max) {
         if (rating.romanceRange != null) {
             romanceRangeToEmotion(rating.romanceRange.min.toFloat(), rating.romanceRange.max.toFloat())
-        } else {
-            3 // default emotion
-        }
+        } else 3
     }
-    val avatarResName = remember(rating.fromgender, emotion) {
-        if (rating.fromgender == "female") "female_exp$emotion" else "male_exp$emotion"
-    }
+    val avatarResName = if (rating.fromgender == "female") "female_exp$emotion" else "male_exp$emotion"
     val avatarResId = remember(avatarResName) {
         context.resources.getIdentifier(avatarResName, "raw", context.packageName)
     }

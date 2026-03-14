@@ -204,7 +204,7 @@ sealed class WebSocketEvent {
     
     // Preference events
     data class PreferencesData(val preferences: com.example.anonychat.network.GetPreferencesResponse) : WebSocketEvent()
-    data class PreferencesError(val error: String) : WebSocketEvent()
+    data class PreferencesError(val error: String, val email: String? = null) : WebSocketEvent()
     data class UpdatePreferencesSuccess(val message: String) : WebSocketEvent()
     data class UpdatePreferencesError(val error: String) : WebSocketEvent()
     data class TogglePickBestSuccess(val enabled: Boolean) : WebSocketEvent()
@@ -213,7 +213,7 @@ sealed class WebSocketEvent {
     // Rating events
     data class AddRatingSuccess(val message: String) : WebSocketEvent()
     data class AddRatingError(val error: String) : WebSocketEvent()
-    data class AverageRatingData(val avgRating: Float?, val count: Int?) : WebSocketEvent()
+    data class AverageRatingData(val avgRating: Float?, val count: Int?, val userEmail: String?) : WebSocketEvent()
     data class AverageRatingError(val error: String) : WebSocketEvent()
     data class RatingsData(val ratings: List<com.example.anonychat.network.Rating>) : WebSocketEvent()
     data class RatingsError(val error: String) : WebSocketEvent()
@@ -222,6 +222,9 @@ sealed class WebSocketEvent {
     
     // Username update event for chat list
     data class UsernameUpdated(val email: String, val username: String) : WebSocketEvent()
+    
+    // Token expiration event - triggers redirect to login
+    object TokenExpiredNeedLogin : WebSocketEvent()
 }
 
 /* ---------------------------------------------------
@@ -275,6 +278,9 @@ object WebSocketManager {
     // Track which users currently have their chat windows open with us
     private val activeChatSessions = mutableSetOf<String>()
     
+    // Track pending rating requests to match responses with requests
+    private val pendingRatingRequests = mutableListOf<String>()
+    
     fun isUserInChatWithUs(userEmail: String): Boolean {
         return activeChatSessions.contains(userEmail)
     }
@@ -289,7 +295,7 @@ object WebSocketManager {
         
         val shouldShow = !isInForeground || !isViewingThisChat
         
-        Log.d("WebSocketManager", "shouldShowNotification for $fromEmail: $shouldShow (foreground=$isInForeground, viewingChat=$isViewingThisChat)")
+        Log.e("WebSocketManager", "🔔 shouldShowNotification for $fromEmail: $shouldShow (foreground=$isInForeground, viewingChat=$isViewingThisChat)")
         
         return shouldShow
     }
@@ -1712,6 +1718,52 @@ object WebSocketManager {
             override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
                 Log.e("WebSocketManager", "WebSocket FAILURE", t)
                 
+                // Check if failure is due to 401 (token expired/invalid)
+                val is401 = r?.code == 401
+                if (is401) {
+                    Log.e("WebSocketManager", "WebSocket failed with 401 - token expired or invalid")
+                    
+                    // Try to parse response body
+                    val responseBody = r?.peekBody(Long.MAX_VALUE)?.string()
+                    Log.e("WebSocketManager", "401 Response body: $responseBody")
+                    
+                    // Attempt to regenerate token with saved credentials
+                    scope.launch {
+                        try {
+                            val tokenRegenerated = regenerateTokenFromSavedCredentials()
+                            if (tokenRegenerated) {
+                                Log.i("WebSocketManager", "Token regenerated successfully, reconnecting...")
+                                // Reset reconnect attempt counter since we have a fresh token
+                                reconnectAttempt = 0
+                                // Reconnect with new token
+                                delay(1000) // Brief delay before reconnecting
+                                reconnectIfNeeded(appContext)
+                            } else {
+                                Log.e("WebSocketManager", "Failed to regenerate token, scheduling normal reconnect")
+                                scheduleReconnect(++reconnectAttempt)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("WebSocketManager", "Error during token regeneration", e)
+                            scheduleReconnect(++reconnectAttempt)
+                        }
+                    }
+                    
+                    // Clean up current connection
+                    forceCloseSocket()
+                    readyState = ReadyState.NOT_READY
+                    
+                    // Resume continuation if waiting
+                    try {
+                        if (continuation != null && resumed?.compareAndSet(false, true) == true) {
+                            continuation.resumeWith(Result.failure(t))
+                        }
+                    } catch (e: Exception) {
+                        Log.w("WebSocketManager", "continuation resume onFailure failed", e)
+                    }
+                    
+                    return // Don't schedule normal reconnect, token regeneration will handle it
+                }
+                
                 // Check if failure is due to 403 (ban/suspension)
                 val is403 = r?.code == 403
                 if (is403) {
@@ -1977,9 +2029,12 @@ object WebSocketManager {
                     
                     // Trigger notification if appropriate
                     if (shouldShowNotification(chatMessage.from)) {
+                        Log.e("WebSocketManager", "NOTIFICATION TRIGGER: media_message from ${chatMessage.from}, contentType=$contentType, text=${chatMessage.text}")
                         scope.launch {
                             triggerNotification(chatMessage)
                         }
+                    } else {
+                        Log.e("WebSocketManager", "NOTIFICATION SKIPPED: media_message from ${chatMessage.from} (shouldShowNotification=false)")
                     }
 
                     val shouldAutoDownload =
@@ -2024,9 +2079,12 @@ object WebSocketManager {
                     
                     // Trigger notification if appropriate
                     if (shouldShowNotification(chatMessage.from)) {
+                        Log.e("WebSocketManager", "NOTIFICATION TRIGGER: chat_message from ${chatMessage.from}, text=${chatMessage.text}")
                         scope.launch {
                             triggerNotification(chatMessage)
                         }
+                    } else {
+                        Log.e("WebSocketManager", "NOTIFICATION SKIPPED: chat_message from ${chatMessage.from} (shouldShowNotification=false)")
                     }
                     
                     sendMessageReceivedAck(messageId, json.getString("from"))
@@ -2318,15 +2376,49 @@ object WebSocketManager {
                         totalRosesReceived = prefsJson.optInt("totalRosesReceived"),
                         availableRoses = prefsJson.optInt("availableRoses")
                     )
+                    
+                    // If we successfully got preferences for a user, mark them as active (not deactivated)
+                    val userEmail = preferences.gmail
+                    if (!userEmail.isNullOrEmpty() && com.example.anonychat.utils.DeactivatedUsersManager.isDeactivated(userEmail)) {
+                        com.example.anonychat.utils.DeactivatedUsersManager.markAsActive(userEmail)
+                        Log.d("WebSocketManager", "User reactivated: $userEmail")
+                    }
+                    
+                    // Clear the tracked email after successful response
+                    lastRequestedPreferencesEmail = null
+                    
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.PreferencesData(preferences))
                     }
                 }
                 "preferences_error", "get_preferences_error" -> {
                     val error = json.optString("error", json.optString("message", "Preferences error"))
-                    Log.e("WebSocketManager", "preferences_error received: $error")
+                    // Try to get email from response, fallback to last requested email
+                    var targetEmail = json.optString("email", json.optString("targetGmail", json.optString("gmail")))
+                    if (targetEmail.isEmpty()) {
+                        targetEmail = lastRequestedPreferencesEmail ?: ""
+                    }
+                    
+                    // Only log as error if it's not the expected "User preferences not found" message
+                    if (error != "User preferences not found") {
+                        Log.e("WebSocketManager", "preferences_error received: $error")
+                    } else {
+                        Log.d("WebSocketManager", "preferences_error received: $error (expected for deactivated user)${if (targetEmail.isNotEmpty()) " - email: $targetEmail" else " - no email tracked"}")
+                        
+                        // Mark user as deactivated if we have their email
+                        if (targetEmail.isNotEmpty() && error == "User preferences not found") {
+                            com.example.anonychat.utils.DeactivatedUsersManager.markAsDeactivated(targetEmail)
+                            Log.d("WebSocketManager", "Marked user as deactivated: $targetEmail")
+                        } else if (targetEmail.isEmpty()) {
+                            Log.w("WebSocketManager", "Cannot mark user as deactivated - no email available")
+                        }
+                    }
+                    
+                    // Clear the tracked email after handling
+                    lastRequestedPreferencesEmail = null
+                    
                     withContext(Dispatchers.Main.immediate) {
-                        _events.emit(WebSocketEvent.PreferencesError(error))
+                        _events.emit(WebSocketEvent.PreferencesError(error, targetEmail.takeIf { it.isNotEmpty() }))
                     }
                 }
                 "update_preferences_success" -> {
@@ -2375,8 +2467,13 @@ object WebSocketManager {
                     Log.i("WebSocketManager", "average_rating_data received")
                     val avgRating = if (json.has("avgRating") && !json.isNull("avgRating")) json.getDouble("avgRating").toFloat() else null
                     val count = if (json.has("count") && !json.isNull("count")) json.getInt("count") else null
+                    // Server now provides userEmail in the response
+                    val userEmail = json.optString("userEmail", json.optString("toParam", ""))
+                    
+                    Log.d("WebSocketManager", "Rating received for user: $userEmail, rating: $avgRating")
+                    
                     withContext(Dispatchers.Main.immediate) {
-                        _events.emit(WebSocketEvent.AverageRatingData(avgRating, count))
+                        _events.emit(WebSocketEvent.AverageRatingData(avgRating, count, userEmail.ifBlank { null }))
                     }
                 }
                 "average_rating_error", "get_average_rating_error" -> {
@@ -2885,11 +2982,18 @@ object WebSocketManager {
        PREFERENCE WEBSOCKET METHODS
     --------------------------------------------------- */
     
+    // Track the last requested email for preferences to handle errors
+    private var lastRequestedPreferencesEmail: String? = null
+    
     /**
      * Request to get preferences via WebSocket
      */
     fun sendGetPreferences(token: String, targetGmail: String? = null) {
         ensureInit()
+        
+        // Track the requested email for error handling
+        lastRequestedPreferencesEmail = targetGmail
+        
         val payload = JSONObject()
             .put("type", "get_preferences")
             .put("authorization", "Bearer $token")
@@ -3433,6 +3537,87 @@ object WebSocketManager {
     /* ---------------------------------------------------
        RECONNECT
     --------------------------------------------------- */
+    /**
+     * Attempt to regenerate the access token using saved login credentials.
+     * Returns true if token was successfully regenerated and saved, false otherwise.
+     */
+    private suspend fun regenerateTokenFromSavedCredentials(): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val prefs = appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                val username = prefs.getString("username", null)
+                val password = prefs.getString("password", null)
+                val userId = prefs.getString("user_id", null)
+                
+                Log.i("WebSocketManager", "Attempting token regeneration with saved credentials")
+                Log.d("WebSocketManager", "Username: $username, UserId: $userId, Password exists: ${password != null}")
+                
+                if (username == null || password == null || userId == null) {
+                    Log.e("WebSocketManager", "Missing saved credentials - cannot regenerate token")
+                    Log.e("WebSocketManager", "Clearing session and emitting TokenExpiredNeedLogin event")
+                    
+                    // Clear the session since we can't regenerate the token
+                    prefs.edit().clear().apply()
+                    
+                    // Emit event to notify UI to redirect to login
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.TokenExpiredNeedLogin)
+                    }
+                    
+                    return@withContext false
+                }
+                
+                // Call login endpoint to get new token
+                val loginRequest = UserLoginRequest(
+                    username = username,
+                    password = password,
+                    userId = userId
+                )
+                
+                val response = NetworkClient.api.loginUser(loginRequest)
+                
+                if (response.isSuccessful && response.body() != null) {
+                    val loginResponse = response.body()!!
+                    val newToken = loginResponse.accessToken
+                    val userEmail = loginResponse.user.email
+                    
+                    Log.i("WebSocketManager", "Token regeneration successful")
+                    Log.d("WebSocketManager", "New token obtained for email: $userEmail")
+                    
+                    // Save new token to SharedPreferences
+                    prefs.edit().apply {
+                        putString("access_token", newToken)
+                        putString("refresh_token", loginResponse.refreshToken)
+                        putString("user_email", userEmail)
+                        apply()
+                    }
+                    
+                    Log.i("WebSocketManager", "New token saved to SharedPreferences")
+                    return@withContext true
+                } else {
+                    Log.e("WebSocketManager", "Token regeneration failed: ${response.code()} - ${response.message()}")
+                    val errorBody = response.errorBody()?.string()
+                    Log.e("WebSocketManager", "Error body: $errorBody")
+                    
+                    // If login fails (e.g., wrong credentials), clear session and redirect to login
+                    if (response.code() == 401 || response.code() == 403) {
+                        Log.e("WebSocketManager", "Login failed with ${response.code()}, clearing session")
+                        prefs.edit().clear().apply()
+                        
+                        withContext(Dispatchers.Main.immediate) {
+                            _events.emit(WebSocketEvent.TokenExpiredNeedLogin)
+                        }
+                    }
+                    
+                    return@withContext false
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception during token regeneration", e)
+                return@withContext false
+            }
+        }
+    }
+    
     private fun scheduleReconnect(attempt: Int) {
         if (wsUrl == null || attempt > 10) return
 

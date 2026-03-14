@@ -98,18 +98,24 @@ class BirdBubbleService : Service() {
                         NotificationChannel(
                                         NOTIF_CHANNEL_ID,
                                         "Bird bubble",
-                                        NotificationManager.IMPORTANCE_LOW
+                                        NotificationManager.IMPORTANCE_NONE
                                 )
-                                .apply { description = "Floating bird bubble" }
+                                .apply {
+                                    description = "Floating bird bubble"
+                                    setShowBadge(false)
+                                    enableVibration(false)
+                                    setSound(null, null)
+                                }
                 )
             }
 
             val notification: Notification =
                     NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
-                            .setContentTitle("Bird bubble active")
-                            .setContentText("Tap bubble ♥")
                             .setSmallIcon(R.mipmap.ic_launcher)
-                            .setPriority(NotificationCompat.PRIORITY_LOW)
+                            .setOngoing(true)
+                            .setPriority(NotificationCompat.PRIORITY_MIN)
+                            .setGroup("anonychat_messages")
+                            .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
                             .build()
 
             startForeground(NOTIF_ID, notification)

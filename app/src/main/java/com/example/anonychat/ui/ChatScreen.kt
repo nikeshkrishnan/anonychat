@@ -20,10 +20,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,6 +41,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -52,6 +55,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +90,7 @@ import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
 import com.example.anonychat.service.ChatSocketService
+import com.example.anonychat.utils.ActiveChatTracker
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.example.anonychat.model.Preferences
@@ -112,7 +117,9 @@ data class ChatConversationEntry(
     // Peer avatar fields — same logic as KeyboardProofScreen
     val peerGender: String = "male",
     val peerRomanceMin: Float = 1f,
-    val peerRomanceMax: Float = 5f
+    val peerRomanceMax: Float = 5f,
+    val userRating: Float? = null,  // User's average rating
+    val isFavorite: Boolean = false  // Favorite status
 )
 
 /**
@@ -126,6 +133,7 @@ object ConversationRepository {
     val conversations = androidx.compose.runtime.mutableStateListOf<ChatConversationEntry>()
     private var context: Context? = null
     private val gson = Gson()
+    private val lock = Any()
 
     /**
      * Initialize the repository with a Context and load persisted data.
@@ -179,60 +187,77 @@ object ConversationRepository {
         isIncoming: Boolean,
         peerGender: String? = null,
         peerRomanceMin: Float? = null,
-        peerRomanceMax: Float? = null
+        peerRomanceMax: Float? = null,
+        userRating: Float? = null,
+        isFavorite: Boolean? = null
     ) {
-        val existingIndex = conversations.indexOfFirst { it.userEmail == peerEmail }
-        if (existingIndex >= 0) {
-            val existing = conversations[existingIndex]
-            conversations[existingIndex] = existing.copy(
-                username = peerUsername,
-                lastMessage = preview,
-                lastMessageTimestamp = timestamp,
-                unreadCount = if (isIncoming) existing.unreadCount + 1 else existing.unreadCount,
-                peerGender = peerGender ?: existing.peerGender,
-                peerRomanceMin = peerRomanceMin ?: existing.peerRomanceMin,
-                peerRomanceMax = peerRomanceMax ?: existing.peerRomanceMax
-            )
-        } else {
+        synchronized(lock) {
+            // Find existing entry to preserve unread count and other data
+            val existing = conversations.find { it.userEmail == peerEmail }
+            
+            // Remove ALL entries with this peerEmail (handles duplicates from corrupted data)
+            conversations.removeAll { it.userEmail == peerEmail }
+            
+            // Add the new/updated entry
             conversations.add(
                 ChatConversationEntry(
                     userEmail = peerEmail,
                     username = peerUsername,
                     lastMessage = preview,
                     lastMessageTimestamp = timestamp,
-                    unreadCount = if (isIncoming) 1 else 0,
-                    peerGender = peerGender ?: "male",
-                    peerRomanceMin = peerRomanceMin ?: 1f,
-                    peerRomanceMax = peerRomanceMax ?: 5f
+                    unreadCount = if (isIncoming) (existing?.unreadCount ?: 0) + 1 else (existing?.unreadCount ?: 0),
+                    peerGender = peerGender ?: existing?.peerGender ?: "male",
+                    peerRomanceMin = peerRomanceMin ?: existing?.peerRomanceMin ?: 1f,
+                    peerRomanceMax = peerRomanceMax ?: existing?.peerRomanceMax ?: 5f,
+                    userRating = userRating ?: existing?.userRating,
+                    isFavorite = isFavorite ?: existing?.isFavorite ?: false
                 )
             )
+            
+            // Sort: unread (incoming) entries first by timestamp desc, then rest by timestamp desc
+            val sorted = conversations.sortedWith(
+                compareByDescending<ChatConversationEntry> { it.unreadCount > 0 }
+                    .thenByDescending { it.lastMessageTimestamp }
+            )
+            conversations.clear()
+            conversations.addAll(sorted)
+            save()
         }
-        // Sort: unread (incoming) entries first by timestamp desc, then rest by timestamp desc
-        val sorted = conversations.sortedWith(
-            compareByDescending<ChatConversationEntry> { it.unreadCount > 0 }
-                .thenByDescending { it.lastMessageTimestamp }
-        )
-        conversations.clear()
-        conversations.addAll(sorted)
-        save()
     }
 
     fun clearUnread(peerEmail: String) {
-        val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
-        if (idx >= 0) {
-            conversations[idx] = conversations[idx].copy(unreadCount = 0)
-            save()
+        synchronized(lock) {
+            val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
+            if (idx >= 0) {
+                conversations[idx] = conversations[idx].copy(unreadCount = 0)
+                save()
+            }
         }
     }
 
     /**
+     * Update favorite status for a conversation.
+     */
+    fun updateFavorite(peerEmail: String, isFavorite: Boolean) {
+        synchronized(lock) {
+            val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
+            if (idx >= 0) {
+                conversations[idx] = conversations[idx].copy(isFavorite = isFavorite)
+                save()
+            }
+        }
+    }
+    
+    /**
      * Remove a conversation from the list by peer email.
      */
     fun remove(peerEmail: String) {
-        val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
-        if (idx >= 0) {
-            conversations.removeAt(idx)
-            save()
+        synchronized(lock) {
+            val idx = conversations.indexOfFirst { it.userEmail == peerEmail }
+            if (idx >= 0) {
+                conversations.removeAt(idx)
+                save()
+            }
         }
     }
 }
@@ -337,6 +362,7 @@ fun ChatScreen(
         DisposableEffect(Unit) { onDispose { onChatInactive() } }
 
         var searchQuery by remember { mutableStateOf("") }
+        var ratingFilter by remember { mutableStateOf("None") } // "None", "Highest", "Lowest"
         val context = LocalContext.current
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -498,10 +524,74 @@ fun ChatScreen(
                         }
                 }
         }
-
+        
+        // Fetch ratings for all users in conversation list
+        LaunchedEffect(conversationList.size) {
+                val token = userPrefsForCounts.getString("access_token", null)
+                if (token != null && conversationList.isNotEmpty()) {
+                        conversationList.forEach { entry ->
+                                launch {
+                                        try {
+                                                WebSocketManager.sendGetAverageRating(token, entry.userEmail)
+                                                
+                                                val ratingEvent = withTimeoutOrNull(5_000) {
+                                                        WebSocketManager.events.first { event ->
+                                                                (event is WebSocketEvent.AverageRatingData && event.userEmail == entry.userEmail) ||
+                                                                event is WebSocketEvent.AverageRatingError
+                                                        }
+                                                }
+                                                
+                                                if (ratingEvent is WebSocketEvent.AverageRatingData && ratingEvent.avgRating != null && ratingEvent.userEmail == entry.userEmail) {
+                                                        // Update the conversation entry with the rating
+                                                        val myEmail = userPrefsForCounts.getString("user_email", null)
+                                                        if (myEmail != null) {
+                                                                ConversationRepository.upsert(
+                                                                        myEmail = myEmail,
+                                                                        peerEmail = entry.userEmail,
+                                                                        peerUsername = entry.username,
+                                                                        preview = entry.lastMessage,
+                                                                        timestamp = entry.lastMessageTimestamp,
+                                                                        isIncoming = false,
+                                                                        peerGender = entry.peerGender,
+                                                                        peerRomanceMin = entry.peerRomanceMin,
+                                                                        peerRomanceMax = entry.peerRomanceMax,
+                                                                        userRating = ratingEvent.avgRating
+                                                                )
+                                                        }
+                                                }
+                                        } catch (e: Exception) {
+                                                Log.e("ChatScreen", "Failed to fetch rating for ${entry.userEmail}", e)
+                                        }
+                                }
+                        }
+                }
+        }
+        
         // Listen for live WebSocket events: update sparks + conversation list
         // State to hold matched user info for navigation
         var pendingMatchNavigation by remember { mutableStateOf<Pair<User, Preferences>?>(null) }
+        
+        // Handle back button press
+        BackHandler {
+            // If we're in loading state (searching for match) and have a pending match, skip it
+            if (isLoading && pendingMatchNavigation != null) {
+                val matchedUser = pendingMatchNavigation?.first
+                val token = userPrefsForCounts.getString("access_token", null)
+                
+                if (matchedUser != null && token != null) {
+                    // Call skip endpoint to ignore this match
+                    WebSocketManager.sendSkipUser(matchedUser.id, token)
+                    Log.d("ChatScreen", "Skipping match with ${matchedUser.id} due to back button press")
+                }
+                
+                // Clear pending match and stop loading
+                pendingMatchNavigation = null
+                isLoading = false
+            } else {
+                // Normal back button behavior - exit app
+                (context as? android.app.Activity)?.finish()
+            }
+        }
         
         LaunchedEffect(Unit) {
                 val myEmail = userPrefsForCounts.getString("user_email", "") ?: ""
@@ -540,6 +630,42 @@ fun ChatScreen(
                                                 
                                                 // Store for navigation trigger
                                                 pendingMatchNavigation = Pair(matchedUser, matchedPrefs)
+                                                
+                                                // Fetch rating for matched user asynchronously
+                                                scope.launch {
+                                                        try {
+                                                                val token = userPrefsForCounts.getString("access_token", null)
+                                                                if (token != null) {
+                                                                        WebSocketManager.sendGetAverageRating(token, matchedEmail)
+                                                                        
+                                                                        val ratingEvent = withTimeoutOrNull(5_000) {
+                                                                                WebSocketManager.events.first { event ->
+                                                                                        (event is WebSocketEvent.AverageRatingData && event.userEmail == matchedEmail) ||
+                                                                                        event is WebSocketEvent.AverageRatingError
+                                                                                }
+                                                                        }
+                                                                        
+                                                                        if (ratingEvent is WebSocketEvent.AverageRatingData && ratingEvent.avgRating != null && ratingEvent.userEmail == matchedEmail) {
+                                                                                // Update conversation entry with rating
+                                                                                ConversationRepository.upsert(
+                                                                                        myEmail = myEmail,
+                                                                                        peerEmail = matchedEmail,
+                                                                                        peerUsername = matchedUsername,
+                                                                                        preview = "New match!",
+                                                                                        timestamp = System.currentTimeMillis(),
+                                                                                        isIncoming = false,
+                                                                                        peerGender = matchedGender,
+                                                                                        peerRomanceMin = matchedRomanceMin,
+                                                                                        peerRomanceMax = matchedRomanceMax,
+                                                                                        userRating = ratingEvent.avgRating
+                                                                                )
+                                                                                Log.d("ChatScreen", "Fetched rating for matched user: ${ratingEvent.avgRating}")
+                                                                        }
+                                                                }
+                                                        } catch (e: Exception) {
+                                                                Log.e("ChatScreen", "Failed to fetch rating for matched user", e)
+                                                        }
+                                                }
                                         } else {
                                                 // No match found (empty match object), stop the heart overlay
                                                 Log.w("ChatScreen", "No match found (empty match object). Stopping heart overlay.")
@@ -550,72 +676,8 @@ fun ChatScreen(
                                         Log.e("ChatScreen", "Match error via WebSocket: ${event.error}")
                                         isLoading = false
                                 }
-                                is WebSocketEvent.NewMessage -> {
-                                        val msg = event.message
-                                        val peerEmail = if (msg.from == myEmail) msg.to else msg.from
-                                        val isIncoming = msg.from != myEmail
-                                        val preview = when {
-                                            msg.text.isNotBlank() -> msg.text
-                                            msg.mediaType == "IMAGE" -> "📷 Photo"
-                                            msg.mediaType == "VIDEO" -> "🎥 Video"
-                                            msg.audioUri != null -> "🎵 Voice message"
-                                            else -> "Message"
-                                        }
-                                        
-                                        // Fetch actual username from API in background
-                                        scope.launch {
-                                            try {
-                                                val token = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                                    .getString("access_token", null)
-                                                
-                                                if (token != null) {
-                                                    WebSocketManager.sendGetPreferences(token, peerEmail)
-                                                    
-                                                    val prefEvent = withTimeoutOrNull(10_000) {
-                                                        WebSocketManager.events.first { event ->
-                                                            event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
-                                                        }
-                                                    }
-                                                    
-                                                    val peerPrefs = (prefEvent as? WebSocketEvent.PreferencesData)?.preferences
-                                                    val actualUsername = peerPrefs?.username ?: peerEmail.substringBefore('@')
-                                                    
-                                                    ConversationRepository.upsert(
-                                                        myEmail = myEmail,
-                                                        peerEmail = peerEmail,
-                                                        peerUsername = actualUsername,
-                                                        preview = preview,
-                                                        timestamp = msg.timestamp,
-                                                        isIncoming = isIncoming,
-                                                        peerGender = peerPrefs?.gender,
-                                                        peerRomanceMin = peerPrefs?.romanceRange?.min?.toFloat(),
-                                                        peerRomanceMax = peerPrefs?.romanceRange?.max?.toFloat()
-                                                    )
-                                                } else {
-                                                    // No token - fallback
-                                                    ConversationRepository.upsert(
-                                                        myEmail = myEmail,
-                                                        peerEmail = peerEmail,
-                                                        peerUsername = peerEmail.substringBefore('@'),
-                                                        preview = preview,
-                                                        timestamp = msg.timestamp,
-                                                        isIncoming = isIncoming
-                                                    )
-                                                }
-                                            } catch (e: Exception) {
-                                                // Fallback to email prefix if WS call fails
-                                                ConversationRepository.upsert(
-                                                    myEmail = myEmail,
-                                                    peerEmail = peerEmail,
-                                                    peerUsername = peerEmail.substringBefore('@'),
-                                                    preview = preview,
-                                                    timestamp = msg.timestamp,
-                                                    isIncoming = isIncoming
-                                                )
-                                                Log.e("ChatScreen", "Failed to fetch username for $peerEmail via WS", e)
-                                            }
-                                        }
-                                }
+                                // NewMessage handling removed - now handled by ChatSocketService globally
+                                // This prevents double-counting of unread messages
                                 else -> Unit
                         }
                 }
@@ -914,14 +976,21 @@ fun ChatScreen(
 
                         // --- Floating Glassy Card for Search and List ---
                         // Force recomposition by observing the list content, not just size
-                        val filteredConversations = remember(conversationList.toList(), searchQuery) {
-                            if (searchQuery.isBlank()) {
+                        val filteredConversations = remember(conversationList.toList(), searchQuery, ratingFilter) {
+                            var filtered = if (searchQuery.isBlank()) {
                                 conversationList.toList()
                             } else {
                                 conversationList.filter {
                                     it.username.contains(searchQuery, ignoreCase = true) ||
                                     it.userEmail.contains(searchQuery, ignoreCase = true)
                                 }
+                            }
+                            
+                            // Apply rating filter
+                            when (ratingFilter) {
+                                "Highest" -> filtered.sortedByDescending { it.userRating ?: 0f }
+                                "Lowest" -> filtered.sortedBy { it.userRating ?: Float.MAX_VALUE }
+                                else -> filtered
                             }
                         }
 
@@ -997,6 +1066,109 @@ fun ChatScreen(
                                                         },
                                                         singleLine = true
                                                 )
+                                        }
+                                        
+                                        // --- RATING FILTER BUTTONS ---
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            // None button
+                                            Surface(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(36.dp)
+                                                    .clickable { ratingFilter = "None" },
+                                                shape = RoundedCornerShape(18.dp),
+                                                color = if (ratingFilter == "None") {
+                                                    if (isDarkTheme) Color(0xFF5A6B88) else Color(0xFF7986CB)
+                                                } else {
+                                                    if (isDarkTheme) Color(0xFF2D3648) else Color(0xFFE8EAF6)
+                                                }
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Text(
+                                                        text = "Most Relevant",
+                                                        color = if (isDarkTheme) Color.White else {
+                                                            if (ratingFilter == "None") Color.White else Color(0xFF5A6B88)
+                                                        },
+                                                        fontSize = 13.sp,
+                                                        fontWeight = if (ratingFilter == "None") FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                }
+                                            }
+                                            
+                                            // Highest button
+                                            Surface(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(36.dp)
+                                                    .clickable { ratingFilter = "Highest" },
+                                                shape = RoundedCornerShape(18.dp),
+                                                color = if (ratingFilter == "Highest") {
+                                                    if (isDarkTheme) Color(0xFF5A6B88) else Color(0xFF7986CB)
+                                                } else {
+                                                    if (isDarkTheme) Color(0xFF2D3648) else Color(0xFFE8EAF6)
+                                                }
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Text(
+                                                            text = "Highest",
+                                                            color = if (isDarkTheme) Color.White else {
+                                                                if (ratingFilter == "Highest") Color.White else Color(0xFF5A6B88)
+                                                            },
+                                                            fontSize = 13.sp,
+                                                            fontWeight = if (ratingFilter == "Highest") FontWeight.Bold else FontWeight.Normal
+                                                        )
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text(
+                                                            text = "⭐",
+                                                            fontSize = 12.sp
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Lowest button
+                                            Surface(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(36.dp)
+                                                    .clickable { ratingFilter = "Lowest" },
+                                                shape = RoundedCornerShape(18.dp),
+                                                color = if (ratingFilter == "Lowest") {
+                                                    if (isDarkTheme) Color(0xFF5A6B88) else Color(0xFF7986CB)
+                                                } else {
+                                                    if (isDarkTheme) Color(0xFF2D3648) else Color(0xFFE8EAF6)
+                                                }
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Text(
+                                                            text = "Lowest",
+                                                            color = if (isDarkTheme) Color.White else {
+                                                                if (ratingFilter == "Lowest") Color.White else Color(0xFF5A6B88)
+                                                            },
+                                                            fontSize = 13.sp,
+                                                            fontWeight = if (ratingFilter == "Lowest") FontWeight.Bold else FontWeight.Normal
+                                                        )
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text(
+                                                            text = "⭐",
+                                                            fontSize = 12.sp
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         }
 
                                         // --- CONVERSATION LIST ---
@@ -1098,6 +1270,33 @@ fun ChatScreen(
                                                                                                         }
                                                                                                         
                                                                                                         Log.d("ChatScreen", "Background refresh: Updated prefs for ${entry.userEmail}, sparks=$sparks, roses=$roses")
+                                                                                                }
+                                                                                                
+                                                                                                // Also fetch rating for this user
+                                                                                                WebSocketManager.sendGetAverageRating(token, entry.userEmail)
+                                                                                                
+                                                                                                val ratingEvent = withTimeoutOrNull(5_000) {
+                                                                                                        WebSocketManager.events.first { event ->
+                                                                                                                (event is WebSocketEvent.AverageRatingData && event.userEmail == entry.userEmail) ||
+                                                                                                                event is WebSocketEvent.AverageRatingError
+                                                                                                        }
+                                                                                                }
+                                                                                                
+                                                                                                if (ratingEvent is WebSocketEvent.AverageRatingData && ratingEvent.avgRating != null && ratingEvent.userEmail == entry.userEmail) {
+                                                                                                        // Update conversation entry with rating
+                                                                                                        ConversationRepository.upsert(
+                                                                                                                myEmail = myEmail,
+                                                                                                                peerEmail = entry.userEmail,
+                                                                                                                peerUsername = peerPrefsBody?.username ?: entry.username,
+                                                                                                                preview = entry.lastMessage,
+                                                                                                                timestamp = entry.lastMessageTimestamp,
+                                                                                                                isIncoming = false,
+                                                                                                                peerGender = peerPrefsBody?.gender ?: entry.peerGender,
+                                                                                                                peerRomanceMin = peerPrefsBody?.romanceRange?.min?.toFloat() ?: entry.peerRomanceMin,
+                                                                                                                peerRomanceMax = peerPrefsBody?.romanceRange?.max?.toFloat() ?: entry.peerRomanceMax,
+                                                                                                                userRating = ratingEvent.avgRating
+                                                                                                        )
+                                                                                                        Log.d("ChatScreen", "Fetched rating for ${entry.userEmail}: ${ratingEvent.avgRating}")
                                                                                                 }
                                                                                         }
                                                                                 } catch (e: Exception) {
@@ -1295,15 +1494,36 @@ fun ConversationListItem(
         border = if (isDarkTheme) null else BorderStroke(1.dp, borderColor),
         shadowElevation = 2.dp
     ) {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
             // Profile picture — same logic as KeyboardProofScreen avatar
             val context = LocalContext.current
+            val imageLoader = remember {
+                ImageLoader.Builder(context)
+                    .components {
+                        if (Build.VERSION.SDK_INT >= 28) {
+                            add(ImageDecoderDecoder.Factory())
+                        } else {
+                            add(GifDecoder.Factory())
+                        }
+                    }
+                    .build()
+            }
             val staticImageLoader = remember { ImageLoader(context) }
+            
+            // Check if user is deactivated - observe StateFlow for reactive updates
+            val deactivatedEmails by com.example.anonychat.utils.DeactivatedUsersManager.deactivatedEmailsFlow.collectAsState()
+            val isUserDeactivated = remember(entry.userEmail, deactivatedEmails) {
+                com.example.anonychat.utils.DeactivatedUsersManager.isDeactivated(entry.userEmail)
+            }
+            
             val emotion = remember(entry.peerRomanceMin, entry.peerRomanceMax) {
                 romanceRangeToEmotion(entry.peerRomanceMin, entry.peerRomanceMax)
             }
@@ -1311,38 +1531,70 @@ fun ConversationListItem(
             val avatarResId = remember(avatarResName) {
                 context.resources.getIdentifier(avatarResName, "raw", context.packageName)
             }
-            val avatarUri = remember(avatarResId) {
-                if (avatarResId != 0)
+            val avatarUri = remember(avatarResId, isUserDeactivated) {
+                if (isUserDeactivated) {
+                    // Show ghost animation for deactivated users
+                    Uri.parse("android.resource://${context.packageName}/${R.drawable.ghost_animation}")
+                } else if (avatarResId != 0) {
                     Uri.parse("android.resource://${context.packageName}/$avatarResId")
-                else
-                    Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
-            }
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(avatarBgColor),
-                contentAlignment = Alignment.Center
-            ) {
-                if (entry.profilePictureUrl != null) {
-                    Image(
-                        painter = rememberAsyncImagePainter(
-                            model = entry.profilePictureUrl,
-                            imageLoader = staticImageLoader
-                        ),
-                        contentDescription = "Profile",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
                 } else {
-                    Image(
-                        painter = rememberAsyncImagePainter(
-                            avatarUri,
-                            imageLoader = staticImageLoader
-                        ),
-                        contentDescription = "Profile",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
+                    Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+                }
+            }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy((-4).dp)
+            ) {
+                // Profile picture circle
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(avatarBgColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (entry.profilePictureUrl != null && !isUserDeactivated) {
+                        Image(
+                            painter = rememberAsyncImagePainter(
+                                model = entry.profilePictureUrl,
+                                imageLoader = staticImageLoader
+                            ),
+                            contentDescription = "Profile",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Image(
+                            painter = rememberAsyncImagePainter(
+                                avatarUri,
+                                imageLoader = if (isUserDeactivated) imageLoader else staticImageLoader
+                            ),
+                            contentDescription = "Profile",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
+                
+                // Rating text below profile picture
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(top = 0.dp)
+                ) {
+                    Text(
+                        text = if (entry.userRating != null && entry.userRating > 0f) {
+                            String.format("%.1f", entry.userRating)
+                        } else {
+                            "N/A"
+                        },
+                        color = if (isDarkTheme) Color.White else Color.Black,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "⭐",
+                        fontSize = 9.sp
                     )
                 }
             }
@@ -1352,7 +1604,7 @@ fun ConversationListItem(
             // Username + last message
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = entry.username,
+                    text = if (isUserDeactivated) "Deactivated" else entry.username,
                     fontWeight = FontWeight.Bold,
                     color = textColor,
                     fontSize = 15.sp,
@@ -1371,15 +1623,20 @@ fun ConversationListItem(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            // Timestamp + unread badge
+            // Heart icon (if favorite) + unread badge
             Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = formatMessageTime(entry.lastMessageTimestamp),
-                    color = if (entry.unreadCount > 0) Color(0xFF7986CB) else subTextColor,
-                    fontSize = 11.sp,
-                    fontWeight = if (entry.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal
-                )
-                Spacer(modifier = Modifier.height(4.dp))
+                // Heart icon for favorites
+                if (entry.isFavorite) {
+                    Icon(
+                        imageVector = Icons.Default.Favorite,
+                        contentDescription = "Favorite",
+                        tint = Color(0xFF9C27B0),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+                
+                // Unread badge
                 if (entry.unreadCount > 0) {
                     Box(
                         modifier = Modifier
@@ -1395,10 +1652,22 @@ fun ConversationListItem(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                } else {
+                } else if (!entry.isFavorite) {
                     Box(modifier = Modifier.size(22.dp))
                 }
             }
+            }
+            
+            // Timestamp at bottom right
+            Text(
+                text = formatMessageTime(entry.lastMessageTimestamp),
+                color = if (entry.unreadCount > 0) Color(0xFF7986CB) else subTextColor,
+                fontSize = 11.sp,
+                fontWeight = if (entry.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 2.dp, end = 2.dp)
+            )
         }
     }
 }

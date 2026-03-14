@@ -72,6 +72,8 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -478,6 +480,9 @@ fun KeyboardProofScreen(
     // Load blocked status from SharedPreferences
     var isUserBlocked by remember { mutableStateOf(userPrefs.getBoolean("blocked_$matchedUserGmail", false)) }
     
+    // Load favorite status from SharedPreferences
+    var isFavorite by remember { mutableStateOf(userPrefs.getBoolean("favorite_$matchedUserGmail", false)) }
+    
     // receivedRoses: shown in top header next to matched user's name (totalRosesReceived)
     var roses by remember { mutableStateOf(userPrefs.getInt("roses", 0)) }
     // availableRoses: shown near text input box (availableRoses from server), decremented on gifting
@@ -589,6 +594,10 @@ fun KeyboardProofScreen(
                             Log.e("KeyboardProofScreen", "[SYSTEM BACK] Calling SKIP match via WebSocket: candGmail=$matchedUserGmail")
                             WebSocketManager.sendSkipUser(matchedUserGmail, token)
                             Log.e("KeyboardProofScreen", "[SYSTEM BACK] Skip match request sent via WebSocket")
+                            
+                            // Remove from conversation list since match was skipped without sending a message
+                            ConversationRepository.remove(matchedUserGmail)
+                            Log.e("KeyboardProofScreen", "[SYSTEM BACK] Removed skipped match from conversation list")
                         }
                     } catch (e: Exception) {
                         Log.e("KeyboardProofScreen", "[SYSTEM BACK] EXCEPTION calling match endpoint: ${e.message}", e)
@@ -881,6 +890,12 @@ fun KeyboardProofScreen(
         }
     }
     
+    // Check if user is deactivated - observe StateFlow for reactive updates
+    val deactivatedEmails by com.example.anonychat.utils.DeactivatedUsersManager.deactivatedEmailsFlow.collectAsState()
+    val isUserDeactivated = remember(matchedUserGmail, deactivatedEmails) {
+        com.example.anonychat.utils.DeactivatedUsersManager.isDeactivated(matchedUserGmail)
+    }
+    
     val emotion = remember(currentMatchedPrefs.romanceMin, currentMatchedPrefs.romanceMax) {
         romanceRangeToEmotion(currentMatchedPrefs.romanceMin, currentMatchedPrefs.romanceMax)
     }
@@ -890,9 +905,15 @@ fun KeyboardProofScreen(
     val avatarResId = remember(avatarResName, currentMatchedPrefs.gender, emotion) {
         context.resources.getIdentifier(avatarResName, "raw", context.packageName)
     }
-    val avatarUri = remember(avatarResId, currentMatchedPrefs.gender, emotion) {
-        if (avatarResId != 0) Uri.parse("android.resource://${context.packageName}/$avatarResId")
-        else Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+    val avatarUri = remember(avatarResId, currentMatchedPrefs.gender, emotion, isUserDeactivated) {
+        if (isUserDeactivated) {
+            // Show ghost animation for deactivated users
+            Uri.parse("android.resource://${context.packageName}/${R.drawable.ghost_animation}")
+        } else if (avatarResId != 0) {
+            Uri.parse("android.resource://${context.packageName}/$avatarResId")
+        } else {
+            Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+        }
     }
 
     /* ---------------- BACKGROUND VIDEO ---------------- */
@@ -1186,7 +1207,12 @@ fun KeyboardProofScreen(
                     Log.d("KeyboardProofScreen", "Preferences data received via WebSocket")
                 }
                 is WebSocketEvent.PreferencesError -> {
-                    Log.e("KeyboardProofScreen", "Preferences error via WebSocket: ${event.error}")
+                    // Only log as error if it's not the expected "User preferences not found" message
+                    if (event.error != "User preferences not found") {
+                        Log.e("KeyboardProofScreen", "Preferences error via WebSocket: ${event.error}")
+                    } else {
+                        Log.d("KeyboardProofScreen", "Preferences error via WebSocket: ${event.error} (expected for new users)")
+                    }
                 }
                 is WebSocketEvent.UpdatePreferencesSuccess -> {
                     Log.d("KeyboardProofScreen", "Update preferences success via WebSocket")
@@ -1235,6 +1261,10 @@ fun KeyboardProofScreen(
                 }
                 is WebSocketEvent.SpecificRatingError -> {
                     Log.e("KeyboardProofScreen", "Specific rating error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.TokenExpiredNeedLogin -> {
+                    // Token expired and needs login - handled globally in MainActivity
+                    // No action needed here
                 }
             }
         }
@@ -1510,6 +1540,10 @@ fun KeyboardProofScreen(
                                                         Log.e("KeyboardProofScreen", "[UI BACK] Calling SKIP match via WebSocket: candGmail=$matchedUserGmail")
                                                         WebSocketManager.sendSkipUser(matchedUserGmail, token)
                                                         Log.e("KeyboardProofScreen", "[UI BACK] Skip match request sent via WebSocket")
+                                                        
+                                                        // Remove from conversation list since match was skipped without sending a message
+                                                        ConversationRepository.remove(matchedUserGmail)
+                                                        Log.e("KeyboardProofScreen", "[UI BACK] Removed skipped match from conversation list")
                                                     }
                                                 } catch (e: Exception) {
                                                     Log.e("KeyboardProofScreen", "[UI BACK] EXCEPTION calling match endpoint: ${e.message}", e)
@@ -1548,7 +1582,7 @@ fun KeyboardProofScreen(
                                                 painter =
                                                         rememberAsyncImagePainter(
                                                                 avatarUri,
-                                                                imageLoader = staticImageLoader
+                                                                imageLoader = if (isUserDeactivated) imageLoader else staticImageLoader
                                                         ),
                                                 contentDescription = null,
                                                 modifier = Modifier.padding(2.dp).clip(CircleShape),
@@ -1602,7 +1636,7 @@ fun KeyboardProofScreen(
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         // For testing: uncomment the line below and comment the line after it
                                    //   val displayUsername = "TestUser99"
-                                        val displayUsername = matchedUser.username
+                                        val displayUsername = if (isUserDeactivated) "Deactivated" else matchedUser.username
                                         
                                         Text(
                                                 text = displayUsername,
@@ -1689,6 +1723,24 @@ fun KeyboardProofScreen(
                                 }
                                 
                                 Spacer(Modifier.weight(1f))
+                                
+                                // Heart/Favorite button
+                                IconButton(
+                                    onClick = {
+                                        isFavorite = !isFavorite
+                                        // Save to SharedPreferences
+                                        userPrefs.edit().putBoolean("favorite_$matchedUserGmail", isFavorite).apply()
+                                        // Update conversation repository
+                                        ConversationRepository.updateFavorite(matchedUserGmail, isFavorite)
+                                    },
+                                    modifier = Modifier.size(40.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                        contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                                        tint = if (isFavorite) Color(0xFF9C27B0) else headerContentColor
+                                    )
+                                }
                                 
                                 // Three-dot menu
                                 Box {

@@ -471,6 +471,17 @@ class MainActivity : ComponentActivity() {
                             launchSingleTop = true
                         }
                     }
+                    is com.example.anonychat.network.WebSocketEvent.TokenExpiredNeedLogin -> {
+                        // Token expired and couldn't be regenerated - redirect to login
+                        Log.e("MainActivity", "Token expired, redirecting to login screen")
+                        val currentRoute = navController.currentBackStackEntry?.destination?.route
+                        if (currentRoute != Screen.Login.route) {
+                            navController.navigate(Screen.Login.route) {
+                                popUpTo(0) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
                     else -> {}
                 }
             }
@@ -576,7 +587,11 @@ class MainActivity : ComponentActivity() {
             composable(Screen.Login.route) {
                 LoginScreen(
                         onLoginClick = { user ->
-                            navController.navigate(Screen.Chat.createRoute(user))
+                            navController.navigate(Screen.Chat.createRoute(user)) {
+                                // Clear the back stack so user can't go back to login
+                                popUpTo(Screen.Login.route) { inclusive = true }
+                                launchSingleTop = true
+                            }
                         }
                 )
             }

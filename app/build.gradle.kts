@@ -98,6 +98,9 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("io.coil-kt:coil-video:2.7.0")
+    
+    // ShortcutBadger for app icon badge numbers
+    implementation("me.leolin:ShortcutBadger:1.1.22@aar")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation(libs.androidx.compose.runtime)
     implementation(libs.androidx.compose.animation.core)
