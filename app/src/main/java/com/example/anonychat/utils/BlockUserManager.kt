@@ -173,7 +173,7 @@ object BlockUserManager {
             // Show result on main thread
             launch(Dispatchers.Main) {
                 val message = when {
-                    failCount == 0 -> "All users unblocked successfully"
+                    failCount == 0 -> "All selected users unblocked successfully"
                     successCount == 0 -> "Failed to unblock users"
                     else -> "Unblocked $successCount users, $failCount failed"
                 }

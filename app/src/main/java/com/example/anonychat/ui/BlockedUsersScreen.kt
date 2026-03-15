@@ -512,21 +512,27 @@ fun BlockedUserItem(
 ) {
     val context = LocalContext.current
     
-    // Calculate emotion based on romance range
-    val emotion = remember(user.romanceMin, user.romanceMax) {
-        romanceRangeToEmotion(user.romanceMin, user.romanceMax)
-    }
+    // Check if user is deactivated (empty username indicates deactivated account)
+    val isDeactivated = user.username.isEmpty()
     
-    // Get avatar resource based on gender and emotion
-    val avatarResName = if (user.gender == "female") "female_exp$emotion" else "male_exp$emotion"
-    val avatarResId = remember(avatarResName) {
-        context.resources.getIdentifier(avatarResName, "raw", context.packageName)
-    }
-    val avatarUri = remember(avatarResId) {
-        if (avatarResId != 0) {
-            Uri.parse("android.resource://${context.packageName}/$avatarResId")
+    // Get avatar URI based on deactivation status
+    val avatarUri = remember(isDeactivated, user.gender, user.romanceMin, user.romanceMax) {
+        if (isDeactivated) {
+            // Show ghost animation for deactivated users
+            Uri.parse("android.resource://${context.packageName}/${R.drawable.ghost_animation}")
         } else {
-            Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+            // Calculate emotion based on romance range
+            val emotion = romanceRangeToEmotion(user.romanceMin, user.romanceMax)
+            
+            // Get avatar resource based on gender and emotion
+            val avatarResName = if (user.gender == "female") "female_exp$emotion" else "male_exp$emotion"
+            val avatarResId = context.resources.getIdentifier(avatarResName, "raw", context.packageName)
+            
+            if (avatarResId != 0) {
+                Uri.parse("android.resource://${context.packageName}/$avatarResId")
+            } else {
+                Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
+            }
         }
     }
     
@@ -607,12 +613,16 @@ fun BlockedUserItem(
             
             Spacer(modifier = Modifier.width(12.dp))
             
-            // User info - only username
+            // User info - show "Deactivated User" if username is empty
             Text(
-                text = user.username,
+                text = if (isDeactivated) "Deactivated User" else user.username,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (isDarkTheme) Color.White else Color.Black,
+                color = if (isDarkTheme) {
+                    if (isDeactivated) Color.Gray else Color.White
+                } else {
+                    if (isDeactivated) Color.DarkGray else Color.Black
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
