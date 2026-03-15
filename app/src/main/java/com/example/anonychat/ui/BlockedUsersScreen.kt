@@ -74,11 +74,10 @@ import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
 import com.example.anonychat.network.BlockedUser
-import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketEvent
 import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.utils.BlockUserManager
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.launch
 
 /**
  * BlockedUsersScreen - Displays a list of blocked users with ability to unblock
@@ -90,7 +89,6 @@ fun BlockedUsersScreen(
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     
     // State
     var blockedUsers by remember { mutableStateOf<List<BlockedUser>>(emptyList()) }
@@ -258,7 +256,7 @@ fun BlockedUsersScreen(
                         Text(
                             text = "${blockedUsers.size}",
                             fontSize = 16.sp,
-                            color = if (isDarkTheme) Color.Gray else Color.DarkGray,
+                            color = if (isDarkTheme) Color.White else Color.DarkGray,
                             modifier = Modifier.padding(end = 8.dp)
                         )
                     }
@@ -345,43 +343,25 @@ fun BlockedUsersScreen(
                                             .clip(RoundedCornerShape(20.dp))
                                             .background(Color(0xFF4CAF50))
                                             .clickable {
-                                                // Unblock selected users via API
-                                                scope.launch {
-                                                    val myEmail = userPrefs.getString("user_email", "") ?: ""
-                                                    val myUserId = myEmail.substringBefore("@")
-                                                    
-                                                    selectedUsers.forEach { email ->
-                                                        try {
-                                                            val targetUserId = email.substringBefore("@")
-                                                            Log.d("BlockedUsersScreen", "Unblocking user: $email (ID: $targetUserId)")
-                                                            val response = NetworkClient.api.unblockUser(myUserId, targetUserId)
-                                                            
-                                                            if (response.isSuccessful) {
-                                                                Log.d("BlockedUsersScreen", "Successfully unblocked: $email")
-                                                                // Update SharedPreferences to sync with KeyboardProofScreen
-                                                                userPrefs.edit()
-                                                                    .putBoolean("blocked_$email", false)
-                                                                    .apply()
-                                                                // Remove from local list immediately
-                                                                blockedUsers = blockedUsers.filter { it.email != email }
-                                                            } else {
-                                                                Log.e("BlockedUsersScreen", "Failed to unblock: $email")
-                                                            }
-                                                        } catch (e: Exception) {
-                                                            Log.e("BlockedUsersScreen", "Error unblocking $email: ${e.message}")
+                                                // Unblock selected users via application-scoped coroutine
+                                                val myEmail = userPrefs.getString("user_email", "") ?: ""
+                                                val emailsToUnblock = selectedUsers.toList()
+                                                
+                                                BlockUserManager.unblockMultipleUsers(
+                                                    context = context,
+                                                    myEmail = myEmail,
+                                                    targetEmails = emailsToUnblock,
+                                                    onComplete = { successCount, _ ->
+                                                        // Remove successfully unblocked users from local list
+                                                        blockedUsers = blockedUsers.filter { user ->
+                                                            !emailsToUnblock.contains(user.email)
                                                         }
+                                                        
+                                                        // Clear selection and exit selection mode
+                                                        selectedUsers.clear()
+                                                        isSelectionMode = false
                                                     }
-                                                    
-                                                    // Clear selection and exit selection mode
-                                                    selectedUsers.clear()
-                                                    isSelectionMode = false
-                                                    
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "Users unblocked",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                }
+                                                )
                                             }
                                             .padding(horizontal = 16.dp, vertical = 8.dp)
                                     ) {
@@ -486,49 +466,20 @@ fun BlockedUsersScreen(
                                         confirmButton = {
                                             TextButton(
                                                 onClick = {
-                                                    scope.launch {
-                                                        try {
-                                                            val myEmail = userPrefs.getString("user_email", "") ?: ""
-                                                            val myUserId = myEmail.substringBefore("@")
-                                                            val targetUserId = user.email.substringBefore("@")
-                                                            
-                                                            Log.d("BlockedUsersScreen", "Unblocking user: ${user.email} (ID: $targetUserId)")
-                                                            val response = NetworkClient.api.unblockUser(myUserId, targetUserId)
-                                                            
-                                                            if (response.isSuccessful) {
-                                                                Log.d("BlockedUsersScreen", "Successfully unblocked: ${user.email}")
-                                                                
-                                                                // Update SharedPreferences to sync with KeyboardProofScreen
-                                                                userPrefs.edit()
-                                                                    .putBoolean("blocked_${user.email}", false)
-                                                                    .apply()
-                                                                
-                                                                // Remove from local list immediately
-                                                                blockedUsers = blockedUsers.filter { it.email != user.email }
-                                                                
-                                                                android.widget.Toast.makeText(
-                                                                    context,
-                                                                    "User unblocked successfully",
-                                                                    android.widget.Toast.LENGTH_SHORT
-                                                                ).show()
-                                                            } else {
-                                                                Log.e("BlockedUsersScreen", "Failed to unblock: ${user.email}")
-                                                                android.widget.Toast.makeText(
-                                                                    context,
-                                                                    "Failed to unblock user",
-                                                                    android.widget.Toast.LENGTH_SHORT
-                                                                ).show()
-                                                            }
-                                                        } catch (e: Exception) {
-                                                            Log.e("BlockedUsersScreen", "Error unblocking user: ${e.message}")
-                                                            android.widget.Toast.makeText(
-                                                                context,
-                                                                "Error: ${e.message}",
-                                                                android.widget.Toast.LENGTH_SHORT
-                                                            ).show()
+                                                    val myEmail = userPrefs.getString("user_email", "") ?: ""
+                                                    
+                                                    // Use application-scoped coroutine that survives navigation
+                                                    BlockUserManager.unblockUser(
+                                                        context = context,
+                                                        myEmail = myEmail,
+                                                        targetEmail = user.email,
+                                                        onSuccess = {
+                                                            // Remove from local list immediately
+                                                            blockedUsers = blockedUsers.filter { it.email != user.email }
                                                         }
-                                                        userToUnblock = null
-                                                    }
+                                                    )
+                                                    
+                                                    userToUnblock = null
                                                 }
                                             ) {
                                                 Text("Unblock", color = Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
@@ -650,7 +601,7 @@ fun BlockedUserItem(
                 modifier = Modifier
                     .size(50.dp)
                     .clip(CircleShape)
-                    .background(if (isDarkTheme) Color(0xFF2C2C2C) else Color(0xFFE0E0E0)),
+                    .background(if (isDarkTheme) Color(0xFF3A4552) else Color(0xFF87CEEB)),
                 contentScale = ContentScale.Crop
             )
             

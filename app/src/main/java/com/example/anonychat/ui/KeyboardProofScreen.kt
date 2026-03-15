@@ -3,6 +3,7 @@ package com.example.anonychat.ui
 
 import android.Manifest
 import com.example.anonychat.utils.ActiveChatTracker
+import com.example.anonychat.utils.BlockUserManager
 import com.example.anonychat.utils.NotificationHelper
 import android.app.Activity
 import android.content.ContentUris
@@ -1798,35 +1799,28 @@ fun KeyboardProofScreen(
                                             text = { Text(if (isUserBlocked) "Unblock User" else "Block User") },
                                             onClick = {
                                                 showMenu = false
-                                                scope.launch {
-                                                    try {
-                                                        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                                        val myEmail = prefs.getString("user_email", "") ?: ""
-                                                        val myUserId = myEmail.substringBefore("@")
-                                                        val targetUserId = matchedUserGmail.substringBefore("@")
-                                                        
-                                                        val response = if (isUserBlocked) {
-                                                            NetworkClient.api.unblockUser(myUserId, targetUserId)
-                                                        } else {
-                                                            NetworkClient.api.blockUser(myUserId, targetUserId)
+                                                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                val myEmail = prefs.getString("user_email", "") ?: ""
+                                                
+                                                // Use application-scoped coroutine that survives navigation
+                                                if (isUserBlocked) {
+                                                    BlockUserManager.unblockUser(
+                                                        context = context,
+                                                        myEmail = myEmail,
+                                                        targetEmail = matchedUserGmail,
+                                                        onSuccess = {
+                                                            isUserBlocked = false
                                                         }
-                                                        
-                                                        if (response.isSuccessful) {
-                                                            isUserBlocked = !isUserBlocked
-                                                            // Persist blocked status to SharedPreferences
-                                                            userPrefs.edit()
-                                                                .putBoolean("blocked_$matchedUserGmail", isUserBlocked)
-                                                                .apply()
-                                                            
-                                                            val message = if (isUserBlocked) "User blocked successfully" else "User unblocked successfully"
-                                                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                                                        } else {
-                                                            Toast.makeText(context, "Failed to ${if (isUserBlocked) "unblock" else "block"} user", Toast.LENGTH_SHORT).show()
+                                                    )
+                                                } else {
+                                                    BlockUserManager.blockUser(
+                                                        context = context,
+                                                        myEmail = myEmail,
+                                                        targetEmail = matchedUserGmail,
+                                                        onSuccess = {
+                                                            isUserBlocked = true
                                                         }
-                                                    } catch (e: Exception) {
-                                                        Log.e("KeyboardProofScreen", "Error blocking/unblocking user: ${e.message}")
-                                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                                    }
+                                                    )
                                                 }
                                             }
                                         )
@@ -2903,47 +2897,44 @@ fun KeyboardProofScreen(
                             TextButton(
                                 onClick = {
                                     showDeleteConfirmDialog = false
-                                    scope.launch {
-                                        try {
-                                            val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                            val myEmail = prefs.getString("user_email", "") ?: ""
-                                            val myUserId = myEmail.substringBefore("@")
-                                            val targetUserId = matchedUserGmail.substringBefore("@")
-                                            
-                                            // Block user first
-                                            val blockResponse = NetworkClient.api.blockUser(myUserId, targetUserId)
-                                            
-                                            if (blockResponse.isSuccessful) {
-                                                // Then delete the match
-                                                val deleteResponse = NetworkClient.api.deleteMatch(myEmail, matchedUserGmail)
-                                                
-                                                if (deleteResponse.isSuccessful) {
-                                                    // Update blocked status in SharedPreferences
-                                                    userPrefs.edit()
-                                                        .putBoolean("blocked_$matchedUserGmail", true)
-                                                        .apply()
+                                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                    val myEmail = prefs.getString("user_email", "") ?: ""
+                                    
+                                    // Use application-scoped coroutine for block operation
+                                    BlockUserManager.blockUser(
+                                        context = context,
+                                        myEmail = myEmail,
+                                        targetEmail = matchedUserGmail,
+                                        onSuccess = {
+                                            // After successful block, delete the match
+                                            scope.launch {
+                                                try {
+                                                    val deleteResponse = NetworkClient.api.deleteMatch(myEmail, matchedUserGmail)
                                                     
-                                                    // Remove from conversation list
-                                                    ConversationRepository.remove(matchedUserGmail)
-                                                    
-                                                    // Delete chat history from Room database
-                                                    WebSocketManager.deleteChatHistory(myEmail, matchedUserGmail)
-                                                    
-                                                    Toast.makeText(context, "User blocked and chat deleted", Toast.LENGTH_SHORT).show()
-                                                    
-                                                    // Navigate back to ChatScreen
-                                                    onBack()
-                                                } else {
-                                                    Toast.makeText(context, "User blocked but failed to delete chat", Toast.LENGTH_SHORT).show()
+                                                    if (deleteResponse.isSuccessful) {
+                                                        // Remove from conversation list
+                                                        ConversationRepository.remove(matchedUserGmail)
+                                                        
+                                                        // Delete chat history from Room database
+                                                        WebSocketManager.deleteChatHistory(myEmail, matchedUserGmail)
+                                                        
+                                                        Toast.makeText(context, "User blocked and chat deleted", Toast.LENGTH_SHORT).show()
+                                                        
+                                                        // Navigate back to ChatScreen
+                                                        onBack()
+                                                    } else {
+                                                        Toast.makeText(context, "User blocked but failed to delete chat", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Log.e("KeyboardProofScreen", "Error deleting chat: ${e.message}")
+                                                    Toast.makeText(context, "User blocked but error deleting chat: ${e.message}", Toast.LENGTH_SHORT).show()
                                                 }
-                                            } else {
-                                                Toast.makeText(context, "Failed to block user", Toast.LENGTH_SHORT).show()
                                             }
-                                        } catch (e: Exception) {
-                                            Log.e("KeyboardProofScreen", "Error blocking and deleting: ${e.message}")
-                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        onError = { error ->
+                                            Toast.makeText(context, "Failed to block user: $error", Toast.LENGTH_SHORT).show()
                                         }
-                                    }
+                                    )
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
