@@ -39,6 +39,7 @@ import com.example.anonychat.model.User
 import com.example.anonychat.network.WebSocketManager
 import com.example.anonychat.service.WebSocketMonitorService
 import com.example.anonychat.ui.BirdBubbleService
+import com.example.anonychat.ui.BlockedUsersScreen
 import com.example.anonychat.ui.ChatScreen
 import com.example.anonychat.ui.KeyboardProofScreen
 import com.example.anonychat.ui.LoginScreen
@@ -99,6 +100,12 @@ sealed class Screen(val route: String) {
             val u2 = URLEncoder.encode(gson.toJson(matchedUser), "UTF-8")
             val p2 = URLEncoder.encode(gson.toJson(matchedPrefs), "UTF-8")
             return "directChat/$u1/$p1/$u2/$p2/$isNewMatch"
+        }
+    }
+    
+    object BlockedUsers : Screen("blockedUsers") {
+        fun createRoute(): String {
+            return "blockedUsers"
         }
     }
 }
@@ -626,6 +633,9 @@ class MainActivity : ComponentActivity() {
                                             isNewMatch
                                     )
                             navController.navigate(route)
+                        },
+                        onNavigateToBlockedUsers = {
+                            navController.navigate(Screen.BlockedUsers.createRoute())
                         }
                 )
             }
@@ -730,6 +740,12 @@ class MainActivity : ComponentActivity() {
                     targetGender = gender,
                     targetRomanceMin = romanceMin,
                     targetRomanceMax = romanceMax
+                )
+            }
+            
+            composable(Screen.BlockedUsers.route) {
+                BlockedUsersScreen(
+                    onNavigateBack = { navController.popBackStack() }
                 )
             }
         }

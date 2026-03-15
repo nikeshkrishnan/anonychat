@@ -19,6 +19,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Search
@@ -67,6 +71,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -354,7 +359,8 @@ fun ChatScreen(
                         myPrefs: Preferences,
                         matchedUser: User,
                         matchedPrefs: Preferences,
-                        isNewMatch: Boolean) -> Unit
+                        isNewMatch: Boolean) -> Unit,
+        onNavigateToBlockedUsers: () -> Unit = {}
 ) {
         // notify MainActivity that chat is now active
         LaunchedEffect(Unit) { onChatActive() }
@@ -365,6 +371,8 @@ fun ChatScreen(
         var searchQuery by remember { mutableStateOf("") }
         var ratingFilter by remember { mutableStateOf("None") } // "None", "Highest", "Lowest"
         var showFavoritesOnly by remember { mutableStateOf(false) }
+        var isSelectionMode by remember { mutableStateOf(false) }
+        val selectedChats = remember { mutableStateListOf<String>() }
         val context = LocalContext.current
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -414,7 +422,7 @@ fun ChatScreen(
         if (showThemeDialog) {
                 AlertDialog(
                         onDismissRequest = { showThemeDialog = false },
-                        title = { Text("Choose Theme") },
+                        title = { Text("Settings") },
                         text = {
                                 Column {
                                         TextButton(
@@ -437,6 +445,12 @@ fun ChatScreen(
                                                                 .apply()
                                                 }
                                         ) { Text("Dark Theme") }
+                                        TextButton(
+                                                onClick = {
+                                                        showThemeDialog = false
+                                                        onNavigateToBlockedUsers()
+                                                }
+                                        ) { Text("Blocked Users") }
                                 }
                         },
                         confirmButton = {}
@@ -539,7 +553,7 @@ fun ChatScreen(
                                                 val ratingEvent = withTimeoutOrNull(5_000) {
                                                         WebSocketManager.events.first { event ->
                                                                 (event is WebSocketEvent.AverageRatingData && event.userEmail == entry.userEmail) ||
-                                                                event is WebSocketEvent.AverageRatingError
+                                                                (event is WebSocketEvent.AverageRatingError && event.userEmail == entry.userEmail)
                                                         }
                                                 }
                                                 
@@ -643,7 +657,7 @@ fun ChatScreen(
                                                                         val ratingEvent = withTimeoutOrNull(5_000) {
                                                                                 WebSocketManager.events.first { event ->
                                                                                         (event is WebSocketEvent.AverageRatingData && event.userEmail == matchedEmail) ||
-                                                                                        event is WebSocketEvent.AverageRatingError
+                                                                                        (event is WebSocketEvent.AverageRatingError && event.userEmail == matchedEmail)
                                                                                 }
                                                                         }
                                                                         
@@ -1006,7 +1020,17 @@ fun ChatScreen(
                                 modifier =
                                         Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = navigationBarPadding + 16.dp)
                                                 .fillMaxWidth()
-                                                .weight(1f),
+                                                .weight(1f)
+                                                .pointerInput(isSelectionMode) {
+                                                    if (isSelectionMode) {
+                                                        detectTapGestures(
+                                                            onTap = {
+                                                                isSelectionMode = false
+                                                                selectedChats.clear()
+                                                            }
+                                                        )
+                                                    }
+                                                },
                                 shape = RoundedCornerShape(32.dp),
                                 color = if (isDarkTheme) Color(0x0DFFFFFF) else Color(0x4DFFFFFF), // Almost invisible in dark, glassy in light
                                 border = if (isDarkTheme) BorderStroke(1.dp, Color(0x08FFFFFF)) else null
@@ -1087,15 +1111,132 @@ fun ChatScreen(
                                                 )
                                         }
                                         
-                                        // --- RATING FILTER BUTTONS ---
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            // None button
-                                            Surface(
+                                        // --- RATING FILTER BUTTONS OR SELECTION MODE CONTROLS ---
+                                        if (isSelectionMode) {
+                                            // Selection mode controls
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                // Select All checkbox
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(40.dp)
+                                                        .clickable {
+                                                            if (selectedChats.size == filteredConversations.size) {
+                                                                selectedChats.clear()
+                                                            } else {
+                                                                selectedChats.clear()
+                                                                selectedChats.addAll(filteredConversations.map { it.userEmail })
+                                                            }
+                                                        },
+                                                    shape = RoundedCornerShape(20.dp),
+                                                    color = if (isDarkTheme) Color(0xFF2D3648) else Color(0xFFE8EAF6)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (selectedChats.size == filteredConversations.size && filteredConversations.isNotEmpty())
+                                                                Icons.Default.CheckBox
+                                                            else
+                                                                Icons.Default.CheckBoxOutlineBlank,
+                                                            contentDescription = "Select All",
+                                                            tint = if (isDarkTheme) Color.White else Color(0xFF5A6B88),
+                                                            modifier = Modifier.size(20.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text(
+                                                            text = "Select All",
+                                                            color = if (isDarkTheme) Color.White else Color(0xFF5A6B88),
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.Medium
+                                                        )
+                                                    }
+                                                }
+                                                
+                                                // Delete button
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(40.dp)
+                                                        .clickable(enabled = selectedChats.isNotEmpty()) {
+                                                            scope.launch {
+                                                                try {
+                                                                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                                    val myEmail = prefs.getString("user_email", "") ?: ""
+                                                                    
+                                                                    selectedChats.forEach { peerEmail ->
+                                                                        try {
+                                                                            WebSocketManager.clearChatHistory(myEmail, peerEmail)
+                                                                            NetworkClient.api.deleteMatch(myEmail, peerEmail)
+                                                                            ConversationRepository.remove(peerEmail)
+                                                                        } catch (e: Exception) {
+                                                                            Log.e("ChatScreen", "Failed to delete chat with $peerEmail", e)
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    selectedChats.clear()
+                                                                    isSelectionMode = false
+                                                                    android.widget.Toast.makeText(context, "Chats deleted", android.widget.Toast.LENGTH_SHORT).show()
+                                                                } catch (e: Exception) {
+                                                                    Log.e("ChatScreen", "Error deleting chats", e)
+                                                                    android.widget.Toast.makeText(context, "Failed to delete chats", android.widget.Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            }
+                                                        },
+                                                    shape = RoundedCornerShape(20.dp),
+                                                    color = if (selectedChats.isEmpty()) {
+                                                        if (isDarkTheme) Color(0xFF1A1F2E) else Color(0xFFE0E0E0)
+                                                    } else {
+                                                        Color(0xFFE53935)
+                                                    }
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Delete,
+                                                            contentDescription = "Delete",
+                                                            tint = if (selectedChats.isEmpty()) {
+                                                                if (isDarkTheme) Color(0xFF5A6B88) else Color(0xFFBDBDBD)
+                                                            } else {
+                                                                Color.White
+                                                            },
+                                                            modifier = Modifier.size(20.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text(
+                                                            text = if (selectedChats.isEmpty()) "Delete" else "Delete (${selectedChats.size})",
+                                                            color = if (selectedChats.isEmpty()) {
+                                                                if (isDarkTheme) Color(0xFF5A6B88) else Color(0xFFBDBDBD)
+                                                            } else {
+                                                                Color.White
+                                                            },
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // Rating filter buttons
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                // None button
+                                                Surface(
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .height(36.dp)
@@ -1189,6 +1330,7 @@ fun ChatScreen(
                                                 }
                                             }
                                         }
+                                        }
 
                                         // --- CONVERSATION LIST ---
                                         LazyColumn(
@@ -1199,6 +1341,24 @@ fun ChatScreen(
                                                         ConversationListItem(
                                                                 entry = entry,
                                                                 isDarkTheme = isDarkTheme,
+                                                                isSelectionMode = isSelectionMode,
+                                                                isSelected = selectedChats.contains(entry.userEmail),
+                                                                onLongPress = {
+                                                                    isSelectionMode = true
+                                                                    if (!selectedChats.contains(entry.userEmail)) {
+                                                                        selectedChats.add(entry.userEmail)
+                                                                    }
+                                                                },
+                                                                onSelectionToggle = {
+                                                                    if (selectedChats.contains(entry.userEmail)) {
+                                                                        selectedChats.remove(entry.userEmail)
+                                                                        if (selectedChats.isEmpty()) {
+                                                                            isSelectionMode = false
+                                                                        }
+                                                                    } else {
+                                                                        selectedChats.add(entry.userEmail)
+                                                                    }
+                                                                },
                                                                 onClick = {
                                                                         val prefs = context.getSharedPreferences(
                                                                                 "user_prefs",
@@ -1297,7 +1457,7 @@ fun ChatScreen(
                                                                                                 val ratingEvent = withTimeoutOrNull(5_000) {
                                                                                                         WebSocketManager.events.first { event ->
                                                                                                                 (event is WebSocketEvent.AverageRatingData && event.userEmail == entry.userEmail) ||
-                                                                                                                event is WebSocketEvent.AverageRatingError
+                                                                                                                (event is WebSocketEvent.AverageRatingError && event.userEmail == entry.userEmail)
                                                                                                         }
                                                                                                 }
                                                                                                 
@@ -1334,6 +1494,13 @@ fun ChatScreen(
                 }
         }
         // ... (Your existing AndroidView and Column code) ...
+        
+        // Handle back button for selection mode
+        BackHandler(enabled = isSelectionMode) {
+                isSelectionMode = false
+                selectedChats.clear()
+        }
+        
         BackHandler(enabled = isLoading) {
                 isLoading = false // stop the heart overlay
         }
@@ -1495,23 +1662,58 @@ fun ChatScreen(
 fun ConversationListItem(
     entry: ChatConversationEntry,
     isDarkTheme: Boolean = false,
+    isSelectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    onLongPress: (() -> Unit)? = null,
+    onSelectionToggle: (() -> Unit)? = null,
     onClick: (() -> Unit)? = null
 ) {
     val textColor = if (isDarkTheme) Color.White else Color.Black
     val subTextColor = if (isDarkTheme) Color(0xFFB0BEC5) else Color.Gray
-    val cardColor = if (isDarkTheme) Color(0xFF121821) else Color(0xF2FFFFFF)
+    val cardColor = if (isSelected) {
+        if (isDarkTheme) Color(0xFF2D4A6E) else Color(0xFFBBDEFB)
+    } else {
+        if (isDarkTheme) Color(0xFF121821) else Color(0xF2FFFFFF)
+    }
     val avatarBgColor = if (isDarkTheme) Color(0xFF3A4552) else Color(0xFF87CEEB)
-    val borderColor = if (isDarkTheme) Color(0xFF4A5562) else Color.White.copy(alpha = 0.6f)
+    val borderColor = if (isSelected) {
+        Color(0xFF7986CB)
+    } else {
+        if (isDarkTheme) Color(0xFF4A5562) else Color.White.copy(alpha = 0.6f)
+    }
+    
+    // Track if a long press just occurred to prevent tap from firing immediately after
+    var longPressConsumed by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .clickable(enabled = onClick != null) { onClick?.invoke() },
+            .pointerInput(isSelectionMode) {
+                detectTapGestures(
+                    onLongPress = {
+                        longPressConsumed = true
+                        onLongPress?.invoke()
+                    },
+                    onTap = {
+                        // If long press just consumed, ignore this tap
+                        if (longPressConsumed) {
+                            longPressConsumed = false
+                            return@detectTapGestures
+                        }
+                        
+                        if (isSelectionMode) {
+                            onSelectionToggle?.invoke()
+                        } else {
+                            onClick?.invoke()
+                        }
+                    }
+                )
+            },
         shape = RoundedCornerShape(20.dp),
         color = cardColor,
-        border = if (isDarkTheme) null else BorderStroke(1.dp, borderColor),
-        shadowElevation = 2.dp
+        border = BorderStroke(if (isSelected) 2.dp else 1.dp, borderColor),
+        shadowElevation = if (isSelected) 4.dp else 2.dp
     ) {
         Box(
             modifier = Modifier
@@ -1560,18 +1762,31 @@ fun ConversationListItem(
                     Uri.parse("android.resource://${context.packageName}/${R.raw.male_exp1}")
                 }
             }
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy((-4).dp)
-            ) {
-                // Profile picture circle
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(avatarBgColor),
-                    contentAlignment = Alignment.Center
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Checkbox in selection mode
+                if (isSelectionMode) {
+                    Icon(
+                        imageVector = if (isSelected) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                        contentDescription = if (isSelected) "Selected" else "Not selected",
+                        tint = if (isSelected) Color(0xFF7986CB) else (if (isDarkTheme) Color(0xFF5A6B88) else Color.Gray),
+                        modifier = Modifier
+                            .size(24.dp)
+                            .padding(end = 8.dp)
+                    )
+                }
+                
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy((-4).dp)
                 ) {
+                    // Profile picture circle
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(avatarBgColor),
+                        contentAlignment = Alignment.Center
+                    ) {
                     if (entry.profilePictureUrl != null && !isUserDeactivated) {
                         Image(
                             painter = rememberAsyncImagePainter(
@@ -1616,6 +1831,7 @@ fun ConversationListItem(
                         fontSize = 9.sp
                     )
                 }
+            }
             }
 
             Spacer(modifier = Modifier.width(12.dp))

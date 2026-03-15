@@ -1266,6 +1266,18 @@ fun KeyboardProofScreen(
                     // Token expired and needs login - handled globally in MainActivity
                     // No action needed here
                 }
+                is WebSocketEvent.BlockedListData -> {
+                    Log.d("KeyboardProofScreen", "Blocked list data received via WebSocket")
+                }
+                is WebSocketEvent.BlockedListError -> {
+                    Log.e("KeyboardProofScreen", "Blocked list error via WebSocket: ${event.error}")
+                }
+                is WebSocketEvent.UnblockUserSuccess -> {
+                    Log.d("KeyboardProofScreen", "Unblock user success via WebSocket")
+                }
+                is WebSocketEvent.UnblockUserError -> {
+                    Log.e("KeyboardProofScreen", "Unblock user error via WebSocket: ${event.error}")
+                }
             }
         }
     }
@@ -1759,6 +1771,22 @@ fun KeyboardProofScreen(
                                         expanded = showMenu,
                                         onDismissRequest = { showMenu = false }
                                     ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Clear Chat") },
+                                            onClick = {
+                                                showMenu = false
+                                                scope.launch {
+                                                    try {
+                                                        WebSocketManager.clearChatHistory(localGmail, matchedUserGmail)
+                                                        messages.clear()
+                                                        Toast.makeText(context, "Chat cleared successfully", Toast.LENGTH_SHORT).show()
+                                                    } catch (e: Exception) {
+                                                        Log.e("KeyboardProofScreen", "Error clearing chat: ${e.message}")
+                                                        Toast.makeText(context, "Failed to clear chat", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            }
+                                        )
                                         DropdownMenuItem(
                                             text = { Text("Delete Chat") },
                                             onClick = {

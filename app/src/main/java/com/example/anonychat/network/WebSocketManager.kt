@@ -52,7 +52,9 @@ data class PendingMessageEntity(
         val retries: Int,
         val state: String, // QUEUED | IN_FLIGHT | DELIVERED | FAILED
         val lastSentAt: Long, // epoch millis when sent (for IN_FLIGHT)
-        val timestamp: Long
+        val timestamp:
+
+        Long
 )
 
 /* ---------------------------------------------------
@@ -214,7 +216,7 @@ sealed class WebSocketEvent {
     data class AddRatingSuccess(val message: String) : WebSocketEvent()
     data class AddRatingError(val error: String) : WebSocketEvent()
     data class AverageRatingData(val avgRating: Float?, val count: Int?, val userEmail: String?) : WebSocketEvent()
-    data class AverageRatingError(val error: String) : WebSocketEvent()
+     data class AverageRatingError(val error: String, val userEmail: String? = null) : WebSocketEvent()
     data class RatingsData(val ratings: List<com.example.anonychat.network.Rating>) : WebSocketEvent()
     data class RatingsError(val error: String) : WebSocketEvent()
     data class SpecificRatingData(val rating: com.example.anonychat.network.Rating?) : WebSocketEvent()
@@ -225,7 +227,22 @@ sealed class WebSocketEvent {
     
     // Token expiration event - triggers redirect to login
     object TokenExpiredNeedLogin : WebSocketEvent()
+    
+    // Blocked users events
+    data class BlockedListData(val blockedUsers: List<BlockedUser>) : WebSocketEvent()
+    data class BlockedListError(val error: String) : WebSocketEvent()
+    data class UnblockUserSuccess(val message: String, val unblockedEmail: String) : WebSocketEvent()
+    data class UnblockUserError(val error: String) : WebSocketEvent()
 }
+
+data class BlockedUser(
+    val email: String,
+    val username: String,
+    val profilePicture: String?,
+    val gender: String = "male",
+    val romanceMin: Float = 1f,
+    val romanceMax: Float = 5f
+)
 
 /* ---------------------------------------------------
    WEBSOCKET MANAGER
@@ -2478,9 +2495,10 @@ object WebSocketManager {
                 }
                 "average_rating_error", "get_average_rating_error" -> {
                     val error = json.optString("error", json.optString("message", "Average rating error"))
-                    Log.e("WebSocketManager", "average_rating_error received: $error")
+                    val userEmail = json.optString("userEmail", json.optString("toParam", ""))
+                    Log.e("WebSocketManager", "average_rating_error received for user: $userEmail, error: $error")
                     withContext(Dispatchers.Main.immediate) {
-                        _events.emit(WebSocketEvent.AverageRatingError(error))
+                        _events.emit(WebSocketEvent.AverageRatingError(error, userEmail.ifBlank { null }))
                     }
                 }
                 "ratings_data" -> {
@@ -2537,6 +2555,57 @@ object WebSocketManager {
                     Log.e("WebSocketManager", "specific_rating_error received: $error")
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.SpecificRatingError(error))
+                    }
+                }
+                "get_blocked_list_success" -> {
+                    Log.e("WebSocketManager", "=== GET BLOCKED LIST SUCCESS ===")
+                    Log.e("WebSocketManager", "Raw response: $text")
+                    val blockedUsersArray = json.optJSONArray("blocked_users") ?: org.json.JSONArray()
+                    Log.e("WebSocketManager", "Blocked users array length: ${blockedUsersArray.length()}")
+                    val blockedUsers = mutableListOf<BlockedUser>()
+                    for (i in 0 until blockedUsersArray.length()) {
+                        val userJson = blockedUsersArray.getJSONObject(i)
+                        val romanceRange = userJson.optJSONObject("romance_range")
+                        val romanceMin = romanceRange?.optInt("min", 1)?.toFloat() ?: 1f
+                        val romanceMax = romanceRange?.optInt("max", 5)?.toFloat() ?: 5f
+                        val user = BlockedUser(
+                            email = userJson.optString("email", ""),
+                            username = userJson.optString("username", ""),
+                            profilePicture = userJson.optString("profilePicture").takeIf { it.isNotEmpty() },
+                            gender = userJson.optString("gender", "male"),
+                            romanceMin = romanceMin,
+                            romanceMax = romanceMax
+                        )
+                        blockedUsers.add(user)
+                        Log.e("WebSocketManager", "  Blocked user $i: ${user.username} (${user.email}), gender: ${user.gender}, romance: ${user.romanceMin}-${user.romanceMax}")
+                    }
+                    Log.e("WebSocketManager", "Emitting BlockedListData event with ${blockedUsers.size} users")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.BlockedListData(blockedUsers))
+                    }
+                }
+                "get_blocked_list_error" -> {
+                    val error = json.optString("error", json.optString("message", "Failed to get blocked list"))
+                    Log.e("WebSocketManager", "=== GET BLOCKED LIST ERROR ===")
+                    Log.e("WebSocketManager", "Raw response: $text")
+                    Log.e("WebSocketManager", "Error message: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.BlockedListError(error))
+                    }
+                }
+                "unblock_user_success" -> {
+                    val message = json.optString("message", "User unblocked successfully")
+                    val unblockedEmail = json.optString("unblockedEmail", "")
+                    Log.i("WebSocketManager", "unblock_user_success received: $message")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.UnblockUserSuccess(message, unblockedEmail))
+                    }
+                }
+                "unblock_user_error" -> {
+                    val error = json.optString("error", json.optString("message", "Failed to unblock user"))
+                    Log.e("WebSocketManager", "unblock_user_error received: $error")
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.UnblockUserError(error))
                     }
                 }
                 else -> {
@@ -3022,6 +3091,74 @@ object WebSocketManager {
             }
         }
     }
+    /**
+     * Request the list of blocked users
+     */
+    fun sendGetBlockedList(token: String) {
+        ensureInit()
+        
+        Log.e("WebSocketManager", "=== SEND GET BLOCKED LIST ===")
+        Log.e("WebSocketManager", "Token: ${if (token.isEmpty()) "EMPTY" else "Present (${token.length} chars)"}")
+        Log.e("WebSocketManager", "WebSocket ready state: $readyState")
+        Log.e("WebSocketManager", "WebSocket instance: ${if (webSocket != null) "Present" else "NULL"}")
+        
+        val payload = JSONObject()
+            .put("type", "get_blocked_list")
+            .put("authorization", "Bearer $token")
+        
+        val payloadStr = payload.toString()
+        Log.e("WebSocketManager", "Payload to send: $payloadStr")
+        
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payloadStr) ?: false
+                    if (sent) {
+                        Log.e("WebSocketManager", "✓ get_blocked_list sent successfully")
+                    } else {
+                        Log.e("WebSocketManager", "✗ Failed to send get_blocked_list (send returned false)")
+                    }
+                } else {
+                    Log.e("WebSocketManager", "✗ Cannot send get_blocked_list - WebSocket not ready (state: $readyState, ws: ${webSocket != null})")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "✗ Exception sending get_blocked_list: ${e.message}", e)
+            }
+        }
+    }
+    
+    /**
+     * Request to unblock a user
+     */
+    fun sendUnblockUser(token: String, userEmail: String) {
+        ensureInit()
+        
+        val payload = JSONObject()
+            .put("type", "unblock_user")
+            .put("authorization", "Bearer $token")
+            .put("userEmail", userEmail)
+        
+        val payloadStr = payload.toString()
+        Log.i("WebSocketManager", "Sending unblock_user request for: $userEmail")
+        
+        scope.launch {
+            try {
+                if (readyState == ReadyState.READY && webSocket != null) {
+                    val sent = webSocket?.send(payloadStr) ?: false
+                    if (sent) {
+                        Log.d("WebSocketManager", "unblock_user sent successfully")
+                    } else {
+                        Log.w("WebSocketManager", "Failed to send unblock_user")
+                    }
+                } else {
+                    Log.w("WebSocketManager", "Cannot send unblock_user - WebSocket not ready")
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Exception sending unblock_user", e)
+            }
+        }
+    }
+    
     
     /**
      * Request to update preferences via WebSocket
@@ -3727,6 +3864,16 @@ object WebSocketManager {
             historyDao.getConversation(user1, user2).map { entities ->
                 entities.map { it.toModel() }
             }
+    suspend fun clearChatHistory(user1: String, user2: String) {
+        try {
+            historyDao.deleteChatHistory(user1, user2)
+            Log.d("WebSocketManager", "Chat history cleared between $user1 and $user2")
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Failed to clear chat history", e)
+            throw e
+        }
+    }
+
 
     private fun saveToHistory(message: ChatMessage) {
         scope.launch {

@@ -172,7 +172,7 @@ class ChatSocketService : Service() {
                                     val ratingEvent = withTimeoutOrNull(5_000) {
                                         WebSocketManager.events.first { ev ->
                                             (ev is WebSocketEvent.AverageRatingData && ev.userEmail == peerEmail) ||
-                                            ev is WebSocketEvent.AverageRatingError
+                                            (ev is WebSocketEvent.AverageRatingError && ev.userEmail == peerEmail)
                                         }
                                     }
                                     
