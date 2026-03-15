@@ -95,6 +95,7 @@ import com.example.anonychat.network.UserRegistrationRequest
 import com.example.anonychat.network.UserResetPasswordRequest
 import com.example.anonychat.service.ChatSocketService
 import com.example.anonychat.ui.theme.AnonychatTheme
+import com.example.anonychat.utils.IntegrityManager
 import com.google.android.gms.appset.AppSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -724,19 +725,47 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                         client.appSetIdInfo
                                                 .addOnSuccessListener { appSetIdInfo ->
                                                     val appSetId = appSetIdInfo.id
-                                                    val request =
-                                                            UserRegistrationRequest(
-                                                                    username = username,
-                                                                    password = password,
-                                                                    userId = "$androidId:$appSetId",
-                                                                    email =
-                                                                            "$androidId:$appSetId" +
-                                                                                    "@email.com",
-                                                                    googleId = ""
-                                                            )
-
+                                                    val userId = "$androidId:$appSetId"
+                                                    
                                                     coroutine.launch {
                                                         try {
+                                                            // Generate unique nonce for integrity token
+                                                            val nonce = IntegrityManager.generateNonce()
+                                                            
+                                                            // Request integrity token with nonce
+                                                            Log.d("LoginScreen", "Requesting integrity token for registration")
+                                                            val integrityToken = IntegrityManager.requestIntegrityToken(
+                                                                context = context,
+                                                                nonce = nonce,
+                                                                allowDebugApps = true // Allow debug apps during development
+                                                            )
+                                                            
+                                                            if (integrityToken == null) {
+                                                                Log.e("LoginScreen", "Failed to obtain integrity token")
+                                                                withContext(Dispatchers.Main) {
+                                                                    isLoading = false
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        "Security verification failed. Please try again.",
+                                                                        Toast.LENGTH_SHORT
+                                                                    ).show()
+                                                                }
+                                                                return@launch
+                                                            }
+                                                            
+                                                            Log.d("LoginScreen", "Integrity token obtained, proceeding with registration")
+                                                            
+                                                            val request =
+                                                                    UserRegistrationRequest(
+                                                                            username = username,
+                                                                            password = password,
+                                                                            userId = userId,
+                                                                            email = "$userId@email.com",
+                                                                            googleId = "",
+                                                                            integrityToken = integrityToken,
+                                                                            nonce = nonce
+                                                                    )
+
                                                             val response =
                                                                     NetworkClient.api.registerUser(
                                                                             request

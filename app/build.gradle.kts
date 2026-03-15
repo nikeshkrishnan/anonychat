@@ -28,16 +28,30 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Debug build configuration
+            isDebuggable = true
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-DEBUG"
+            
+            // Add debug flag for integrity checks
+            buildConfigField("Boolean", "ALLOW_DEBUG_INTEGRITY", "true")
+            buildConfigField("String", "BUILD_TYPE_NAME", "\"debug\"")
+        }
+        
         release {
-        isMinifyEnabled = true          // ✅ REQUIRED
-        isShrinkResources = true        // ✅ REQUIRED
+            isMinifyEnabled = true          // ✅ REQUIRED
+            isShrinkResources = true        // ✅ REQUIRED
 
-        proguardFiles(
-            getDefaultProguardFile("proguard-android-optimize.txt"),
-            "proguard-rules.pro"
-        )
-    }
-
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            
+            // Production integrity checks - no debug tokens allowed
+            buildConfigField("Boolean", "ALLOW_DEBUG_INTEGRITY", "false")
+            buildConfigField("String", "BUILD_TYPE_NAME", "\"release\"")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -48,6 +62,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true  // Enable BuildConfig generation
     }
 }
 
@@ -65,6 +80,10 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
     implementation("com.google.android.gms:play-services-appset:16.1.0")
+    
+    // Google Play Integrity API
+    implementation("com.google.android.play:integrity:1.3.0")
+    
     // Coroutines (You likely already have this)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation(platform(libs.androidx.compose.bom))

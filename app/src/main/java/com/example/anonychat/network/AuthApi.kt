@@ -162,7 +162,9 @@ data class UserRegistrationRequest(
         val password: String,
         @SerializedName("userId") val userId: String,
         val email: String,
-        val googleId: String
+        val googleId: String,
+        val integrityToken: String? = null,
+        val nonce: String? = null  // Nonce used for integrity token generation
 )
 
 data class LoginResponse(
