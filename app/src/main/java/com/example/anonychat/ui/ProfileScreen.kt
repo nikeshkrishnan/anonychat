@@ -941,6 +941,7 @@ private fun saveUserPrefs(
             // Send update preferences via WebSocket
             WebSocketManager.sendUpdatePreferences(
                 token = token,
+                username = username,
                 age = age,
                 gender = gender,
                 preferredGender = preferredGender,

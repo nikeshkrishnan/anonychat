@@ -159,16 +159,40 @@ fun LoginScreen(
                         if (response.isSuccessful && response.body() != null) {
                             val loginResponse = response.body()!!
                             Log.e("LoginScreen", "Auto-login successful!")
+                            Log.e("LoginScreen", "New email from backend: ${loginResponse.user.email}")
                             
-                            // Save login data
+                            // CRITICAL: Stop WebSocketMonitorService and disconnect old WebSocket FIRST
+                            Log.e("LoginScreen", "Stopping WebSocketMonitorService before credential update")
+                            WebSocketMonitorService.stop(context)
+                            
+                            Log.e("LoginScreen", "Disconnecting old WebSocket connection")
+                            WebSocketManager.disconnect()
+                            
+                            // Wait a moment for disconnection to complete
+                            kotlinx.coroutines.delay(500)
+                            
+                            // Save login data with NEW email
                             prefs.edit().apply {
                                 putString("access_token", loginResponse.accessToken)
-                                putString("user_email", loginResponse.user.email)
+                                putString("user_email", loginResponse.user.email)  // NEW email from backend
                                 putString("user_id", loginResponse.user.id)
                                 putString("username", savedUsername)
                                 putString("password", savedPassword)
                                 // Keep account_reset flag for redirect to UpdateUsernameScreen
                             }.commit()
+                            
+                            Log.e("LoginScreen", "Saved new email to SharedPreferences: ${loginResponse.user.email}")
+                            
+                            // Connect WebSocket with NEW email and token
+                            Log.e("LoginScreen", "Connecting WebSocket with NEW email: ${loginResponse.user.email}")
+                            WebSocketManager.connect(loginResponse.accessToken, loginResponse.user.email)
+                            
+                            // Start WebSocket Monitor Service with new credentials
+                            Log.e("LoginScreen", "Starting WebSocketMonitorService with new credentials")
+                            WebSocketMonitorService.start(context)
+                            
+                            // Wait for WebSocket to connect
+                            kotlinx.coroutines.delay(1000)
                             
                             // Redirect to UpdateUsernameScreen
                             Log.e("LoginScreen", "Redirecting to UpdateUsernameScreen...")
@@ -347,21 +371,22 @@ fun LoginScreen(
             }
         }
 
-        // LAYER 2: THE LOGIN CARD (Overlay)
-        Box(
-                modifier = Modifier.fillMaxSize().padding(bottom = 10.dp),
-                contentAlignment = Alignment.BottomCenter
-        ) {
-            Card(
-                    modifier =
-                            Modifier.padding(horizontal = 32.dp)
-                                    .offset(y = animatedOffset)
-                                    .fillMaxWidth()
-                                    .heightIn(max = 400.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(16.dp)
+        // LAYER 2: THE LOGIN CARD (Overlay) - Hide during auto-login
+        if (!isAutoLoggingIn) {
+            Box(
+                    modifier = Modifier.fillMaxSize().padding(bottom = 10.dp),
+                    contentAlignment = Alignment.BottomCenter
             ) {
+                Card(
+                        modifier =
+                                Modifier.padding(horizontal = 32.dp)
+                                        .offset(y = animatedOffset)
+                                        .fillMaxWidth()
+                                        .heightIn(max = 400.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(16.dp)
+                ) {
                 Column(
                         modifier =
                                 Modifier.padding(20.dp)
@@ -1043,6 +1068,7 @@ fun LoginScreen(
                     }
                 }
             }
+        }
         }
 
         // LAYER 3: SHARED LOADING OVERLAY (shows during login or auto-login)

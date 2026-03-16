@@ -295,7 +295,9 @@ data class UpdateUsernameRequest(
 )
 
 data class UpdateUsernameResponse(
-	val message: String
+	val message: String,
+	val username: String,
+	val email: String
 )
 
 // --- API INTERFACE ---

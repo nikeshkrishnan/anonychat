@@ -3195,6 +3195,7 @@ object WebSocketManager {
      */
     fun sendUpdatePreferences(
         token: String,
+        username: String? = null,
         age: Int? = null,
         gender: String? = null,
         preferredGender: String? = null,
@@ -3207,6 +3208,7 @@ object WebSocketManager {
             .put("type", "update_preferences")
             .put("authorization", "Bearer $token")
         
+        username?.let { payload.put("username", it) }
         age?.let { payload.put("age", it) }
         gender?.let { payload.put("gender", it) }
         preferredGender?.let { payload.put("preferredGender", it) }

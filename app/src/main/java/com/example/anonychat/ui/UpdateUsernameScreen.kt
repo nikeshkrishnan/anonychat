@@ -24,6 +24,7 @@ import com.example.anonychat.R
 import com.example.anonychat.model.User
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.UpdateUsernameRequest
+import com.example.anonychat.network.WebSocketManager
 import kotlinx.coroutines.launch
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -99,7 +100,7 @@ fun UpdateUsernameScreen(
                 colors = CardDefaults.cardColors(
                     containerColor = if (isDarkTheme) Color(0xCC121821) else Color(0xCCFFFFFF)
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
             ) {
                 Column(
                     modifier = Modifier
@@ -173,36 +174,48 @@ fun UpdateUsernameScreen(
                                         UpdateUsernameRequest(username = username.trim())
                                     )
                                     
-                                    if (response.isSuccessful) {
+                                    if (response.isSuccessful && response.body() != null) {
+                                        val updateResponse = response.body()!!
                                         Log.e("UpdateUsernameScreen", "Username update successful!")
+                                        Log.e("UpdateUsernameScreen", "New email: ${updateResponse.email}")
+                                        Log.e("UpdateUsernameScreen", "New username: ${updateResponse.username}")
+                                        
+                                        // CRITICAL: Stop WebSocketMonitorService BEFORE updating credentials
+                                        // This prevents it from reconnecting with old email
+                                        Log.e("UpdateUsernameScreen", "Stopping WebSocketMonitorService before credential update")
+                                        com.example.anonychat.service.WebSocketMonitorService.stop(context)
+                                        
+                                        // Disconnect WebSocket with old email
+                                        Log.e("UpdateUsernameScreen", "Disconnecting WebSocket with old email")
+                                        WebSocketManager.disconnect()
                                         
                                         // Get user data from SharedPreferences
                                         val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                        val userEmail = prefs.getString("user_email", "") ?: ""
                                         val userId = prefs.getString("user_id", "") ?: ""
                                         
-                                        // Create User object with updated username
+                                        // Create User object with updated username and NEW email from response
                                         val user = User(
-                                            id = userEmail,
-                                            username = username.trim(),
+                                            id = updateResponse.email,  // Use NEW email from backend
+                                            username = updateResponse.username,
                                             profilePictureUrl = null,
                                             userId = userId
                                         )
                                         
-                                        // Save User object as JSON and update username
+                                        // Save User object as JSON and update username AND email
                                         val userJson = com.google.gson.Gson().toJson(user)
                                         prefs.edit().apply {
-                                            putString("username", username.trim())
+                                            putString("username", updateResponse.username)
+                                            putString("user_email", updateResponse.email)  // Update to NEW email
                                             putString("user_json", userJson)
                                             remove("account_reset") // Clear the reset flag
                                         }.apply()
                                         
-                                        Log.e("UpdateUsernameScreen", "User object saved: $userJson")
+                                        Log.e("UpdateUsernameScreen", "User object saved with new email: $userJson")
                                         
                                         // Reset loading state before navigation
                                         isLoading = false
                                         
-                                        // Navigate to ChatScreen
+                                        // Navigate to ChatScreen (auto-login will handle WebSocket reconnection with NEW email)
                                         onUsernameUpdated()
                                     } else {
                                         errorMessage = "Failed to update username: ${response.code()}"

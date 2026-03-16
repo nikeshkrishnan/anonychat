@@ -36,6 +36,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
+import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.UserLoginRequest
 import com.example.anonychat.network.WebSocketManager
 import com.example.anonychat.service.WebSocketMonitorService
 import com.example.anonychat.ui.BirdBubbleService
@@ -48,6 +50,8 @@ import com.example.anonychat.ui.RatingsScreen
 import com.example.anonychat.ui.UpdateUsernameScreen
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.gson.Gson
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URLEncoder
 import java.util.UUID
@@ -350,9 +354,9 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        // Start WebSocket Monitor Service
-        startWebSocketMonitorService()
-
+        // Don't start WebSocket Monitor Service here - it will be started after auto-login completes
+        // or if user is already logged in with valid token
+        
         setContent {
             AnonychatTheme {
                 NavGraph(
@@ -582,19 +586,116 @@ class MainActivity : ComponentActivity() {
         // --- Handle intent from the service to navigate to ChatScreen ---
         LaunchedEffect(intent) { handleIntentNavigation(navController, intent) }
 
-        // Determine start destination based on login status
+        // Determine start destination based on login status and credentials
         val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-        val isLoggedIn = prefs.getString("access_token", null) != null
+        val hasToken = prefs.getString("access_token", null) != null
         val userEmail = prefs.getString("user_email", null)
         val username = prefs.getString("username", null)
+        val savedPassword = prefs.getString("password", null)
+        val accountReset = prefs.getBoolean("account_reset", false)
         
-        val startDestination = if (isLoggedIn && userEmail != null && username != null) {
-            // User is logged in, start at ChatScreen
-            val user = User(userEmail, username, null)
-            Screen.Chat.createRoute(user)
-        } else {
-            // User not logged in, start at LoginScreen
-            Screen.Login.route
+        // State to track auto-login process
+        var isAutoLoggingIn by remember { mutableStateOf(false) }
+        var autoLoginFailed by remember { mutableStateOf(false) }
+        
+        // Attempt auto-login if we have saved credentials but no token
+        // SKIP if account_reset is true - LoginScreen will handle it
+        LaunchedEffect(Unit) {
+            if (!hasToken && !username.isNullOrEmpty() && !savedPassword.isNullOrEmpty() && !accountReset) {
+                isAutoLoggingIn = true
+                Log.d("MainActivity", "Attempting auto-login with saved credentials")
+                
+                try {
+                    val savedUserId = prefs.getString("user_id", "")
+                    val response = withContext(Dispatchers.IO) {
+                        NetworkClient.api.loginUser(
+                            UserLoginRequest(
+                                username = username,
+                                password = savedPassword,
+                                userId = savedUserId ?: ""
+                            )
+                        )
+                    }
+                    
+                    if (response.isSuccessful && response.body() != null) {
+                        val loginResponse = response.body()!!
+                        Log.d("MainActivity", "Auto-login successful")
+                        Log.d("MainActivity", "New email from login: ${loginResponse.user.email}")
+                        
+                        // Disconnect old WebSocket connection before updating email
+                        Log.d("MainActivity", "Disconnecting old WebSocket connection")
+                        WebSocketManager.disconnect()
+                        
+                        // Save login data with NEW email
+                        prefs.edit().apply {
+                            putString("access_token", loginResponse.accessToken)
+                            putString("user_email", loginResponse.user.email)  // NEW email from backend
+                            putString("user_id", loginResponse.user.id)
+                            putString("username", username)
+                        }.commit()
+                        
+                        // Reconnect WebSocket with new email and token
+                        Log.d("MainActivity", "Reconnecting WebSocket with new email: ${loginResponse.user.email}")
+                        WebSocketManager.connect(loginResponse.accessToken, loginResponse.user.email)
+                        
+                        // Start WebSocket Monitor Service with new credentials
+                        Log.d("MainActivity", "Starting WebSocketMonitorService with new email")
+                        startWebSocketMonitorService()
+                        
+                        // Wait a bit for WebSocket to connect
+                        kotlinx.coroutines.delay(1000)
+                        
+                        isAutoLoggingIn = false
+                        
+                        // Navigate based on account_reset flag
+                        if (accountReset) {
+                            navController.navigate(Screen.UpdateUsername.createRoute(username)) {
+                                popUpTo(0) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        } else {
+                            val user = User(loginResponse.user.email, username, null)
+                            navController.navigate(Screen.Chat.createRoute(user)) {
+                                popUpTo(0) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    } else {
+                        Log.e("MainActivity", "Auto-login failed: ${response.code()}")
+                        autoLoginFailed = true
+                        isAutoLoggingIn = false
+                    }
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Auto-login error: ${e.message}")
+                    autoLoginFailed = true
+                    isAutoLoggingIn = false
+                }
+            } else if (hasToken && userEmail != null) {
+                // User already has valid token, start WebSocket Monitor Service
+                Log.d("MainActivity", "User already logged in, starting WebSocketMonitorService")
+                startWebSocketMonitorService()
+            }
+        }
+        
+        // Determine start destination
+        val startDestination = when {
+            hasToken && userEmail != null && username != null -> {
+                // User has valid token, go to appropriate screen
+                if (accountReset) {
+                    Screen.UpdateUsername.createRoute(username)
+                } else {
+                    val user = User(userEmail, username, null)
+                    Screen.Chat.createRoute(user)
+                }
+            }
+            isAutoLoggingIn -> {
+                // Show login screen but it will be in loading state
+                Screen.Login.route
+            }
+            else -> {
+                // No credentials or auto-login failed, show login
+                Screen.Login.route
+            }
         }
 
         NavHost(navController = navController, startDestination = startDestination) {
