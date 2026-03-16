@@ -45,6 +45,7 @@ import com.example.anonychat.ui.KeyboardProofScreen
 import com.example.anonychat.ui.LoginScreen
 import com.example.anonychat.ui.ProfileScreen
 import com.example.anonychat.ui.RatingsScreen
+import com.example.anonychat.ui.UpdateUsernameScreen
 import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.gson.Gson
 import java.io.File
@@ -106,6 +107,12 @@ sealed class Screen(val route: String) {
     object BlockedUsers : Screen("blockedUsers") {
         fun createRoute(): String {
             return "blockedUsers"
+        }
+    }
+    
+    object UpdateUsername : Screen("updateUsername/{username}") {
+        fun createRoute(username: String): String {
+            return "updateUsername/$username"
         }
     }
 }
@@ -599,6 +606,12 @@ class MainActivity : ComponentActivity() {
                                 popUpTo(Screen.Login.route) { inclusive = true }
                                 launchSingleTop = true
                             }
+                        },
+                        onNavigateToUpdateUsername = { username ->
+                            navController.navigate(Screen.UpdateUsername.createRoute(username)) {
+                                popUpTo(Screen.Login.route) { inclusive = true }
+                                launchSingleTop = true
+                            }
                         }
                 )
             }
@@ -636,6 +649,11 @@ class MainActivity : ComponentActivity() {
                         },
                         onNavigateToBlockedUsers = {
                             navController.navigate(Screen.BlockedUsers.createRoute())
+                        },
+                        onNavigateToLogin = {
+                            navController.navigate(Screen.Login.route) {
+                                popUpTo(Screen.Chat.route) { inclusive = true }
+                            }
                         }
                 )
             }
@@ -746,6 +764,35 @@ class MainActivity : ComponentActivity() {
             composable(Screen.BlockedUsers.route) {
                 BlockedUsersScreen(
                     onNavigateBack = { navController.popBackStack() }
+                )
+            }
+            
+            composable(
+                Screen.UpdateUsername.route,
+                arguments = listOf(navArgument("username") { type = NavType.StringType })
+            ) { backStackEntry ->
+                val username = backStackEntry.arguments?.getString("username") ?: ""
+                UpdateUsernameScreen(
+                    currentUsername = username,
+                    onUsernameUpdated = {
+                        // Navigate to ChatScreen after username update
+                        val prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                        val userJson = prefs.getString("user_json", null)
+                        if (userJson != null) {
+                            try {
+                                val user = com.google.gson.Gson().fromJson(userJson, User::class.java)
+                                navController.navigate(Screen.Chat.createRoute(user)) {
+                                    popUpTo(Screen.UpdateUsername.route) { inclusive = true }
+                                    launchSingleTop = true
+                                }
+                            } catch (e: Exception) {
+                                // Fallback: navigate to login
+                                navController.navigate(Screen.Login.route) {
+                                    popUpTo(Screen.UpdateUsername.route) { inclusive = true }
+                                }
+                            }
+                        }
+                    }
                 )
             }
         }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import android.widget.Toast
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.repository.UserRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,10 +37,23 @@ object BlockUserManager {
     ) {
         applicationScope.launch {
             try {
-                val myUserId = myEmail.substringBefore("@")
-                val targetUserId = targetEmail.substringBefore("@")
+                // Get current user's ID from SharedPreferences (never extract from email after account reset)
+                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                val myUserId = prefs.getString("user_id", null)
                 
-                Log.d(TAG, "Blocking user: $targetEmail (ID: $targetUserId)")
+                if (myUserId == null) {
+                    Log.e(TAG, "Cannot block user: user_id not found in SharedPreferences")
+                    launch(Dispatchers.Main) {
+                        Toast.makeText(context, "Error: User ID not found", Toast.LENGTH_SHORT).show()
+                        onError?.invoke("User ID not found")
+                    }
+                    return@launch
+                }
+                
+                // Get target user's userId from repository (with fallback for initial interactions)
+                val targetUserId = UserRepository.getUserIdWithFallback(targetEmail)
+                
+                Log.d(TAG, "Blocking user: $targetEmail (myUserId: $myUserId, targetUserId: $targetUserId)")
                 val response = NetworkClient.api.blockUser(myUserId, targetUserId)
                 
                 if (response.isSuccessful) {
@@ -90,10 +104,23 @@ object BlockUserManager {
     ) {
         applicationScope.launch {
             try {
-                val myUserId = myEmail.substringBefore("@")
-                val targetUserId = targetEmail.substringBefore("@")
+                // Get current user's ID from SharedPreferences (never extract from email after account reset)
+                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                val myUserId = prefs.getString("user_id", null)
                 
-                Log.d(TAG, "Unblocking user: $targetEmail (ID: $targetUserId)")
+                if (myUserId == null) {
+                    Log.e(TAG, "Cannot unblock user: user_id not found in SharedPreferences")
+                    launch(Dispatchers.Main) {
+                        Toast.makeText(context, "Error: User ID not found", Toast.LENGTH_SHORT).show()
+                        onError?.invoke("User ID not found")
+                    }
+                    return@launch
+                }
+                
+                // Get target user's userId from repository (with fallback for initial interactions)
+                val targetUserId = UserRepository.getUserIdWithFallback(targetEmail)
+                
+                Log.d(TAG, "Unblocking user: $targetEmail (myUserId: $myUserId, targetUserId: $targetUserId)")
                 val response = NetworkClient.api.unblockUser(myUserId, targetUserId)
                 
                 if (response.isSuccessful) {
@@ -141,14 +168,27 @@ object BlockUserManager {
         onComplete: ((successCount: Int, failCount: Int) -> Unit)? = null
     ) {
         applicationScope.launch {
-            val myUserId = myEmail.substringBefore("@")
+            // Get current user's ID from SharedPreferences (never extract from email after account reset)
+            val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            val myUserId = prefs.getString("user_id", null)
+            
+            if (myUserId == null) {
+                Log.e(TAG, "Cannot unblock users: user_id not found in SharedPreferences")
+                launch(Dispatchers.Main) {
+                    Toast.makeText(context, "Error: User ID not found", Toast.LENGTH_SHORT).show()
+                    onComplete?.invoke(0, targetEmails.size)
+                }
+                return@launch
+            }
+            
             var successCount = 0
             var failCount = 0
             
             targetEmails.forEach { email ->
                 try {
-                    val targetUserId = email.substringBefore("@")
-                    Log.d(TAG, "Unblocking user: $email (ID: $targetUserId)")
+                    // Get target user's userId from repository (with fallback for initial interactions)
+                    val targetUserId = UserRepository.getUserIdWithFallback(email)
+                    Log.d(TAG, "Unblocking user: $email (myUserId: $myUserId, targetUserId: $targetUserId)")
                     val response = NetworkClient.api.unblockUser(myUserId, targetUserId)
                     
                     if (response.isSuccessful) {

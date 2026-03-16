@@ -14,6 +14,7 @@ import androidx.room.*
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.anonychat.AppVisibility
+import com.example.anonychat.repository.UserRepository
 import com.example.anonychat.ui.ChatMessage
 import com.example.anonychat.utils.ActiveChatTracker
 import com.example.anonychat.utils.NotificationHelper
@@ -335,6 +336,7 @@ object WebSocketManager {
             
             if (prefsData != null) {
                 val prefs = prefsData.preferences
+                // Use email as fallback for username display (not for API calls)
                 val username = prefs.username ?: message.from.substringBefore("@")
                 
                 // Create Preferences object from WebSocket response
@@ -2075,10 +2077,19 @@ object WebSocketManager {
                 "chat_message" -> {
                     val localEmail = ws.request().url.queryParameter("gmail") ?: ""
                     Log.i("WebSocketManager", "chat_message received: $json")
+                    
+                    // Extract and store userId if present
+                    val fromEmail = json.getString("from")
+                    val fromUserId = json.optString("fromUserId")
+                    if (fromUserId.isNotEmpty()) {
+                        UserRepository.storeUserId(fromEmail, fromUserId)
+                        Log.d("WebSocketManager", "Stored userId for $fromEmail: $fromUserId")
+                    }
+                    
                     val chatMessage =
                             ChatMessage(
                                     id = messageId,
-                                    from = json.getString("from"),
+                                    from = fromEmail,
                                     to = localEmail,
                                     text = json.getString("content"),
                                     timestamp =
@@ -2224,6 +2235,11 @@ object WebSocketManager {
                 "spark_left" -> {
                     val from = json.getString("from")
                     val senderUserId = json.getString("senderUserId")
+                    
+                    // Store userId mapping
+                    UserRepository.storeUserId(from, senderUserId)
+                    Log.d("WebSocketManager", "Stored userId for $from: $senderUserId (spark_left)")
+                    
                     Log.e("WebSocketManager", "!!! RECEIVED spark_left from: $from (senderUserId: $senderUserId) !!!")
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.SparkLeft(from, senderUserId))
@@ -2232,6 +2248,11 @@ object WebSocketManager {
                 "spark_right" -> {
                     val from = json.getString("from")
                     val senderUserId = json.getString("senderUserId")
+                    
+                    // Store userId mapping
+                    UserRepository.storeUserId(from, senderUserId)
+                    Log.d("WebSocketManager", "Stored userId for $from: $senderUserId (spark_right)")
+                    
                     Log.e("WebSocketManager", "!!! RECEIVED spark_right from: $from (senderUserId: $senderUserId) !!!")
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.SparkRight(from, senderUserId))
@@ -2297,9 +2318,18 @@ object WebSocketManager {
                 "match_found" -> {
                     Log.i("WebSocketManager", "match_found received")
                     val matchJson = json.optJSONObject("match") ?: json
+                    
+                    // Extract and store userId if present
+                    val matchEmail = matchJson.optString("gmail")
+                    val matchUserId = matchJson.optString("userId")
+                    if (matchEmail.isNotEmpty() && matchUserId.isNotEmpty()) {
+                        UserRepository.storeUserId(matchEmail, matchUserId)
+                        Log.d("WebSocketManager", "Stored userId for $matchEmail: $matchUserId (match_found)")
+                    }
+                    
                     val match = com.example.anonychat.network.MatchResponse(
                         username = matchJson.optString("username"),
-                        gmail = matchJson.optString("gmail"),
+                        gmail = matchEmail,
                         age = matchJson.optInt("age"),
                         gender = matchJson.optString("gender"),
                         preferredGender = matchJson.optString("preferredGender") ?: matchJson.optString("preferred_gender"),

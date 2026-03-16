@@ -199,6 +199,13 @@ fun BlockedUsersScreen(
         selectedUsers.clear()
     }
     
+    // Handle back press to clear state before navigation (prevents shadow artifacts)
+    BackHandler(enabled = !isSelectionMode) {
+        blockedUsers = emptyList()
+        isLoading = true
+        onNavigateBack()
+    }
+    
     // Cleanup on dispose
     DisposableEffect(exoPlayer) {
         onDispose {
@@ -228,7 +235,7 @@ fun BlockedUsersScreen(
                     .fillMaxWidth()
                     .wrapContentHeight(),
                 color = if (isDarkTheme) Color(0xFF121821) else Color.White,
-                shadowElevation = 4.dp
+                shadowElevation = 0.dp
             ) {
                 Row(
                     modifier = Modifier

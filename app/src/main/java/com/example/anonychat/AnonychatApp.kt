@@ -3,6 +3,7 @@ package com.example.anonychat
 import android.app.Application
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.repository.UserRepository
 import com.example.anonychat.ui.ConversationRepository
 import com.example.anonychat.utils.DeactivatedUsersManager
 import com.example.anonychat.utils.NotificationHelper
@@ -16,6 +17,9 @@ class AnonychatApp : Application() {
         super.onCreate()
 
         NetworkClient.initialize(this)
+
+        // Initialize UserRepository for userId mappings
+        UserRepository.initialize(this)
 
         // Initialize deactivated users manager
         DeactivatedUsersManager.initialize(this)

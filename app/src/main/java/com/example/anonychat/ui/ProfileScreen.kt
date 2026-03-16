@@ -1068,4 +1068,3 @@ fun romanceRangeToEmotion(rangeStart: Float, rangeEnd: Float): Int {
         else       -> 5 // Covers the last ~20% of the slider
     }
 }
-

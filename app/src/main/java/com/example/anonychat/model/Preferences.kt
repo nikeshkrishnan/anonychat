@@ -7,5 +7,6 @@ data class Preferences(
         val isOnline: Boolean = false,
         val lastSeen: Long = 0L,
         val giftedMeARose: Boolean = false,
-        val hasTakenBackRose: Boolean = false
+        val hasTakenBackRose: Boolean = false,
+        val userId: String? = null  // Actual userId from backend (not extracted from email)
 )

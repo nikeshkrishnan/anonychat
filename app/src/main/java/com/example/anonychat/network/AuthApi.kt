@@ -283,7 +283,19 @@ data class SubmitRatingRequest(
 )
 
 data class SubmitRatingResponse(
-        val message: String?
+	val message: String?
+)
+
+data class ResetAccountResponse(
+	val message: String
+)
+
+data class UpdateUsernameRequest(
+	val username: String
+)
+
+data class UpdateUsernameResponse(
+	val message: String
 )
 
 // --- API INTERFACE ---
@@ -372,10 +384,17 @@ interface AuthApiService {
         
         @POST("/rating/{email}")
         suspend fun submitRating(
-                @Path("email") targetEmail: String,
-                @Body request: SubmitRatingRequest
+        	@Path("email") targetEmail: String,
+        	@Body request: SubmitRatingRequest
         ): Response<SubmitRatingResponse>
-}
+        
+        @POST("/reset/{userId}")
+        suspend fun resetAccount(@Path("userId") userId: String): Response<ResetAccountResponse>
+        
+        @Headers("Content-Type: application/json")
+        @PUT("/auth/update-username")
+        suspend fun updateUsername(@Body request: UpdateUsernameRequest): Response<UpdateUsernameResponse>
+       }
 
 // --- NETWORK CLIENT (SINGLETON) ---
 object NetworkClient {

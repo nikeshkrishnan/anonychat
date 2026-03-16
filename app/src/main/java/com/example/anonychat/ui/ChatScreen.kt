@@ -50,13 +50,17 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -97,6 +101,8 @@ import coil.request.ImageRequest
 import com.example.anonychat.R
 import com.example.anonychat.service.ChatSocketService
 import com.example.anonychat.utils.ActiveChatTracker
+import com.example.anonychat.utils.DeactivatedUsersManager
+import com.example.anonychat.repository.UserRepository
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.example.anonychat.model.Preferences
@@ -360,7 +366,8 @@ fun ChatScreen(
                         matchedUser: User,
                         matchedPrefs: Preferences,
                         isNewMatch: Boolean) -> Unit,
-        onNavigateToBlockedUsers: () -> Unit = {}
+        onNavigateToBlockedUsers: () -> Unit = {},
+        onNavigateToLogin: () -> Unit = {}
 ) {
         // notify MainActivity that chat is now active
         LaunchedEffect(Unit) { onChatActive() }
@@ -417,6 +424,7 @@ fun ChatScreen(
                 mutableStateOf(themePrefs.getBoolean("is_dark_theme", false))
         }
         var showThemeDialog by remember { mutableStateOf(false) }
+        var showResetDialog by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
 
         if (showThemeDialog) {
@@ -451,11 +459,129 @@ fun ChatScreen(
                                                         onNavigateToBlockedUsers()
                                                 }
                                         ) { Text("Blocked Users") }
+                                        TextButton(
+                                                onClick = {
+                                                        showThemeDialog = false
+                                                        showResetDialog = true
+                                                }
+                                        ) { Text("🔄 Reset Account", color = Color(0xFFE53935)) }
                                 }
                         },
                         confirmButton = {}
                 )
         }
+        
+                // Reset Account Dialog
+                if (showResetDialog) {
+                        ResetAccountDialog(
+                                onDismiss = { showResetDialog = false },
+                                onConfirm = {
+                                        showResetDialog = false
+                                        isLoading = true
+                                        scope.launch {
+                                                try {
+                                                        val userId = userPrefsForCounts.getString("user_id", null)
+                                                        if (userId != null) {
+                                                                val response = NetworkClient.api.resetAccount(userId)
+                                                                if (response.isSuccessful) {
+                                                                        Toast.makeText(
+                                                                                context,
+                                                                                response.body()?.message ?: "Account reset successful",
+                                                                                Toast.LENGTH_LONG
+                                                                        ).show()
+                                                                        
+                                                                        // Save credentials before clearing (for auto-login after reset)
+                                                                        val savedUsername = userPrefsForCounts.getString("username", "")
+                                                                        val savedEmail = userPrefsForCounts.getString("user_email", "")
+                                                                        val savedUserId = userPrefsForCounts.getString("user_id", "")
+                                                                        val savedPassword = userPrefsForCounts.getString("password", "")
+                                                                        
+                                                                        Log.e("ChatScreen", "=== ACCOUNT RESET - SAVING CREDENTIALS ===")
+                                                                        Log.e("ChatScreen", "Saved username: $savedUsername")
+                                                                        Log.e("ChatScreen", "Saved email: $savedEmail")
+                                                                        Log.e("ChatScreen", "Saved userId: $savedUserId")
+                                                                        Log.e("ChatScreen", "Saved password: ${if (savedPassword.isNullOrEmpty()) "EMPTY" else "Present"}")
+                                                                        
+                                                                        // Close all WebSocket connections first
+                                                                        WebSocketManager.disconnect()
+                                                                        
+                                                                        // Clear conversation repository BEFORE clearing SharedPreferences
+                                                                        ConversationRepository.conversations.clear()
+                                                                        
+                                                                        // Clear deactivated users manager
+                                                                        DeactivatedUsersManager.clearAll()
+                                                                        
+                                                                        // Clear user repository
+                                                                        UserRepository.clearAll()
+                                                                        
+                                                                        // Clear ALL SharedPreferences files
+                                                                        context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        context.getSharedPreferences("auth_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        context.getSharedPreferences("deactivated_users", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        context.getSharedPreferences("unread_messages", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        context.getSharedPreferences("conversations", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        context.getSharedPreferences("user_ids", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                        
+                                                                        // Restore credentials for auto-login
+                                                                        val resetPrefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                                                        resetPrefs.edit().apply {
+                                                                                putString("username", savedUsername)
+                                                                                putString("user_email", savedEmail)
+                                                                                putString("user_id", savedUserId)
+                                                                                putString("password", savedPassword)
+                                                                                putBoolean("account_reset", true) // Flag to trigger username update flow after auto-login
+                                                                        }.commit()
+                                                                        
+                                                                        Log.e("ChatScreen", "=== ACCOUNT RESET - CREDENTIALS RESTORED ===")
+                                                                        Log.e("ChatScreen", "Restored username: $savedUsername")
+                                                                        Log.e("ChatScreen", "Restored email: $savedEmail")
+                                                                        Log.e("ChatScreen", "Restored userId: $savedUserId")
+                                                                        Log.e("ChatScreen", "Restored password: ${if (savedPassword.isNullOrEmpty()) "EMPTY" else "Present"}")
+                                                                        Log.e("ChatScreen", "Account reset flag set: true")
+                                                                        Log.e("ChatScreen", "User will need to login manually and will be redirected to UpdateUsernameScreen")
+                                                                        
+                                                                        // Clear app cache and data directories
+                                                                        try {
+                                                                                context.cacheDir.deleteRecursively()
+                                                                                context.filesDir.deleteRecursively()
+                                                                        } catch (e: Exception) {
+                                                                                Log.e("ChatScreen", "Error clearing cache/files: ${e.message}")
+                                                                        }
+                                                                        
+                                                                        // Small delay to ensure everything is cleared
+                                                                        kotlinx.coroutines.delay(500)
+                                                                        
+                                                                        // Navigate to login for auto-login
+                                                                        onNavigateToLogin()
+                                                                } else {
+                                                                        Toast.makeText(
+                                                                                context,
+                                                                                "Failed to reset account: ${response.code()}",
+                                                                                Toast.LENGTH_LONG
+                                                                        ).show()
+                                                                }
+                                                        } else {
+                                                                Toast.makeText(
+                                                                        context,
+                                                                        "User ID not found",
+                                                                        Toast.LENGTH_SHORT
+                                                                ).show()
+                                                        }
+                                                } catch (e: Exception) {
+                                                        Toast.makeText(
+                                                                context,
+                                                                "Error: ${e.message}",
+                                                                Toast.LENGTH_LONG
+                                                        ).show()
+                                                } finally {
+                                                        isLoading = false
+                                                }
+                                        }
+                                },
+                                isDarkTheme = isDarkTheme
+                        )
+                }
 
         val exoPlayer =
                 remember(context, isDarkTheme) {
@@ -1248,13 +1374,16 @@ fun ChatScreen(
                                                     if (isDarkTheme) Color(0xFF2D3648) else Color(0xFFE8EAF6)
                                                 }
                                             ) {
-                                                Box(contentAlignment = Alignment.Center) {
+                                                Box(
+                                                    contentAlignment = Alignment.Center,
+                                                    modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp)
+                                                ) {
                                                     Text(
                                                         text = "Most Relevant",
                                                         color = if (isDarkTheme) Color.White else {
                                                             if (ratingFilter == "None") Color.White else Color(0xFF5A6B88)
                                                         },
-                                                        fontSize = 13.sp,
+                                                        fontSize = 11.sp,
                                                         fontWeight = if (ratingFilter == "None") FontWeight.Bold else FontWeight.Normal
                                                     )
                                                 }
@@ -1953,5 +2082,114 @@ fun UserListItem(user: User) {
             lastMessage = "",
             lastMessageTimestamp = System.currentTimeMillis()
         )
+    )
+}
+
+@Composable
+private fun ResetAccountDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+    isDarkTheme: Boolean
+) {
+    val backgroundColor = if (isDarkTheme) Color(0xFF1E1E1E) else Color.White
+    val textColor = if (isDarkTheme) Color(0xFFF5F5F5) else Color(0xFF1E1E1E)
+    val warningColor = Color(0xFFE53935)
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = backgroundColor,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "🔄",
+                    style = MaterialTheme.typography.headlineMedium
+                )
+                Text(
+                    text = "Reset Account",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor
+                )
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "This clears your matches and preferences.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = textColor
+                )
+                
+                Spacer(Modifier.height(4.dp))
+                
+                Text(
+                    text = "What stays:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor
+                )
+                Text(
+                    text = "• Bans, suspensions, blocked users",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = textColor.copy(alpha = 0.8f)
+                )
+                
+                Spacer(Modifier.height(4.dp))
+                
+                Text(
+                    text = "What happens:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor
+                )
+                Text(
+                    text = "• People you chatted with will see your account as deactivated",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = textColor.copy(alpha = 0.8f)
+                )
+                Text(
+                    text = "• You may match with them again as a new user with a username of your choice",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = textColor.copy(alpha = 0.8f)
+                )
+                
+                Spacer(Modifier.height(8.dp))
+                
+                Text(
+                    text = "⚠️ This action cannot be undone",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = warningColor
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = warningColor,
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("Reset", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = textColor
+                )
+            ) {
+                Text("Cancel")
+            }
+        },
+        shape = RoundedCornerShape(16.dp)
     )
 }

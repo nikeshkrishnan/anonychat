@@ -113,8 +113,80 @@ import kotlinx.coroutines.flow.first
         ExperimentalFoundationApi::class
 )
 @Composable
-fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
+fun LoginScreen(
+    onLoginClick: (User) -> Unit = {},
+    onNavigateToUpdateUsername: (String) -> Unit = {}
+) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    
+    // Auto-login state
+    var isAutoLoggingIn by remember { mutableStateOf(false) }
+    
+    // Check for account reset flag and attempt auto-login with saved credentials
+    LaunchedEffect(Unit) {
+        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val accountReset = prefs.getBoolean("account_reset", false)
+        
+        Log.e("LoginScreen", "=== ACCOUNT RESET CHECK ===")
+        Log.e("LoginScreen", "Account reset flag: $accountReset")
+        
+        if (accountReset) {
+            val savedUsername = prefs.getString("username", "")
+            val savedPassword = prefs.getString("password", "")
+            val savedUserId = prefs.getString("user_id", "")
+            
+            Log.e("LoginScreen", "Account was reset. Attempting auto-login...")
+            Log.e("LoginScreen", "Username: $savedUsername")
+            Log.e("LoginScreen", "UserId: $savedUserId")
+            Log.e("LoginScreen", "Password: ${if (savedPassword.isNullOrEmpty()) "EMPTY" else "Present"}")
+            
+            if (!savedUsername.isNullOrEmpty() && !savedPassword.isNullOrEmpty() && !savedUserId.isNullOrEmpty()) {
+                isAutoLoggingIn = true
+                
+                scope.launch {
+                    try {
+                        val response = withContext(Dispatchers.IO) {
+                            NetworkClient.api.loginUser(
+                                UserLoginRequest(
+                                    username = savedUsername,
+                                    password = savedPassword,
+                                    userId = savedUserId
+                                )
+                            )
+                        }
+                        
+                        if (response.isSuccessful && response.body() != null) {
+                            val loginResponse = response.body()!!
+                            Log.e("LoginScreen", "Auto-login successful!")
+                            
+                            // Save login data
+                            prefs.edit().apply {
+                                putString("access_token", loginResponse.accessToken)
+                                putString("user_email", loginResponse.user.email)
+                                putString("user_id", loginResponse.user.id)
+                                putString("username", savedUsername)
+                                putString("password", savedPassword)
+                                // Keep account_reset flag for redirect to UpdateUsernameScreen
+                            }.commit()
+                            
+                            // Redirect to UpdateUsernameScreen
+                            Log.e("LoginScreen", "Redirecting to UpdateUsernameScreen...")
+                            onNavigateToUpdateUsername(savedUsername)
+                        } else {
+                            Log.e("LoginScreen", "Auto-login failed: ${response.code()}")
+                            isAutoLoggingIn = false
+                        }
+                    } catch (e: Exception) {
+                        Log.e("LoginScreen", "Auto-login error: ${e.message}")
+                        isAutoLoggingIn = false
+                    }
+                }
+            } else {
+                Log.e("LoginScreen", "Missing credentials for auto-login")
+            }
+        }
+    }
     
     // State for 403 error dialog
     var show403Dialog by remember { mutableStateOf(false) }
@@ -485,6 +557,7 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                                                 putString("user_id", loginResponse.user.id)
                                                                 putString("user_email", loginResponse.user.email)
                                                                 putString("username", loginResponse.user.username)
+                                                                putString("password", password)  // Save password for account reset
                                                                 apply()
                                                             }
                                                             val intent = Intent(context, ChatSocketService::class.java)
@@ -549,7 +622,15 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                                                         apply()
                                                                     }
                                                                     isLoading = false
-                                                                    onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                    
+                                                                    // Check if account was reset - redirect to UpdateUsername
+                                                                    val accountReset = prefs.getBoolean("account_reset", false)
+                                                                    if (accountReset) {
+                                                                        Log.e("LoginScreen", "Account reset detected after login - redirecting to UpdateUsername")
+                                                                        onNavigateToUpdateUsername(loginResponse.user.username)
+                                                                    } else {
+                                                                        onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                    }
                                                                 }
                                                             }
                                                             is WebSocketEvent.PreferencesError -> {
@@ -586,14 +667,29 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                                                                 putFloat("romance_max", 5f)
                                                                                 apply()
                                                                             }
-                                                                            onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                            
+                                                                            // Check if account was reset - redirect to UpdateUsername
+                                                                            val accountReset = prefs.getBoolean("account_reset", false)
+                                                                            if (accountReset) {
+                                                                                Log.e("LoginScreen", "Account reset detected after login - redirecting to UpdateUsername")
+                                                                                onNavigateToUpdateUsername(loginResponse.user.username)
+                                                                            } else {
+                                                                                onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                            }
                                                                         }
                                                                         is WebSocketEvent.UpdatePreferencesError -> {
                                                                             Toast.makeText(context, "Failed to set defaults", Toast.LENGTH_SHORT).show()
                                                                         }
                                                                         else -> {
                                                                             // Timeout or other event - proceed anyway
-                                                                            onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                            // Check if account was reset - redirect to UpdateUsername
+                                                                            val accountReset = prefs.getBoolean("account_reset", false)
+                                                                            if (accountReset) {
+                                                                                Log.e("LoginScreen", "Account reset detected after login - redirecting to UpdateUsername")
+                                                                                onNavigateToUpdateUsername(loginResponse.user.username)
+                                                                            } else {
+                                                                                onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                            }
                                                                         }
                                                                     }
                                                                 }
@@ -602,14 +698,30 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
                                                                 // Timeout - proceed anyway
                                                                 withContext(Dispatchers.Main) {
                                                                     isLoading = false
-                                                                    onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                    
+                                                                    // Check if account was reset - redirect to UpdateUsername
+                                                                    val accountReset = prefs.getBoolean("account_reset", false)
+                                                                    if (accountReset) {
+                                                                        Log.e("LoginScreen", "Account reset detected after login - redirecting to UpdateUsername")
+                                                                        onNavigateToUpdateUsername(loginResponse.user.username)
+                                                                    } else {
+                                                                        onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                    }
                                                                 }
                                                             }
                                                             else -> {
                                                                 // Other event types - proceed anyway
                                                                 withContext(Dispatchers.Main) {
                                                                     isLoading = false
-                                                                    onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                    
+                                                                    // Check if account was reset - redirect to UpdateUsername
+                                                                    val accountReset = prefs.getBoolean("account_reset", false)
+                                                                    if (accountReset) {
+                                                                        Log.e("LoginScreen", "Account reset detected after login - redirecting to UpdateUsername")
+                                                                        onNavigateToUpdateUsername(loginResponse.user.username)
+                                                                    } else {
+                                                                        onLoginClick(User(loginResponse.user.id, loginResponse.user.username, null))
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -933,8 +1045,8 @@ fun LoginScreen(onLoginClick: (User) -> Unit = {}) {
             }
         }
 
-        // LAYER 3: SHARED LOADING OVERLAY
-        LoadingHeartOverlay(isLoading = isLoading)
+        // LAYER 3: SHARED LOADING OVERLAY (shows during login or auto-login)
+        LoadingHeartOverlay(isLoading = isLoading || isAutoLoggingIn)
         
         // LAYER 4: 403 ERROR DIALOG
         if (show403Dialog) {

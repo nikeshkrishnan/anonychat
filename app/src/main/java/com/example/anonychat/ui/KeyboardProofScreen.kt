@@ -2,6 +2,7 @@ package com.example.anonychat.ui
 // VERIFIED_MEDIA_SUPPORT_ADDED_2026_01_25
 
 import android.Manifest
+import com.example.anonychat.repository.UserRepository
 import com.example.anonychat.utils.ActiveChatTracker
 import com.example.anonychat.utils.BlockUserManager
 import com.example.anonychat.utils.NotificationHelper
@@ -638,9 +639,16 @@ fun KeyboardProofScreen(
     LaunchedEffect(Unit) {
         Log.e("SparkOverlay", "=".repeat(60))
         Log.e("SparkOverlay", "Screen opened - peer already in chat: $peerChatOpenReceived")
-        // Extract user IDs from email addresses (remove @email.com suffix)
-        val localUserId = localGmail.substringBefore("@")
-        val matchedUserId = matchedUserGmail.substringBefore("@")
+        
+        // Get current user's ID from SharedPreferences (never extract from email after account reset)
+        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+        val localUserId = prefs.getString("user_id", null) ?: run {
+            Log.e("SparkOverlay", "ERROR: user_id not found in SharedPreferences")
+            return@LaunchedEffect
+        }
+        
+        // Get matched user's userId from repository (with fallback for initial interactions)
+        val matchedUserId = UserRepository.getUserIdWithFallback(matchedUserGmail)
         
         Log.e("SparkOverlay", "Checking spark status for: $localUserId <-> $matchedUserId")
         Log.e("SparkOverlay", "  (Full emails: $localGmail <-> $matchedUserGmail)")
@@ -768,9 +776,17 @@ fun KeyboardProofScreen(
                     Log.e("SparkOverlay", "=".repeat(60))
                     Log.e("SparkOverlay", "[INITIATOR] Sending spark_start to $matchedUserGmail")
 
-                    // Mark users as sparked in the backend
-                    val localUserId = localGmail.substringBefore("@")
-                    val matchedUserId = matchedUserGmail.substringBefore("@")
+                    // Get current user's ID from SharedPreferences (never extract from email after account reset)
+                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                    val localUserId = prefs.getString("user_id", null)
+                    
+                    if (localUserId == null) {
+                        Log.e("SparkOverlay", "ERROR: user_id not found in SharedPreferences")
+                        return@LaunchedEffect
+                    }
+                    
+                    // Get matched user's userId from repository (with fallback for initial interactions)
+                    val matchedUserId = UserRepository.getUserIdWithFallback(matchedUserGmail)
                     try {
                         val request = com.example.anonychat.network.SparkRequest(
                             userA = localUserId,
@@ -2695,11 +2711,14 @@ fun KeyboardProofScreen(
                             mySparkChoice = isRightSwipe
                             Log.e("SparkSwipe", "My spark choice: ${if (isRightSwipe) "RIGHT" else "LEFT"}")
                             
-                            // Send WebSocket event for spark swipe
-                            val localUserId = localGmail.substringBefore("@")
-                            if (isRightSwipe) {
-                                Log.e("SparkSwipe", "Sending spark_right to $matchedUserGmail (from: $localUserId)")
-                                WebSocketManager.sendSparkRight(matchedUserGmail, localUserId)
+                            // Get current user's ID from SharedPreferences (never extract from email after account reset)
+                            val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                            val localUserId = prefs.getString("user_id", null)
+                            
+                            if (localUserId != null) {
+                                if (isRightSwipe) {
+                                    Log.e("SparkSwipe", "Sending spark_right to $matchedUserGmail (from: $localUserId)")
+                                    WebSocketManager.sendSparkRight(matchedUserGmail, localUserId)
 
                                 // Call spark API - we are sending a spark TO the peer
                                 kotlinx.coroutines.MainScope().launch {
@@ -2721,13 +2740,17 @@ fun KeyboardProofScreen(
                                         Log.e("SparkSwipe", "❌ sparkUser API exception: ${e.message}", e)
                                     }
                                 }
+                                } else {
+                                    Log.e("SparkSwipe", "Sending spark_left to $matchedUserGmail (from: $localUserId)")
+                                    WebSocketManager.sendSparkLeft(matchedUserGmail, localUserId)
+                                }
+                                
+                                // Determine what to show based on my choice and peer's choice (if received)
+                                showThunderGif = false
                             } else {
-                                Log.e("SparkSwipe", "Sending spark_left to $matchedUserGmail (from: $localUserId)")
-                                WebSocketManager.sendSparkLeft(matchedUserGmail, localUserId)
+                                Log.e("SparkSwipe", "ERROR: user_id not found in SharedPreferences")
+                                showThunderGif = false
                             }
-                            
-                            // Determine what to show based on my choice and peer's choice (if received)
-                            showThunderGif = false
                             
                             if (!isRightSwipe) {
                                 // I swiped left - always show miss immediately
@@ -3004,10 +3027,17 @@ fun KeyboardProofScreen(
                     onReport = {
                         scope.launch {
                             try {
+                                // Get current user's ID from SharedPreferences (never extract from email after account reset)
                                 val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                                val myEmail = prefs.getString("user_email", "") ?: ""
-                                val myUserId = myEmail.substringBefore("@")
-                                val targetUserId = matchedUserGmail.substringBefore("@")
+                                val myUserId = prefs.getString("user_id", null)
+                                
+                                if (myUserId == null) {
+                                    Toast.makeText(context, "Error: User ID not found", Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+                                
+                                // Get target user's userId from repository (with fallback for initial interactions)
+                                val targetUserId = UserRepository.getUserIdWithFallback(matchedUserGmail)
                                 
                                 val reason = if (selectedReportReason == "Other") {
                                     "Other: $otherReportText"
