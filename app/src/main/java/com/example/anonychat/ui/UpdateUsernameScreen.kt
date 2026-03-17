@@ -189,9 +189,20 @@ fun UpdateUsernameScreen(
                                         Log.e("UpdateUsernameScreen", "Disconnecting WebSocket with old email")
                                         WebSocketManager.disconnect()
                                         
+                                        // Wait for service to fully stop
+                                        kotlinx.coroutines.delay(1000)
+                                        
                                         // Get user data from SharedPreferences
                                         val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                                        val oldEmail = prefs.getString("user_email", "") ?: ""
                                         val userId = prefs.getString("user_id", "") ?: ""
+                                        val token = prefs.getString("access_token", "") ?: ""
+                                        
+                                        // Update Room database with new email
+                                        if (oldEmail.isNotEmpty() && updateResponse.email.isNotEmpty() && oldEmail != updateResponse.email) {
+                                            Log.e("UpdateUsernameScreen", "Updating Room database emails from $oldEmail to ${updateResponse.email}")
+                                            WebSocketManager.updateAllEmailsInDatabase(oldEmail, updateResponse.email)
+                                        }
                                         
                                         // Create User object with updated username and NEW email from response
                                         val user = User(
@@ -212,11 +223,83 @@ fun UpdateUsernameScreen(
                                         
                                         Log.e("UpdateUsernameScreen", "User object saved with new email: $userJson")
                                         
-                                        // Reset loading state before navigation
-                                        isLoading = false
+                                        // Verify the email was saved correctly
+                                        val verifyEmail = prefs.getString("user_email", null)
+                                        Log.e("UpdateUsernameScreen", "Verified saved email: $verifyEmail")
                                         
-                                        // Navigate to ChatScreen (auto-login will handle WebSocket reconnection with NEW email)
-                                        onUsernameUpdated()
+                                        // CRITICAL: Release the email update lock now that both DB and SharedPreferences are updated
+                                        WebSocketManager.unlockEmailUpdate()
+                                        Log.e("UpdateUsernameScreen", "Email update complete, lock released")
+                                        
+                                        // Reconnect WebSocket with NEW email and token
+                                        if (token.isNotEmpty()) {
+                                            Log.e("UpdateUsernameScreen", "First reconnection with NEW email: ${updateResponse.email}")
+                                            WebSocketManager.connect(token, updateResponse.email)
+                                            
+                                            // Wait for first connection to establish
+                                            Log.e("UpdateUsernameScreen", "Waiting for first connection...")
+                                            var attempts = 0
+                                            while (attempts < 20 && !WebSocketManager.isConnected()) {
+                                                kotlinx.coroutines.delay(500)
+                                                attempts++
+                                                Log.e("UpdateUsernameScreen", "First connection state: ${WebSocketManager.isConnected()}, attempt $attempts/20")
+                                            }
+                                            
+                                            if (WebSocketManager.isConnected()) {
+                                                Log.e("UpdateUsernameScreen", "First connection successful! Now forcing second reconnection...")
+                                                
+                                                // FORCE SECOND RECONNECTION to ensure new email is used
+                                                Log.e("UpdateUsernameScreen", "Disconnecting for forced second reconnection")
+                                                WebSocketManager.disconnect()
+                                                kotlinx.coroutines.delay(1000)
+                                                
+                                                // Verify email in SharedPreferences before second reconnection
+                                                val verifyEmailBeforeSecondReconnect = prefs.getString("user_email", null)
+                                                Log.e("UpdateUsernameScreen", "Email in SharedPreferences before second reconnect: $verifyEmailBeforeSecondReconnect")
+                                                Log.e("UpdateUsernameScreen", "Email from backend response: ${updateResponse.email}")
+                                                Log.e("UpdateUsernameScreen", "Old email before update: $oldEmail")
+                                                
+                                                // Use email from SharedPreferences for second reconnection to ensure it's the saved one
+                                                val emailForReconnect = verifyEmailBeforeSecondReconnect ?: updateResponse.email
+                                                Log.e("UpdateUsernameScreen", "Second reconnection with email: $emailForReconnect")
+                                                WebSocketManager.connect(token, emailForReconnect)
+                                                
+                                                // Wait for second connection to be ready
+                                                Log.e("UpdateUsernameScreen", "Waiting for second connection to be ready...")
+                                                attempts = 0
+                                                while (attempts < 20 && !WebSocketManager.isConnected()) {
+                                                    kotlinx.coroutines.delay(500)
+                                                    attempts++
+                                                    Log.e("UpdateUsernameScreen", "Second connection state: ${WebSocketManager.isConnected()}, attempt $attempts/20")
+                                                }
+                                                
+                                                if (WebSocketManager.isConnected()) {
+                                                    Log.e("UpdateUsernameScreen", "Second reconnection successful!")
+                                                    
+                                                    // Start WebSocketMonitorService with new credentials
+                                                    Log.e("UpdateUsernameScreen", "Starting WebSocketMonitorService with new credentials")
+                                                    com.example.anonychat.service.WebSocketMonitorService.start(context)
+                                                    
+                                                    // Reset loading state before navigation
+                                                    isLoading = false
+                                                    
+                                                    // Navigate to ChatScreen
+                                                    onUsernameUpdated()
+                                                } else {
+                                                    Log.e("UpdateUsernameScreen", "Second reconnection failed after 10 seconds")
+                                                    errorMessage = "Failed to reconnect. Please restart the app."
+                                                    isLoading = false
+                                                }
+                                            } else {
+                                                Log.e("UpdateUsernameScreen", "First reconnection failed after 10 seconds")
+                                                errorMessage = "Failed to reconnect. Please restart the app."
+                                                isLoading = false
+                                            }
+                                        } else {
+                                            Log.e("UpdateUsernameScreen", "Token is empty, cannot reconnect")
+                                            errorMessage = "Authentication error. Please login again."
+                                            isLoading = false
+                                        }
                                     } else {
                                         errorMessage = "Failed to update username: ${response.code()}"
                                         isLoading = false

@@ -127,6 +127,12 @@ interface ChatHistoryDao {
     
     @Query("DELETE FROM chat_history WHERE (fromEmail = :user1 AND toEmail = :user2) OR (fromEmail = :user2 AND toEmail = :user1)")
     suspend fun deleteChatHistory(user1: String, user2: String)
+    
+    @Query("UPDATE chat_history SET fromEmail = :newEmail WHERE fromEmail = :oldEmail")
+    suspend fun updateFromEmail(oldEmail: String, newEmail: String)
+    
+    @Query("UPDATE chat_history SET toEmail = :newEmail WHERE toEmail = :oldEmail")
+    suspend fun updateToEmail(oldEmail: String, newEmail: String)
 }
 
 class Converters {
@@ -284,6 +290,9 @@ object WebSocketManager {
     private val connectMutex = Mutex()
 
     @Volatile private var wsState: WsState = WsState.DISCONNECTED
+    
+    // Lock to prevent connections during email updates
+    @Volatile private var isUpdatingEmail = false
 
     @Volatile private var readyState: ReadyState = ReadyState.NOT_READY
 
@@ -645,6 +654,12 @@ object WebSocketManager {
     fun connect(token: String, email: String) {
         scope.launch {
             try {
+                // Check if email update is in progress
+                if (isUpdatingEmail) {
+                    Log.w("WebSocketManager", "Email update in progress, blocking connection attempt")
+                    return@launch
+                }
+                
                 connectMutex.withLock {
                     if (wsState != WsState.DISCONNECTED) {
                         Log.w("WebSocketManager", "Already connecting or connected")
@@ -653,10 +668,18 @@ object WebSocketManager {
                     wsState = WsState.CONNECTING
                 }
                 
+                Log.e("WebSocketManager", "=== CONNECT CALLED ===")
+                Log.e("WebSocketManager", "Email parameter received: $email")
+                Log.e("WebSocketManager", "Token parameter received: ${token.take(20)}...")
+                Log.e("WebSocketManager", "Previous curruser value: $curruser")
+                
                 curruser = email
+                Log.e("WebSocketManager", "Updated curruser to: $curruser")
+                
                 val url = "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
                 wsUrl = url
                 
+                Log.e("WebSocketManager", "WebSocket URL: $url")
                 Log.i("WebSocketManager", "Reconnecting WebSocket to: $url")
                 
                 val request = Request.Builder().url(url).build()
@@ -856,6 +879,53 @@ object WebSocketManager {
     private fun ensureInit() {
         check(initialized) { "WebSocketManager.init(context) must be called first" }
     }
+    
+    /**
+     * Sets the email update lock to prevent connections during email changes
+     */
+    fun lockEmailUpdate() {
+        Log.e("WebSocketManager", "🔒 EMAIL UPDATE LOCK ACQUIRED - Blocking all connection attempts")
+        isUpdatingEmail = true
+    }
+    
+    /**
+     * Clears the email update lock to allow connections
+     */
+    fun unlockEmailUpdate() {
+        Log.e("WebSocketManager", "🔓 EMAIL UPDATE LOCK RELEASED - Connections now allowed")
+        isUpdatingEmail = false
+    }
+    
+    /**
+     * Update all occurrences of old email to new email in Room database
+     * This is critical after account reset to ensure WebSocket connects with correct email
+     * IMPORTANT: This function sets a lock to prevent WebSocket connections during the update
+     */
+    suspend fun updateAllEmailsInDatabase(oldEmail: String, newEmail: String) {
+        ensureInit()
+        try {
+            // Set lock to prevent connections during update
+            lockEmailUpdate()
+            
+            Log.i("WebSocketManager", "Updating all emails in database: $oldEmail -> $newEmail")
+            
+            // Update fromEmail field
+            historyDao.updateFromEmail(oldEmail, newEmail)
+            Log.d("WebSocketManager", "Updated fromEmail in chat_history")
+            
+            // Update toEmail field
+            historyDao.updateToEmail(oldEmail, newEmail)
+            Log.d("WebSocketManager", "Updated toEmail in chat_history")
+            
+            Log.i("WebSocketManager", "Successfully updated all emails in database")
+            
+            // Note: Lock will be released by the caller after SharedPreferences is also updated
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Error updating emails in database", e)
+            // Release lock on error
+            unlockEmailUpdate()
+        }
+    }
 
     private suspend fun downloadMediaAndAck(
             url: String,
@@ -981,6 +1051,12 @@ object WebSocketManager {
     suspend fun connect(context: Context) {
         ensureInit()
         Log.e("WebSocketManager", "connect() called - attempting to establish WebSocket connection")
+
+        // Check if email update is in progress
+        if (isUpdatingEmail) {
+            Log.w("WebSocketManager", "Email update in progress, blocking connection attempt")
+            return
+        }
 
         // 1) Acquire lock only to check & mutate quick state -> don't suspend while holding it
         connectMutex.withLock {
@@ -2322,9 +2398,14 @@ object WebSocketManager {
                     // Extract and store userId if present
                     val matchEmail = matchJson.optString("gmail")
                     val matchUserId = matchJson.optString("userId")
+                    
+                    Log.d("WebSocketManager", "match_found - email: $matchEmail, userId from JSON: '$matchUserId'")
+                    
                     if (matchEmail.isNotEmpty() && matchUserId.isNotEmpty()) {
                         UserRepository.storeUserId(matchEmail, matchUserId)
-                        Log.d("WebSocketManager", "Stored userId for $matchEmail: $matchUserId (match_found)")
+                        Log.d("WebSocketManager", "✅ Stored userId for $matchEmail: $matchUserId (match_found)")
+                    } else {
+                        Log.w("WebSocketManager", "⚠️ Cannot store userId - email: ${matchEmail.isNotEmpty()}, userId: ${matchUserId.isNotEmpty()}")
                     }
                     
                     val match = com.example.anonychat.network.MatchResponse(
@@ -2450,9 +2531,10 @@ object WebSocketManager {
                     if (error != "User preferences not found") {
                         Log.e("WebSocketManager", "preferences_error received: $error")
                     } else {
-                        Log.d("WebSocketManager", "preferences_error received: $error (expected for deactivated user)${if (targetEmail.isNotEmpty()) " - email: $targetEmail" else " - no email tracked"}")
+                        Log.d("WebSocketManager", "preferences_error received: $error (no preferences = show as deactivated)${if (targetEmail.isNotEmpty()) " - email: $targetEmail" else " - no email tracked"}")
                         
                         // Mark user as deactivated if we have their email
+                        // This is intentional: without preferences, profile pic won't render, so show as deactivated
                         if (targetEmail.isNotEmpty() && error == "User preferences not found") {
                             com.example.anonychat.utils.DeactivatedUsersManager.markAsDeactivated(targetEmail)
                             Log.d("WebSocketManager", "Marked user as deactivated: $targetEmail")

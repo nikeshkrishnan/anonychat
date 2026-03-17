@@ -127,46 +127,56 @@ fun ProfileScreen(
                     }
                     is WebSocketEvent.PreferencesData -> {
                         val serverPrefs = event.preferences
-                        android.util.Log.d("ProfilePrefs", "Received preferences via WebSocket: username=${serverPrefs.username}")
+                        val myEmail = userPrefs.getString("user_email", null)
                         
-                        // Update composable state with fetched data
-                        serverPrefs.username?.takeIf { it.isNotBlank() }?.let { username = it }
-                        serverPrefs.gender?.let { gender = it }
-                        serverPrefs.age?.let { age = it }
-                        serverPrefs.preferredGender?.let { preferredGender = it }
-                        serverPrefs.preferredAgeRange?.let {
-                            preferredAgeRange = it.min.toFloat()..it.max.toFloat()
-                        }
-                        serverPrefs.romanceRange?.let {
-                            romanceRange = it.min.toFloat()..it.max.toFloat()
-                        }
-                        // Update sparks, roses and giftsLeft from server response
-                        serverPrefs.sparks?.let {
-                            sparks = it
-                        }
-                        serverPrefs.totalRosesReceived?.let {
-                            roses = it
-                        }
-                        serverPrefs.availableRoses?.let {
-                            giftsLeft = it
-                        }
+                        android.util.Log.d("ProfilePrefs", "Received preferences via WebSocket: username=${serverPrefs.username}, gmail=${serverPrefs.gmail}")
+                        android.util.Log.d("ProfilePrefs", "My email: $myEmail")
+                        
+                        // CRITICAL: Only update if preferences belong to the main user
+                        if (serverPrefs.gmail != null && serverPrefs.gmail == myEmail) {
+                            android.util.Log.d("ProfilePrefs", "Preferences match main user - updating profile")
+                            
+                            // Update composable state with fetched data
+                            serverPrefs.username?.takeIf { it.isNotBlank() }?.let { username = it }
+                            serverPrefs.gender?.let { gender = it }
+                            serverPrefs.age?.let { age = it }
+                            serverPrefs.preferredGender?.let { preferredGender = it }
+                            serverPrefs.preferredAgeRange?.let {
+                                preferredAgeRange = it.min.toFloat()..it.max.toFloat()
+                            }
+                            serverPrefs.romanceRange?.let {
+                                romanceRange = it.min.toFloat()..it.max.toFloat()
+                            }
+                            // Update sparks, roses and giftsLeft from server response
+                            serverPrefs.sparks?.let {
+                                sparks = it
+                            }
+                            serverPrefs.totalRosesReceived?.let {
+                                roses = it
+                            }
+                            serverPrefs.availableRoses?.let {
+                                giftsLeft = it
+                            }
 
-                        // Persist all fetched values to SharedPreferences
-                        with(userPrefs.edit()) {
-                            serverPrefs.username?.takeIf { it.isNotBlank() }?.let { putString("username", it) }
-                            putString("gender", gender)
-                            putInt("age", age)
-                            putString("preferred_gender", preferredGender)
-                            putFloat("preferred_age_min", preferredAgeRange.start)
-                            putFloat("preferred_age_max", preferredAgeRange.endInclusive)
-                            putFloat("romance_min", romanceRange.start)
-                            putFloat("romance_max", romanceRange.endInclusive)
-                            serverPrefs.sparks?.let { putInt("sparks_self", it) }
-                            serverPrefs.totalRosesReceived?.let { putInt("roses", it) }
-                            serverPrefs.availableRoses?.let { putInt("available_roses", it) }
-                            apply()
+                            // Persist all fetched values to SharedPreferences
+                            with(userPrefs.edit()) {
+                                serverPrefs.username?.takeIf { it.isNotBlank() }?.let { putString("username", it) }
+                                putString("gender", gender)
+                                putInt("age", age)
+                                putString("preferred_gender", preferredGender)
+                                putFloat("preferred_age_min", preferredAgeRange.start)
+                                putFloat("preferred_age_max", preferredAgeRange.endInclusive)
+                                putFloat("romance_min", romanceRange.start)
+                                putFloat("romance_max", romanceRange.endInclusive)
+                                serverPrefs.sparks?.let { putInt("sparks_self", it) }
+                                serverPrefs.totalRosesReceived?.let { putInt("roses", it) }
+                                serverPrefs.availableRoses?.let { putInt("available_roses", it) }
+                                apply()
+                            }
+                            android.util.Log.d("ProfilePrefs", "Updated prefs from WebSocket. sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
+                        } else {
+                            android.util.Log.w("ProfilePrefs", "Ignoring preferences - not for main user (received: ${serverPrefs.gmail}, expected: $myEmail)")
                         }
-                        android.util.Log.d("ProfilePrefs", "Updated prefs from WebSocket. sparks=${serverPrefs.sparks}, roses=${serverPrefs.totalRosesReceived}")
                     }
                     is WebSocketEvent.PreferencesError -> {
                         android.util.Log.e("ProfilePrefs", "Error fetching prefs via WebSocket: ${event.error}")
@@ -211,12 +221,19 @@ fun ProfileScreen(
                         WebSocketManager.events.collect { event ->
                             when (event) {
                                 is WebSocketEvent.AverageRatingData -> {
-                                    event.avgRating?.let { rating = it }
-                                    event.count?.let { ratingCount = it }
-                                    android.util.Log.d("ProfileRatings", "Fetched ratings via WebSocket: avg=$rating, count=$ratingCount")
+                                    // CRITICAL: Only update if rating is for the main user
+                                    if (event.userEmail == userEmail) {
+                                        event.avgRating?.let { rating = it }
+                                        event.count?.let { ratingCount = it }
+                                        android.util.Log.d("ProfileRatings", "Fetched ratings via WebSocket: avg=$rating, count=$ratingCount")
+                                    } else {
+                                        android.util.Log.w("ProfileRatings", "Ignoring rating - not for main user (received: ${event.userEmail}, expected: $userEmail)")
+                                    }
                                 }
                                 is WebSocketEvent.AverageRatingError -> {
-                                    android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${event.error}")
+                                    if (event.userEmail == userEmail) {
+                                        android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${event.error}")
+                                    }
                                 }
                                 else -> {}
                             }
@@ -249,20 +266,27 @@ fun ProfileScreen(
                         WebSocketManager.events.collect { event ->
                             when (event) {
                                 is WebSocketEvent.AverageRatingData -> {
-                                    event.avgRating?.let {
-                                        rating = it
-                                        // Persist to SharedPreferences
-                                        userPrefs.edit().putFloat("user_rating", it).apply()
+                                    // CRITICAL: Only update if rating is for the main user
+                                    if (event.userEmail == userEmail) {
+                                        event.avgRating?.let {
+                                            rating = it
+                                            // Persist to SharedPreferences
+                                            userPrefs.edit().putFloat("user_rating", it).apply()
+                                        }
+                                        event.count?.let {
+                                            ratingCount = it
+                                            // Persist to SharedPreferences
+                                            userPrefs.edit().putInt("user_rating_count", it).apply()
+                                        }
+                                        android.util.Log.d("ProfileRatings", "Fetched and persisted ratings via WebSocket: avg=$rating, count=$ratingCount")
+                                    } else {
+                                        android.util.Log.w("ProfileRatings", "Ignoring rating - not for main user (received: ${event.userEmail}, expected: $userEmail)")
                                     }
-                                    event.count?.let {
-                                        ratingCount = it
-                                        // Persist to SharedPreferences
-                                        userPrefs.edit().putInt("user_rating_count", it).apply()
-                                    }
-                                    android.util.Log.d("ProfileRatings", "Fetched and persisted ratings via WebSocket: avg=$rating, count=$ratingCount")
                                 }
                                             is WebSocketEvent.AverageRatingError -> {
-                                                android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${event.error}")
+                                                if (event.userEmail == userEmail) {
+                                                    android.util.Log.e("ProfileRatings", "Failed to fetch ratings: ${event.error}")
+                                                }
                                             }
                                             else -> {}
                                         }

@@ -100,10 +100,11 @@ sealed class Screen(val route: String) {
                 isNewMatch: Boolean
         ): String {
             val gson = Gson()
-            val u1 = URLEncoder.encode(gson.toJson(currentUser), "UTF-8")
-            val p1 = URLEncoder.encode(gson.toJson(myPrefs), "UTF-8")
-            val u2 = URLEncoder.encode(gson.toJson(matchedUser), "UTF-8")
-            val p2 = URLEncoder.encode(gson.toJson(matchedPrefs), "UTF-8")
+            // Replace + with %2B to preserve + characters in emails after URL decoding
+            val u1 = URLEncoder.encode(gson.toJson(currentUser), "UTF-8").replace("+", "%2B")
+            val p1 = URLEncoder.encode(gson.toJson(myPrefs), "UTF-8").replace("+", "%2B")
+            val u2 = URLEncoder.encode(gson.toJson(matchedUser), "UTF-8").replace("+", "%2B")
+            val p2 = URLEncoder.encode(gson.toJson(matchedPrefs), "UTF-8").replace("+", "%2B")
             return "directChat/$u1/$p1/$u2/$p2/$isNewMatch"
         }
     }
@@ -801,7 +802,8 @@ class MainActivity : ComponentActivity() {
                         currentUser = currentUser,
                         matchedUser = matchedUser,
                         matchedUserPrefs = matchedPrefs,
-                        matchedUserGmail = matchedUser.id,
+                        // Fix: URLDecoder converts + to space, so we need to restore + in emails
+                        matchedUserGmail = matchedUser.id.replace(" ", "+"),
                         navController = navController,
                         isNewMatch = isNewMatch,
                         onBack = { navController.popBackStack() }

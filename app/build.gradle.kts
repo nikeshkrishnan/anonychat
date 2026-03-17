@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    id ("kotlin-kapt" )  // 👈 ADD THIS
+    alias(libs.plugins.ksp)
     id("kotlin-parcelize")
 }
 
@@ -49,6 +49,7 @@ android {
     buildFeatures {
         compose = true
     }
+    
 }
 
 dependencies {
@@ -93,7 +94,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     implementation ("androidx.room:room-runtime:2.6.1")
     implementation ("androidx.room:room-ktx:2.6.1")
-    kapt ("androidx.room:room-compiler:2.6.1")
+    ksp ("androidx.room:room-compiler:2.6.1")
     implementation("androidx.media3:media3-ui:1.2.0")
     implementation("io.coil-kt:coil-compose:2.7.0") // Updated to 2.7.0
     implementation("io.coil-kt:coil-gif:2.7.0")

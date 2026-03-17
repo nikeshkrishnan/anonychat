@@ -640,24 +640,13 @@ fun KeyboardProofScreen(
         Log.e("SparkOverlay", "=".repeat(60))
         Log.e("SparkOverlay", "Screen opened - peer already in chat: $peerChatOpenReceived")
         
-        // Get current user's ID from SharedPreferences (never extract from email after account reset)
-        val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-        val localUserId = prefs.getString("user_id", null) ?: run {
-            Log.e("SparkOverlay", "ERROR: user_id not found in SharedPreferences")
-            return@LaunchedEffect
-        }
+        Log.e("SparkOverlay", "Checking spark status for emails: $localGmail <-> $matchedUserGmail")
         
-        // Get matched user's userId from repository (with fallback for initial interactions)
-        val matchedUserId = UserRepository.getUserIdWithFallback(matchedUserGmail)
-        
-        Log.e("SparkOverlay", "Checking spark status for: $localUserId <-> $matchedUserId")
-        Log.e("SparkOverlay", "  (Full emails: $localGmail <-> $matchedUserGmail)")
-        
-        // Check if this user pair has already sparked
+        // Check if this user pair has already sparked (using emails)
         try {
             val request = com.example.anonychat.network.SparkRequest(
-                userA = localUserId,
-                userB = matchedUserId
+                userA = localGmail,
+                userB = matchedUserGmail
             )
             Log.e("SparkOverlay", "Calling isSparked API with request: $request")
             
@@ -777,22 +766,12 @@ fun KeyboardProofScreen(
                     Log.e("SparkOverlay", "[INITIATOR] Sending spark_start to $matchedUserGmail")
 
                     // Get current user's ID from SharedPreferences (never extract from email after account reset)
-                    val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-                    val localUserId = prefs.getString("user_id", null)
-                    
-                    if (localUserId == null) {
-                        Log.e("SparkOverlay", "ERROR: user_id not found in SharedPreferences")
-                        return@LaunchedEffect
-                    }
-                    
-                    // Get matched user's userId from repository (with fallback for initial interactions)
-                    val matchedUserId = UserRepository.getUserIdWithFallback(matchedUserGmail)
                     try {
                         val request = com.example.anonychat.network.SparkRequest(
-                            userA = localUserId,
-                            userB = matchedUserId
+                            userA = localGmail,
+                            userB = matchedUserGmail
                         )
-                        Log.e("SparkOverlay", "[INITIATOR] Calling hasSparked API: $request")
+                        Log.e("SparkOverlay", "[INITIATOR] Calling hasSparked API with emails: $request")
                         val response = NetworkClient.api.hasSparked(request)
                         Log.e("SparkOverlay", "[INITIATOR] hasSparked response: ${response.code()} sparked=${response.body()?.sparked}")
                         if (response.isSuccessful) {

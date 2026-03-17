@@ -161,6 +161,10 @@ fun LoginScreen(
                             Log.e("LoginScreen", "Auto-login successful!")
                             Log.e("LoginScreen", "New email from backend: ${loginResponse.user.email}")
                             
+                            // Get old email before updating
+                            val oldEmail = prefs.getString("user_email", null)
+                            Log.e("LoginScreen", "Old email: $oldEmail")
+                            
                             // CRITICAL: Stop WebSocketMonitorService and disconnect old WebSocket FIRST
                             Log.e("LoginScreen", "Stopping WebSocketMonitorService before credential update")
                             WebSocketMonitorService.stop(context)
@@ -168,10 +172,17 @@ fun LoginScreen(
                             Log.e("LoginScreen", "Disconnecting old WebSocket connection")
                             WebSocketManager.disconnect()
                             
-                            // Wait a moment for disconnection to complete
-                            kotlinx.coroutines.delay(500)
+                            // Wait longer for service to fully stop
+                            kotlinx.coroutines.delay(1000)
                             
-                            // Save login data with NEW email
+                            // CRITICAL: Update all emails in Room database BEFORE reconnecting
+                            if (oldEmail != null && oldEmail != loginResponse.user.email) {
+                                Log.e("LoginScreen", "Updating all emails in Room database: $oldEmail -> ${loginResponse.user.email}")
+                                WebSocketManager.updateAllEmailsInDatabase(oldEmail, loginResponse.user.email)
+                                Log.e("LoginScreen", "Room database emails updated successfully")
+                            }
+                            
+                            // Save login data with NEW email BEFORE any reconnection
                             prefs.edit().apply {
                                 putString("access_token", loginResponse.accessToken)
                                 putString("user_email", loginResponse.user.email)  // NEW email from backend
@@ -183,13 +194,21 @@ fun LoginScreen(
                             
                             Log.e("LoginScreen", "Saved new email to SharedPreferences: ${loginResponse.user.email}")
                             
-                            // Connect WebSocket with NEW email and token
+                            // Verify the email was saved correctly
+                            val verifyEmail = prefs.getString("user_email", null)
+                            Log.e("LoginScreen", "Verified saved email: $verifyEmail")
+                            
+                            // CRITICAL: Release the email update lock now that both DB and SharedPreferences are updated
+                            WebSocketManager.unlockEmailUpdate()
+                            Log.e("LoginScreen", "Email update complete, lock released")
+                            
+                            // Connect WebSocket with NEW email and token (pass explicitly, don't read from prefs)
                             Log.e("LoginScreen", "Connecting WebSocket with NEW email: ${loginResponse.user.email}")
                             WebSocketManager.connect(loginResponse.accessToken, loginResponse.user.email)
                             
-                            // Start WebSocket Monitor Service with new credentials
-                            Log.e("LoginScreen", "Starting WebSocketMonitorService with new credentials")
-                            WebSocketMonitorService.start(context)
+                            // DON'T start WebSocketMonitorService here - let UpdateUsernameScreen handle it
+                            // This prevents race conditions with the old email
+                            Log.e("LoginScreen", "Skipping WebSocketMonitorService start - will be started after username update")
                             
                             // Wait for WebSocket to connect
                             kotlinx.coroutines.delay(1000)

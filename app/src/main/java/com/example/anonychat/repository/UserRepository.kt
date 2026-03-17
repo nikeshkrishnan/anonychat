@@ -107,7 +107,16 @@ object UserRepository {
             storedUserId
         } else {
             // TEMPORARY fallback - this should only happen for users who haven't interacted yet
-            val fallbackId = email.substringBefore("@")
+            // Email format: {uuid}+{userId}@email.com or {uuid} {userId}@email.com
+            // Extract userId by taking everything before @ and then after the last + or space
+            val beforeAt = email.substringBefore("@")
+            val fallbackId = if (beforeAt.contains("+")) {
+                beforeAt.substringAfterLast("+")
+            } else if (beforeAt.contains(" ")) {
+                beforeAt.substringAfterLast(" ")
+            } else {
+                beforeAt // Fallback to entire string if no delimiter found
+            }
             Log.w(TAG, "⚠️ FALLBACK: Using email extraction for $email -> $fallbackId (userId not yet stored)")
             Log.w(TAG, "⚠️ This user needs to send a WebSocket event to store their userId properly")
             fallbackId
