@@ -418,7 +418,7 @@ fun RatingsScreen(
                         Icon(
                             imageVector = Icons.Default.Star,
                             contentDescription = null,
-                            tint = Color(0xFFFFD700),
+                            tint = Color.Red,
                             modifier = Modifier.size(48.dp)
                         )
                     }
@@ -808,7 +808,7 @@ fun RatingsScreen(
                                 Icon(
                                     imageVector = Icons.Default.Star,
                                     contentDescription = "Star ${index + 1}",
-                                    tint = if (reviewRating >= index + 1) Color(0xFFFFD700) else Color.Gray,
+                                    tint = if (reviewRating >= index + 1) Color.Red else Color.Gray,
                                     modifier = Modifier
                                         .size(40.dp)
                                         .clickable { reviewRating = index + 1 }
@@ -1160,7 +1160,7 @@ private fun RatingCard(
                         Icon(
                             imageVector = Icons.Default.Star,
                             contentDescription = null,
-                            tint = if (rating.rating >= index + 1) starColor else starColor.copy(alpha = 0.3f),
+                            tint = if (rating.rating >= index + 1) Color.Red else Color.Red.copy(alpha = 0.3f),
                             modifier = Modifier.size(18.dp)
                         )
                     }

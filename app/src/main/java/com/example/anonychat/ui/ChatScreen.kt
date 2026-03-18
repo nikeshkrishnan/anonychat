@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -107,7 +108,9 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.example.anonychat.model.Preferences
 import com.example.anonychat.model.User
+import com.example.anonychat.network.AgeRange
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.RomanceRange
 import com.example.anonychat.network.WebSocketEvent
 import com.example.anonychat.network.WebSocketManager
 import kotlinx.coroutines.launch
@@ -382,7 +385,34 @@ fun ChatScreen(
         val selectedChats = remember { mutableStateListOf<String>() }
         val context = LocalContext.current
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+        
+        // State to track if we're waiting for first preference update
+        var isWaitingForFirstPreferenceUpdate by remember { mutableStateOf(false) }
+        
+        // State to track if this is first time opening ChatScreen (WebSocket not yet healthy)
+        val prefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
+        var isFirstTimeSetup by remember {
+            mutableStateOf(prefs.getBoolean("first_time_chat_screen", true))
+        }
 
+        // Monitor WebSocket health on first launch
+        LaunchedEffect(Unit) {
+            if (isFirstTimeSetup) {
+                Log.e("ChatScreen", "🟡 First time setup detected - waiting for WebSocket to be ready")
+                // Poll WebSocket ready status (connected AND received ready_ack)
+                while (isFirstTimeSetup) {
+                    if (WebSocketManager.isReady()) {
+                        Log.e("ChatScreen", "✅ WebSocket is now ready (connected + ready_ack received) - hiding overlay")
+                        isFirstTimeSetup = false
+                        // Save flag so we don't show overlay again
+                        prefs.edit().putBoolean("first_time_chat_screen", false).apply()
+                        break
+                    }
+                    kotlinx.coroutines.delay(500) // Check every 500ms
+                }
+            }
+        }
+        
         // Initialize ConversationRepository with context and load persisted data
         LaunchedEffect(Unit) {
                 ConversationRepository.initialize(context)
@@ -394,6 +424,130 @@ fun ChatScreen(
                 } catch (e: Exception) {
                     Log.e("ChatScreen", "Failed to start ChatSocketService", e)
                 }
+                
+                // Send default preferences if flag is set (from first login or account reset)
+                val prefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+                val token = prefs.getString("access_token", null)
+                val needsDefaultPreferences = prefs.getBoolean("needs_default_preferences", false)
+                
+                // Show loading overlay if this is the first preference update
+                if (needsDefaultPreferences) {
+                    isWaitingForFirstPreferenceUpdate = true
+                }
+                
+                Log.e("ChatScreen", "=== PREFERENCE UPDATE CHECK ===")
+                Log.e("ChatScreen", "Token exists: ${token != null}")
+                Log.e("ChatScreen", "needs_default_preferences flag: $needsDefaultPreferences")
+                
+                if (needsDefaultPreferences && token != null) {
+                    Log.e("ChatScreen", "🔵 FLAG DETECTED - Sending default preferences via HTTP API (not waiting for WebSocket)")
+                    
+                    // Use HTTP API to send preferences immediately (don't wait for WebSocket)
+                    try {
+                        val userEmail = prefs.getString("user_email", "") ?: ""
+                        if (userEmail.isNotEmpty()) {
+                            val preferencesRequest = com.example.anonychat.network.PreferencesRequest(
+                                userId = userEmail,
+                                age = 18,
+                                gender = "male",
+                                preferredGender = "any",
+                                preferredAgeRange = AgeRange(min = 18, max = 100),
+                                romanceRange = RomanceRange(min = 1, max = 5),
+                                random = true
+                            )
+                            
+                            val response = com.example.anonychat.network.NetworkClient.api.setPreferences(preferencesRequest)
+                            if (response.isSuccessful) {
+                                Log.e("ChatScreen", "✅ Default preferences sent successfully via HTTP API")
+                            } else {
+                                Log.e("ChatScreen", "❌ Failed to send preferences via HTTP: ${response.code()}")
+                            }
+                        } else {
+                            Log.e("ChatScreen", "❌ Cannot send preferences - user email is empty")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("ChatScreen", "❌ Exception sending preferences via HTTP", e)
+                    }
+                    
+                    // Save default preferences locally and clear the flag
+                    prefs.edit().apply {
+                        putString("gender", "male")
+                        putInt("age", 18)
+                        putString("preferred_gender", "any")
+                        putFloat("preferred_age_min", 18f)
+                        putFloat("preferred_age_max", 100f)
+                        putFloat("romance_min", 1f)
+                        putFloat("romance_max", 5f)
+                        putBoolean("random_match", true)
+                        remove("needs_default_preferences")
+                        apply()
+                    }
+                    Log.e("ChatScreen", "✅ Default preferences saved locally, flag cleared")
+                } else {
+                    Log.e("ChatScreen", "⚪ No flag set - skipping immediate default preference send")
+                }
+                
+                // Safety mechanism: Always send update preferences after all checks are settled
+                // This ensures preferences are synchronized with server regardless of flags
+                if (token != null) {
+                    Log.e("ChatScreen", "🟢 SAFETY MECHANISM - Reading current preferences")
+                    // Get current preferences from SharedPreferences
+                    val gender = prefs.getString("gender", "male") ?: "male"
+                    val age = prefs.getInt("age", 18)
+                    val preferredGender = prefs.getString("preferred_gender", "any") ?: "any"
+                    val preferredAgeMin = prefs.getFloat("preferred_age_min", 18f)
+                    val preferredAgeMax = prefs.getFloat("preferred_age_max", 100f)
+                    val romanceMin = prefs.getFloat("romance_min", 1f)
+                    val romanceMax = prefs.getFloat("romance_max", 5f)
+                    val randomMatch = prefs.getBoolean("random_match", true)
+                    
+                    Log.e("ChatScreen", "🟢 Current preferences from SharedPreferences:")
+                    Log.e("ChatScreen", "  - gender: $gender")
+                    Log.e("ChatScreen", "  - age: $age")
+                    Log.e("ChatScreen", "  - preferredGender: $preferredGender")
+                    Log.e("ChatScreen", "  - preferredAgeRange: ${preferredAgeMin.toInt()}-${preferredAgeMax.toInt()}")
+                    Log.e("ChatScreen", "  - romanceRange: ${romanceMin.toInt()}-${romanceMax.toInt()}")
+                    Log.e("ChatScreen", "  - randomMatch: $randomMatch")
+                    
+                    // Use HTTP API to send preferences (don't wait for WebSocket)
+                    Log.e("ChatScreen", "🟢 SAFETY MECHANISM - Sending current preferences via HTTP API")
+                    
+                    try {
+                        val userEmail = prefs.getString("user_email", "") ?: ""
+                        if (userEmail.isNotEmpty()) {
+                            val preferencesRequest = com.example.anonychat.network.PreferencesRequest(
+                                userId = userEmail,
+                                age = age,
+                                gender = gender,
+                                preferredGender = preferredGender,
+                                preferredAgeRange = AgeRange(min = preferredAgeMin.toInt(), max = preferredAgeMax.toInt()),
+                                romanceRange = RomanceRange(min = romanceMin.toInt(), max = romanceMax.toInt()),
+                                random = randomMatch
+                            )
+                            
+                            val response = com.example.anonychat.network.NetworkClient.api.setPreferences(preferencesRequest)
+                            if (response.isSuccessful) {
+                                Log.e("ChatScreen", "✅ SAFETY MECHANISM - Preferences sent successfully via HTTP API")
+                                // Hide loading overlay after first preference update is complete
+                                isWaitingForFirstPreferenceUpdate = false
+                            } else {
+                                Log.e("ChatScreen", "❌ SAFETY MECHANISM - Failed to send preferences via HTTP: ${response.code()}")
+                                // Hide loading overlay even on failure to prevent infinite loading
+                                isWaitingForFirstPreferenceUpdate = false
+                            }
+                        } else {
+                            Log.e("ChatScreen", "❌ SAFETY MECHANISM - Cannot send preferences - user email is empty")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("ChatScreen", "❌ SAFETY MECHANISM - Exception sending preferences via HTTP", e)
+                        // Hide loading overlay even on exception to prevent infinite loading
+                        isWaitingForFirstPreferenceUpdate = false
+                    }
+                } else {
+                    Log.e("ChatScreen", "❌ SAFETY MECHANISM - No token available, cannot send preferences")
+                }
+                
+                Log.e("ChatScreen", "=== PREFERENCE UPDATE CHECK COMPLETE ===")
         }
 
         // Use the singleton repository so the list persists across navigation
@@ -1416,9 +1570,11 @@ fun ChatScreen(
                                                             fontWeight = if (ratingFilter == "Highest") FontWeight.Bold else FontWeight.Normal
                                                         )
                                                         Spacer(modifier = Modifier.width(4.dp))
-                                                        Text(
-                                                            text = "⭐",
-                                                            fontSize = 12.sp
+                                                        Icon(
+                                                            imageVector = Icons.Default.Star,
+                                                            contentDescription = "Highest rating",
+                                                            tint = Color.Red,
+                                                            modifier = Modifier.size(14.dp)
                                                         )
                                                     }
                                                 }
@@ -1451,9 +1607,11 @@ fun ChatScreen(
                                                             fontWeight = if (ratingFilter == "Lowest") FontWeight.Bold else FontWeight.Normal
                                                         )
                                                         Spacer(modifier = Modifier.width(4.dp))
-                                                        Text(
-                                                            text = "⭐",
-                                                            fontSize = 12.sp
+                                                        Icon(
+                                                            imageVector = Icons.Default.Star,
+                                                            contentDescription = "Lowest rating",
+                                                            tint = Color.Red,
+                                                            modifier = Modifier.size(14.dp)
                                                         )
                                                     }
                                                 }
@@ -1630,8 +1788,15 @@ fun ChatScreen(
                 selectedChats.clear()
         }
         
-        BackHandler(enabled = isLoading) {
+        // Handle back button during match search (can be cancelled)
+        BackHandler(enabled = isLoading && !isFirstTimeSetup) {
                 isLoading = false // stop the heart overlay
+        }
+        
+        // During first time setup, back button does nothing (overlay continues)
+        BackHandler(enabled = isFirstTimeSetup) {
+                // Do nothing - prevent back navigation during first time setup
+                Log.d("ChatScreen", "Back button pressed during first time setup - ignoring")
         }
         // --- BIRD GIF (Bottom Right Corner) ---
         val birdImageLoader =
@@ -1784,7 +1949,8 @@ fun ChatScreen(
                                         }
                 )
         }
-        LoadingHeartOverlay(isLoading = isLoading)
+        // Show loading overlay during match search OR first preference update OR first time WebSocket setup
+        LoadingHeartOverlay(isLoading = isLoading || isWaitingForFirstPreferenceUpdate || isFirstTimeSetup)
 }
 
 @Composable
@@ -1955,9 +2121,11 @@ fun ConversationListItem(
                         fontSize = 10.sp,
                         fontWeight = FontWeight.ExtraBold
                     )
-                    Text(
-                        text = "⭐",
-                        fontSize = 9.sp
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Rating",
+                        tint = Color.Red,
+                        modifier = Modifier.size(12.5.dp)
                     )
                 }
             }

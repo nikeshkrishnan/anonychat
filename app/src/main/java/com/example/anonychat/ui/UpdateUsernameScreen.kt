@@ -22,7 +22,9 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.anonychat.R
 import com.example.anonychat.model.User
+import com.example.anonychat.network.AgeRange
 import com.example.anonychat.network.NetworkClient
+import com.example.anonychat.network.RomanceRange
 import com.example.anonychat.network.UpdateUsernameRequest
 import com.example.anonychat.network.WebSocketManager
 import kotlinx.coroutines.launch
@@ -275,6 +277,10 @@ fun UpdateUsernameScreen(
                                                 
                                                 if (WebSocketManager.isConnected()) {
                                                     Log.e("UpdateUsernameScreen", "Second reconnection successful!")
+                                                    
+                                                    // Set flag to send default preferences in ChatScreen after account reset
+                                                    Log.e("UpdateUsernameScreen", "Setting flag to send default preferences in ChatScreen")
+                                                    prefs.edit().putBoolean("needs_default_preferences", true).apply()
                                                     
                                                     // Start WebSocketMonitorService with new credentials
                                                     Log.e("UpdateUsernameScreen", "Starting WebSocketMonitorService with new credentials")

@@ -609,6 +609,13 @@ object WebSocketManager {
     }
     
     /**
+     * Check if WebSocket is ready to send messages (connected AND received ready_ack)
+     */
+    fun isReady(): Boolean {
+        return wsState == WsState.CONNECTED && webSocket != null && readyState == ReadyState.READY
+    }
+    
+    /**
      * Send a ping and return true if pong is received within timeout.
      * Used by WebSocketMonitorService for health checks.
      * Returns true if server responds, false if timeout or error.

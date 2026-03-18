@@ -709,6 +709,7 @@ fun LoginScreen(
                                                                                 putFloat("preferred_age_max", 100f)
                                                                                 putFloat("romance_min", 1f)
                                                                                 putFloat("romance_max", 5f)
+                                                                                putBoolean("needs_default_preferences", true)
                                                                                 apply()
                                                                             }
                                                                             

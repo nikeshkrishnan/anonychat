@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -41,6 +42,7 @@ import coil.compose.SubcomposeAsyncImageContent
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
+import com.example.anonychat.AppVisibility
 import com.example.anonychat.R
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
@@ -51,7 +53,7 @@ fun LoadingHeartOverlay(isLoading: Boolean) {
     if (isLoading) {
         val context = LocalContext.current
 
-        // Haptic Feedback (Vibration)
+        // Haptic Feedback (Vibration) - pauses when app goes to background
         DisposableEffect(Unit) {
             val vibrator = if (Build.VERSION.SDK_INT >= 31) {
                 val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -63,7 +65,8 @@ fun LoadingHeartOverlay(isLoading: Boolean) {
 
             val job = GlobalScope.launch {
                 while (true) {
-                    if (vibrator.hasVibrator()) {
+                    // Only vibrate if app is in foreground
+                    if (vibrator.hasVibrator() && AppVisibility.isForeground) {
                         if (Build.VERSION.SDK_INT >= 26) {
                             vibrator.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE))
                         } else {
@@ -78,8 +81,11 @@ fun LoadingHeartOverlay(isLoading: Boolean) {
                             vibrator.vibrate(40)
                         }
                         delay(1000)
-                    } else {
+                    } else if (!vibrator.hasVibrator()) {
                         break
+                    } else {
+                        // App is in background, just wait and check again
+                        delay(500)
                     }
                 }
             }

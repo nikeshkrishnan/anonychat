@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -91,7 +92,7 @@ fun ProfileScreen(
 
     var roses by remember { mutableStateOf(userPrefs.getInt("roses", 0)) }
     var sparks by remember { mutableStateOf(userPrefs.getInt("sparks_self", 0)) }
-    var giftsLeft by remember { mutableStateOf(userPrefs.getInt("available_roses", 0)) }
+    var giftsLeft by remember { mutableStateOf(userPrefs.getInt("available_roses", 3)) }
     var rating by remember { mutableStateOf(userPrefs.getFloat("user_rating", 0f)) }
     var ratingCount by remember { mutableStateOf(userPrefs.getInt("user_rating_count", 0)) }
     var isRandomMatch by remember { mutableStateOf(userPrefs.getBoolean("random_match", true)) }
@@ -99,9 +100,9 @@ fun ProfileScreen(
         mutableStateOf(userPrefs.getString("username", initialUsername) ?: initialUsername)
     }
     var gender by remember { mutableStateOf(userPrefs.getString("gender", "male") ?: "male") }
-    var age by remember { mutableStateOf(userPrefs.getInt("age", 30)) }
+    var age by remember { mutableStateOf(userPrefs.getInt("age", 18)) }
     var preferredGender by remember {
-        mutableStateOf(userPrefs.getString("preferred_gender", "female") ?: "female")
+        mutableStateOf(userPrefs.getString("preferred_gender", "both") ?: "both")
     }
     var preferredAgeRange by remember {
         mutableStateOf(
@@ -1032,13 +1033,28 @@ private fun RatingRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            // ⭐ Stars
+            // ⭐ Stars with 3D effect
             repeat(5) { index ->
+                val isFilled = rating >= index + 1
+                val unfilledColor = if (isDarkTheme) {
+                    Color(0xFFB0BEC5).copy(alpha = 0.5f)  // Light blue-grey for dark theme
+                } else {
+                    Color(0xFF1A237E).copy(alpha = 0.4f)  // Dark night sky blue for light theme
+                }
                 Icon(
                     imageVector = Icons.Default.Star,
                     contentDescription = null,
-                    tint = if (rating >= index + 1) starColor else starColor.copy(alpha = 0.3f),
-                    modifier = Modifier.size(18.dp)
+                    tint = if (isFilled) Color.Red else unfilledColor,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer(
+                            rotationX = 12f,
+                            rotationY = -10f,
+                            rotationZ = if (isFilled) -3f else 0f,
+                            scaleX = if (isFilled) 1.1f else 1f,
+                            scaleY = if (isFilled) 1.1f else 1f,
+                            translationY = if (isFilled) -1f else 0f
+                        )
                 )
             }
 
