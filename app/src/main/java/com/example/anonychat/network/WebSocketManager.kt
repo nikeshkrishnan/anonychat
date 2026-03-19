@@ -70,6 +70,8 @@ interface PendingMessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(msg: PendingMessageEntity)
 
     @Query("DELETE FROM pending_messages WHERE messageId = :id") suspend fun delete(id: String)
+    
+    @Query("DELETE FROM pending_messages") suspend fun deleteAll()
 }
 
 @Entity(tableName = "chat_history")
@@ -133,6 +135,8 @@ interface ChatHistoryDao {
     
     @Query("UPDATE chat_history SET toEmail = :newEmail WHERE toEmail = :oldEmail")
     suspend fun updateToEmail(oldEmail: String, newEmail: String)
+    
+    @Query("DELETE FROM chat_history") suspend fun deleteAll()
 }
 
 class Converters {
@@ -3995,6 +3999,21 @@ object WebSocketManager {
             } catch (e: Exception) {
                 Log.e("WebSocketManager", "Failed to delete chat history", e)
             }
+        }
+    }
+    
+    /**
+     * Clear all data from the Room database (chat history and pending messages)
+     * Used during logout to ensure clean state
+     */
+    suspend fun clearAllDatabaseData() {
+        try {
+            ensureInit()
+            historyDao.deleteAll()
+            dao.deleteAll()
+            Log.d("WebSocketManager", "Cleared all database data (chat history and pending messages)")
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Failed to clear database data", e)
         }
     }
 

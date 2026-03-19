@@ -101,6 +101,7 @@ import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
 import com.example.anonychat.R
 import com.example.anonychat.service.ChatSocketService
+import com.example.anonychat.service.WebSocketMonitorService
 import com.example.anonychat.utils.ActiveChatTracker
 import com.example.anonychat.utils.DeactivatedUsersManager
 import com.example.anonychat.repository.UserRepository
@@ -580,6 +581,7 @@ fun ChatScreen(
         }
         var showThemeDialog by remember { mutableStateOf(false) }
         var showResetDialog by remember { mutableStateOf(false) }
+        var showLogoutDialog by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
 
         if (showThemeDialog) {
@@ -620,6 +622,12 @@ fun ChatScreen(
                                                         showResetDialog = true
                                                 }
                                         ) { Text("🔄 Reset Account", color = Color(0xFFE53935)) }
+                                        TextButton(
+                                                onClick = {
+                                                        showThemeDialog = false
+                                                        showLogoutDialog = true
+                                                }
+                                        ) { Text("🚪 Logout", color = Color(0xFFFF6F00)) }
                                 }
                         },
                         confirmButton = {}
@@ -735,6 +743,83 @@ fun ChatScreen(
                                         }
                                 },
                                 isDarkTheme = isDarkTheme
+                        )
+                }
+                
+                // Logout Dialog
+                if (showLogoutDialog) {
+                        AlertDialog(
+                                onDismissRequest = { showLogoutDialog = false },
+                                title = { Text("Logout") },
+                                text = { Text("Are you sure you want to logout?") },
+                                confirmButton = {
+                                        TextButton(
+                                                onClick = {
+                                                        showLogoutDialog = false
+                                                        isLoading = true
+                                                        scope.launch {
+                                                                try {
+                                                                        Log.d("ChatScreen", "Logout: Calling logout API")
+                                                                        val response = NetworkClient.api.logout()
+                                                                        
+                                                                        if (response.isSuccessful) {
+                                                                                Log.d("ChatScreen", "Logout: API call successful")
+                                                                                Toast.makeText(
+                                                                                        context,
+                                                                                        "Logged out successfully",
+                                                                                        Toast.LENGTH_SHORT
+                                                                                ).show()
+                                                                        } else {
+                                                                                Log.w("ChatScreen", "Logout: API call failed with code ${response.code()}")
+                                                                        }
+                                                                } catch (e: Exception) {
+                                                                        Log.e("ChatScreen", "Logout: API call error", e)
+                                                                }
+                                                                
+                                                                // Disconnect WebSocket and prevent reconnection
+                                                                Log.d("ChatScreen", "Logout: Disconnecting WebSocket")
+                                                                WebSocketManager.disconnect()
+                                                                
+                                                                // Stop WebSocketMonitorService
+                                                                Log.d("ChatScreen", "Logout: Stopping WebSocketMonitorService")
+                                                                WebSocketMonitorService.stop(context)
+                                                                
+                                                                // Clear some in-memory data
+                                                                Log.d("ChatScreen", "Logout: Clearing session data")
+                                                                DeactivatedUsersManager.clearAll()
+                                                                UserRepository.clearAll()
+                                                                
+                                                                // NOTE: We do NOT clear:
+                                                                // - ConversationRepository.conversations (in-memory list)
+                                                                // - "conversation_repository" SharedPreferences (persisted conversation list)
+                                                                // - Room database (chat history)
+                                                                // These should all persist across logout/login
+                                                                Log.d("ChatScreen", "Logout: Conversation list and chat history will persist for next login")
+                                                                
+                                                                // Clear session-related SharedPreferences only
+                                                                context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                context.getSharedPreferences("anonychat_theme", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                context.getSharedPreferences("auth_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                context.getSharedPreferences("deactivated_users", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                context.getSharedPreferences("unread_messages", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                // NOTE: NOT clearing "conversation_repository" - it should persist
+                                                                // NOTE: NOT clearing "conversations" either
+                                                                context.getSharedPreferences("user_ids", Context.MODE_PRIVATE).edit().clear().commit()
+                                                                
+                                                                Log.d("ChatScreen", "Logout: Navigating to login screen")
+                                                                isLoading = false
+                                                                onNavigateToLogin()
+                                                        }
+                                                }
+                                        ) {
+                                                Text("Logout", color = Color(0xFFFF6F00))
+                                        }
+                                },
+                                dismissButton = {
+                                        TextButton(onClick = { showLogoutDialog = false }) {
+                                                Text("Cancel")
+                                        }
+                                }
                         )
                 }
 

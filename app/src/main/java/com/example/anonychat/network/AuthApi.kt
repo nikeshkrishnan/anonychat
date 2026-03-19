@@ -397,6 +397,9 @@ interface AuthApiService {
         @Headers("Content-Type: application/json")
         @PUT("/auth/update-username")
         suspend fun updateUsername(@Body request: UpdateUsernameRequest): Response<UpdateUsernameResponse>
+        
+        @POST("/auth/logout")
+        suspend fun logout(): Response<Void>
        }
 
 // --- NETWORK CLIENT (SINGLETON) ---
