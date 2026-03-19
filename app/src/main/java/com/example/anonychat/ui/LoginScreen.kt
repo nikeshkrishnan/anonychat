@@ -93,9 +93,10 @@ import com.example.anonychat.network.WebSocketManager
 import com.example.anonychat.network.WebSocketEvent
 import com.example.anonychat.network.UserRegistrationRequest
 import com.example.anonychat.network.UserResetPasswordRequest
+import com.example.anonychat.network.UpdateUsernameRequest
 import com.example.anonychat.service.ChatSocketService
-import com.example.anonychat.ui.theme.AnonychatTheme
 import com.example.anonychat.utils.PlayIntegrityManager
+import com.example.anonychat.ui.theme.AnonychatTheme
 import com.google.android.gms.appset.AppSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -298,6 +299,7 @@ fun LoginScreen(
     var currentUsername by remember { mutableStateOf("") }
     var newPassword by remember { mutableStateOf("") }
     var confirmNewPassword by remember { mutableStateOf("") }
+    var newUsername by remember { mutableStateOf("") }
 
     // Loading State (Heartbeat)
     var isLoading by remember { mutableStateOf(false) }
@@ -313,6 +315,7 @@ fun LoginScreen(
             newPassword = ""
             confirmNewPassword = ""
             currentUsername = ""
+            newUsername = ""
         }
     }
 
@@ -549,18 +552,28 @@ fun LoginScreen(
                                 }
                             }
 
-                            // Reset Password Option
+                            // Reset Options
                             Box(modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                        text = "Reset Password",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = Color(0xFF4285F4),
-                                        fontWeight = FontWeight.Bold,
-                                        modifier =
-                                                Modifier.align(Alignment.CenterEnd)
-                                                        .padding(top = 8.dp, bottom = 8.dp)
-                                                        .clickable { authMode = "ResetPassword" }
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                            text = "Reset Username",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color(0xFF4285F4),
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.clickable { authMode = "ResetUsername" }
+                                    )
+                                    Text(
+                                            text = "Reset Password",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color(0xFF4285F4),
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.clickable { authMode = "ResetPassword" }
+                                    )
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(24.dp))
@@ -1027,25 +1040,45 @@ fun LoginScreen(
 
                             Button(
                                     onClick = {
-                                        isLoading = true
-                                        val client = AppSet.getClient(context)
-                                        client.appSetIdInfo
-                                                .addOnSuccessListener { appSetIdInfo ->
-                                                    val appSetId = appSetIdInfo.id
-                                                    val userId = "$androidId:$appSetId"
-                                                    val request =
-                                                            UserResetPasswordRequest(
-                                                                    userId = userId,
-                                                                    username = currentUsername,
-                                                                    newPassword = newPassword
-                                                            )
-
-                                                    coroutine.launch {
-                                                        try {
-                                                            val response =
-                                                                    NetworkClient.api.resetPassword(
-                                                                            request
-                                                                    )
+                                            isLoading = true
+                                            val client = AppSet.getClient(context)
+                                            client.appSetIdInfo
+                                                    .addOnSuccessListener { appSetIdInfo ->
+                                                        val appSetId = appSetIdInfo.id
+                                                        val userId = "$androidId:$appSetId"
+    
+                                                        coroutine.launch {
+                                                            try {
+                                                                // Fetch Google Play Integrity token
+                                                                Log.e("LoginScreen", "🔐 [RESET PASSWORD] Starting integrity token fetch...")
+                                                                val integrityManager = PlayIntegrityManager(context)
+                                                                val integrityToken = integrityManager.requestIntegrityToken("reset_password")
+                                                                
+                                                                if (integrityToken == null) {
+                                                                    Log.e("LoginScreen", "❌ [RESET PASSWORD] Failed to obtain integrity token, proceeding without it")
+                                                                } else {
+                                                                    Log.e("LoginScreen", "✅ [RESET PASSWORD] Successfully obtained integrity token (length: ${integrityToken.length})")
+                                                                }
+                                                                
+                                                                Log.e("LoginScreen", "📦 [RESET PASSWORD] Creating request with:")
+                                                                Log.e("LoginScreen", "   - userId: $userId")
+                                                                Log.e("LoginScreen", "   - username: $currentUsername")
+                                                                Log.e("LoginScreen", "   - integrityToken: ${if (integrityToken != null) "present (${integrityToken.length} chars)" else "null"}")
+                                                                
+                                                                val request =
+                                                                        UserResetPasswordRequest(
+                                                                                userId = userId,
+                                                                                username = currentUsername,
+                                                                                newPassword = newPassword,
+                                                                                integrityToken = integrityToken
+                                                                        )
+    
+                                                                Log.e("LoginScreen", "🌐 [RESET PASSWORD] Sending API request...")
+                                                                val response =
+                                                                        NetworkClient.api.resetPassword(
+                                                                                request
+                                                                        )
+                                                                Log.e("LoginScreen", "📥 [RESET PASSWORD] Response received: ${response.code()}")
                                                             isLoading = false
                                                             if (response.isSuccessful) {
                                                                 authMode =
@@ -1093,6 +1126,93 @@ fun LoginScreen(
                                                     containerColor = Color(0xFF4285F4)
                                             )
                             ) { Text(text = "Reset Password", color = Color.White) }
+                        }
+                        "ResetUsername" -> {
+                            Text(
+                                    text = "Reset Username",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = Color.Black,
+                                    fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            OutlinedTextField(
+                                    value = newUsername,
+                                    onValueChange = { newUsername = it },
+                                    label = { Text("New Username") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    colors = textFieldColors
+                            )
+
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            Button(
+                                    onClick = {
+                                            isLoading = true
+                                            val client = AppSet.getClient(context)
+                                            client.appSetIdInfo
+                                                    .addOnSuccessListener { appSetIdInfo ->
+                                                        val appSetId = appSetIdInfo.id
+                                                        val userId = "$androidId:$appSetId"
+    
+                                                        coroutine.launch {
+                                                            try {
+                                                                // Fetch Google Play Integrity token
+                                                                Log.e("LoginScreen", "🔐 [RESET USERNAME] Starting integrity token fetch...")
+                                                                val integrityManager = PlayIntegrityManager(context)
+                                                                val integrityToken = integrityManager.requestIntegrityToken("update_username")
+                                                                
+                                                                if (integrityToken == null) {
+                                                                    Log.e("LoginScreen", "❌ [RESET USERNAME] Failed to obtain integrity token, proceeding without it")
+                                                                } else {
+                                                                    Log.e("LoginScreen", "✅ [RESET USERNAME] Successfully obtained integrity token")
+                                                                }
+                                                                
+                                                                val request = UpdateUsernameRequest(
+                                                                        userId = userId,
+                                                                        username = newUsername.trim(),
+                                                                        integrityToken = integrityToken
+                                                                )
+    
+                                                                Log.e("LoginScreen", "🌐 [RESET USERNAME] Sending API request...")
+                                                                val response = NetworkClient.api.updateUsername(request)
+                                                                
+                                                            isLoading = false
+                                                            if (response.isSuccessful) {
+                                                                authMode = "Login" 
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Username reset successful.",
+                                                                                Toast.LENGTH_SHORT
+                                                                        ).show()
+                                                            } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Reset failed: ${response.errorBody()?.string()}",
+                                                                                Toast.LENGTH_SHORT
+                                                                        ).show()
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            isLoading = false
+                                                            Toast.makeText(
+                                                                            context,
+                                                                            "Error: ${e.localizedMessage}",
+                                                                            Toast.LENGTH_SHORT
+                                                                    ).show()
+                                                        }
+                                                    }
+                                                }
+                                                .addOnFailureListener {
+                                                    isLoading = false
+                                                    Toast.makeText(context, "Failed to get ID", Toast.LENGTH_SHORT).show()
+                                                }
+                                    },
+                                    enabled = newUsername.isNotBlank() && !isLoading,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4))
+                            ) { Text(text = "Reset Username", color = Color.White) }
                         }
                     }
                 }

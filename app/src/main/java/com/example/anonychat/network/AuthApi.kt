@@ -82,11 +82,20 @@ class AuthInterceptor(private val context: Context) : Interceptor {
                 val requestBuilder = originalRequest.newBuilder()
 
                 token?.let {
-                        // Skip adding token for login and register endpoints
+                        // Skip adding token for login, register, and reset-password endpoints
                         val url = originalRequest.url.toString()
-                        if (!url.contains("auth/login") && !url.contains("auth/register")) {
+                        Log.d("AuthInterceptor", "Checking URL: $url")
+                        Log.d("AuthInterceptor", "Contains auth/login: ${url.contains("auth/login")}")
+                        Log.d("AuthInterceptor", "Contains auth/register: ${url.contains("auth/register")}")
+                        Log.d("AuthInterceptor", "Contains auth/reset-password: ${url.contains("auth/reset-password")}")
+                        
+                        if (!url.contains("auth/login") &&
+                            !url.contains("auth/register") &&
+                            !url.contains("auth/reset-password")) {
                                 requestBuilder.addHeader("Authorization", "Bearer $it")
-                                Log.d("AuthInterceptor", "Token added to header for URL: $url")
+                                Log.d("AuthInterceptor", "✅ Token added to header for URL: $url")
+                        } else {
+                                Log.d("AuthInterceptor", "⏭️ Skipping token for URL: $url")
                         }
                 }
 
@@ -194,7 +203,8 @@ data class RomanceRange(val min: Int, val max: Int)
 data class UserResetPasswordRequest(
         @SerializedName("userId") val userId: String,
         val username: String,
-        val newPassword: String
+        val newPassword: String,
+        val integrityToken: String? = null
 )
 
 data class MatchResponse(
@@ -292,7 +302,9 @@ data class ResetAccountResponse(
 )
 
 data class UpdateUsernameRequest(
-	val username: String
+	val userId: String,
+	val username: String,
+	val integrityToken: String? = null
 )
 
 data class UpdateUsernameResponse(

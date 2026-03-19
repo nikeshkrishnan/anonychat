@@ -27,6 +27,7 @@ import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.RomanceRange
 import com.example.anonychat.network.UpdateUsernameRequest
 import com.example.anonychat.network.WebSocketManager
+import com.example.anonychat.utils.PlayIntegrityManager
 import kotlinx.coroutines.launch
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -170,11 +171,32 @@ fun UpdateUsernameScreen(
                             isLoading = true
                             errorMessage = null
                             
-                            scope.launch {
-                                try {
-                                    val response = NetworkClient.api.updateUsername(
-                                        UpdateUsernameRequest(username = username.trim())
-                                    )
+                            val client = com.google.android.gms.appset.AppSet.getClient(context)
+                            client.appSetIdInfo.addOnSuccessListener { appSetIdInfo ->
+                                val appSetId = appSetIdInfo.id
+                                val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+                                val fetchedUserId = "$androidId:$appSetId"
+                                
+                                scope.launch {
+                                    try {
+                                        // Fetch Google Play Integrity token
+                                        Log.d("UpdateUsernameScreen", "Fetching Play Integrity token...")
+                                        val integrityManager = PlayIntegrityManager(context)
+                                        val integrityToken = integrityManager.requestIntegrityToken("update_username")
+                                        
+                                        if (integrityToken == null) {
+                                            Log.w("UpdateUsernameScreen", "Failed to obtain integrity token, proceeding without it")
+                                        } else {
+                                            Log.d("UpdateUsernameScreen", "Successfully obtained integrity token")
+                                        }
+                                        
+                                        val response = NetworkClient.api.updateUsername(
+                                            UpdateUsernameRequest(
+                                                userId = fetchedUserId,
+                                                username = username.trim(),
+                                                integrityToken = integrityToken
+                                            )
+                                        )
                                     
                                     if (response.isSuccessful && response.body() != null) {
                                         val updateResponse = response.body()!!
@@ -316,6 +338,10 @@ fun UpdateUsernameScreen(
                                     isLoading = false
                                 }
                             }
+                        }.addOnFailureListener {
+                            isLoading = false
+                            errorMessage = "Failed to retrieve device ID"
+                        }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
