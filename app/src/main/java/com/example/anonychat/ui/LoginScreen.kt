@@ -95,6 +95,7 @@ import com.example.anonychat.network.UserRegistrationRequest
 import com.example.anonychat.network.UserResetPasswordRequest
 import com.example.anonychat.service.ChatSocketService
 import com.example.anonychat.ui.theme.AnonychatTheme
+import com.example.anonychat.utils.PlayIntegrityManager
 import com.google.android.gms.appset.AppSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -883,19 +884,25 @@ fun LoginScreen(
                                         client.appSetIdInfo
                                                 .addOnSuccessListener { appSetIdInfo ->
                                                     val appSetId = appSetIdInfo.id
-                                                    val request =
-                                                            UserRegistrationRequest(
-                                                                    username = username,
-                                                                    password = password,
-                                                                    userId = "$androidId:$appSetId",
-                                                                    email =
-                                                                            "$androidId:$appSetId" +
-                                                                                    "@email.com",
-                                                                    googleId = ""
-                                                            )
-
+                                                    
                                                     coroutine.launch {
                                                         try {
+                                                            // Request integrity token
+                                                            val integrityManager = PlayIntegrityManager(context)
+                                                            val integrityToken = integrityManager.requestIntegrityToken("register")
+                                                            
+                                                            val request =
+                                                                    UserRegistrationRequest(
+                                                                            username = username,
+                                                                            password = password,
+                                                                            userId = "$androidId:$appSetId",
+                                                                            email =
+                                                                                    "$androidId:$appSetId" +
+                                                                                            "@email.com",
+                                                                            googleId = "",
+                                                                            integrityToken = integrityToken
+                                                                    )
+
                                                             val response =
                                                                     NetworkClient.api.registerUser(
                                                                             request

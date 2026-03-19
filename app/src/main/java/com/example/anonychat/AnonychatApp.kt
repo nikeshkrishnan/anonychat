@@ -1,6 +1,10 @@
 package com.example.anonychat
 
 import android.app.Application
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleObserver
+import androidx.lifecycle.OnLifecycleEvent
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.anonychat.network.NetworkClient
 import com.example.anonychat.network.WebSocketManager
 import com.example.anonychat.repository.UserRepository
@@ -11,7 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-class AnonychatApp : Application() {
+class AnonychatApp : Application(), LifecycleObserver {
 
     override fun onCreate() {
         super.onCreate()
@@ -34,5 +38,18 @@ class AnonychatApp : Application() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             CoroutineScope(Dispatchers.IO).launch { WebSocketManager.init(applicationContext) }
         }
+
+        // Register lifecycle observer to track app foreground/background state
+        ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+    }
+
+    @OnLifecycleEvent(Lifecycle.Event.ON_START)
+    fun onAppForegrounded() {
+        AppVisibility.onAppStarted()
+    }
+
+    @OnLifecycleEvent(Lifecycle.Event.ON_STOP)
+    fun onAppBackgrounded() {
+        AppVisibility.onAppStopped()
     }
 }

@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Log
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -52,9 +53,12 @@ import kotlinx.coroutines.launch
 fun LoadingHeartOverlay(isLoading: Boolean) {
     if (isLoading) {
         val context = LocalContext.current
+        
+        Log.d("LoadingHeartOverlay", "=== OVERLAY SHOWN - isLoading: $isLoading ===")
 
         // Haptic Feedback (Vibration) - pauses when app goes to background
         DisposableEffect(Unit) {
+            Log.d("LoadingHeartOverlay", "DisposableEffect started")
             val vibrator = if (Build.VERSION.SDK_INT >= 31) {
                 val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
                 vibratorManager.defaultVibrator
@@ -63,10 +67,50 @@ fun LoadingHeartOverlay(isLoading: Boolean) {
                 context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             }
 
+            // IMMEDIATE synchronous first vibration - happens instantly
+            Log.d("LoadingHeartOverlay", "Checking vibrator: hasVibrator=${vibrator.hasVibrator()}")
+            if (vibrator.hasVibrator()) {
+                Log.d("LoadingHeartOverlay", "IMMEDIATE VIBRATION - Starting 60ms pulse NOW")
+                if (Build.VERSION.SDK_INT >= 26) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(60)
+                }
+                Log.d("LoadingHeartOverlay", "IMMEDIATE VIBRATION - 60ms pulse triggered")
+            } else {
+                Log.w("LoadingHeartOverlay", "IMMEDIATE VIBRATION SKIPPED - No vibrator available")
+            }
+
             val job = GlobalScope.launch {
+                Log.d("LoadingHeartOverlay", "Coroutine started for continuous vibration")
+                // Second part of initial pattern after 200ms
+                if (vibrator.hasVibrator()) {
+                    Log.d("LoadingHeartOverlay", "Waiting 200ms before second pulse...")
+                    delay(200)
+                    // Check foreground status before second pulse
+                    if (AppVisibility.isForeground) {
+                        Log.d("LoadingHeartOverlay", "Triggering 40ms pulse")
+                        if (Build.VERSION.SDK_INT >= 26) {
+                            vibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+                        } else {
+                            @Suppress("DEPRECATION")
+                            vibrator.vibrate(40)
+                        }
+                    } else {
+                        Log.d("LoadingHeartOverlay", "App went to background, skipping second pulse")
+                    }
+                }
+                
+                // Continue with repeating pattern
+                var loopCount = 0
                 while (true) {
+                    delay(1000)
+                    loopCount++
+                    Log.d("LoadingHeartOverlay", "Vibration loop iteration $loopCount, isForeground=${AppVisibility.isForeground}")
                     // Only vibrate if app is in foreground
                     if (vibrator.hasVibrator() && AppVisibility.isForeground) {
+                        Log.d("LoadingHeartOverlay", "Loop $loopCount: Triggering 60ms pulse")
                         if (Build.VERSION.SDK_INT >= 26) {
                             vibrator.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE))
                         } else {
@@ -74,24 +118,32 @@ fun LoadingHeartOverlay(isLoading: Boolean) {
                             vibrator.vibrate(60)
                         }
                         delay(200)
-                        if (Build.VERSION.SDK_INT >= 26) {
-                            vibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+                        // Check again before second pulse in case app went to background
+                        if (AppVisibility.isForeground) {
+                            Log.d("LoadingHeartOverlay", "Loop $loopCount: Triggering 40ms pulse")
+                            if (Build.VERSION.SDK_INT >= 26) {
+                                vibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+                            } else {
+                                @Suppress("DEPRECATION")
+                                vibrator.vibrate(40)
+                            }
                         } else {
-                            @Suppress("DEPRECATION")
-                            vibrator.vibrate(40)
+                            Log.d("LoadingHeartOverlay", "Loop $loopCount: App went to background during pulse, skipping 40ms pulse")
                         }
-                        delay(1000)
                     } else if (!vibrator.hasVibrator()) {
+                        Log.w("LoadingHeartOverlay", "Loop $loopCount: No vibrator available, breaking loop")
                         break
                     } else {
-                        // App is in background, just wait and check again
-                        delay(500)
+                        Log.d("LoadingHeartOverlay", "Loop $loopCount: App in background, skipping vibration (will resume when foreground)")
+                        // Don't break - continue loop so vibration resumes when app comes back to foreground
                     }
                 }
             }
             onDispose {
+                Log.d("LoadingHeartOverlay", "DisposableEffect disposing - cancelling vibration")
                 job.cancel()
                 vibrator.cancel()
+                Log.d("LoadingHeartOverlay", "Vibration cancelled and cleaned up")
             }
         }
 
