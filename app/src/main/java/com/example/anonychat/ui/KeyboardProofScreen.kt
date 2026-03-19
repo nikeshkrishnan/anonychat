@@ -1522,7 +1522,7 @@ fun KeyboardProofScreen(
                             Row(
                                     modifier =
                                             Modifier.fillMaxWidth()
-                                                    .height(56.dp)
+                                                    .height(80.dp)
                                                     .padding(horizontal = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -1640,21 +1640,20 @@ fun KeyboardProofScreen(
                                         )
                                     }
                                 ) {
-                                    // Username with Roses and Sparks on same line
+                                    // Username on first line
+                                    // For testing: uncomment the line below and comment the line after it
+                               //   val displayUsername = "TestUser99"
+                                    val displayUsername = if (isUserDeactivated) "Deactivated" else matchedUser.username
+                                    
+                                    Text(
+                                            text = displayUsername,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 16.sp,
+                                            color = headerContentColor
+                                    )
+                                    
+                                    // Roses and Sparks on second line
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        // For testing: uncomment the line below and comment the line after it
-                                   //   val displayUsername = "TestUser99"
-                                        val displayUsername = if (isUserDeactivated) "Deactivated" else matchedUser.username
-                                        
-                                        Text(
-                                                text = displayUsername,
-                                                fontWeight = FontWeight.SemiBold,
-                                                fontSize = 16.sp,
-                                                color = headerContentColor
-                                        )
-                                        
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        
                                         // Roses count
                                         Text(
                                                 text = formatCount(roses),
