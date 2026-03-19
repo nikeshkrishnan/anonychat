@@ -41,6 +41,10 @@ class ChatSocketService : Service() {
 
                 Log.e("APP TO FORGROUND!!!!!!!!!!!", "ONLINE")
                 AppVisibility.onAppStarted()
+                
+                // Reset reconnect attempts to ensure we try connecting even after long background time
+                WebSocketManager.resetReconnectAttempts()
+                
                 WebSocketManager.reconnectIfNeeded(applicationContext)
                 WebSocketManager.sendPresence("online")
             }
@@ -122,9 +126,9 @@ class ChatSocketService : Service() {
                                         when (ev) {
                                             is WebSocketEvent.PreferencesData -> {
                                                 // Verify this is the correct peer's preferences
-                                                ev.preferences.gmail == peerEmail
+                                                ev.userEmail == peerEmail
                                             }
-                                            is WebSocketEvent.PreferencesError -> true
+                                            is WebSocketEvent.PreferencesError -> ev.email == peerEmail
                                             else -> false
                                         }
                                     }
@@ -134,7 +138,7 @@ class ChatSocketService : Service() {
                                 
                                 // Double-check the email matches to prevent mixing up users
                                 if (peerPrefs != null && peerPrefs.gmail != peerEmail) {
-                                    Log.e("ChatSocketService", "⚠️ Preferences mismatch! Expected $peerEmail but got ${peerPrefs.gmail}")
+                                    Log.e("ChatSocketService", "⚠️ Preferences mismatch! Expected $peerEmail but got ${peerPrefs.gmail} (event.userEmail should have filtered this)")
                                     // Use fallback instead of wrong data
                                     withContext(Dispatchers.Main) {
                                         ConversationRepository.upsert(

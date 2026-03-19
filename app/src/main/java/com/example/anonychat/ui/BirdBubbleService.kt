@@ -338,8 +338,8 @@ class BirdBubbleService : Service() {
                 val myPrefsEvent = withTimeoutOrNull(10_000) {
                     WebSocketManager.events.first { event ->
                         // Only process PreferencesData for the current user (filter by email)
-                        (event is WebSocketEvent.PreferencesData && event.preferences.gmail == email) ||
-                        event is WebSocketEvent.PreferencesError
+                        (event is WebSocketEvent.PreferencesData && event.userEmail == email) ||
+                        (event is WebSocketEvent.PreferencesError && event.email == email)
                     }
                 }
 

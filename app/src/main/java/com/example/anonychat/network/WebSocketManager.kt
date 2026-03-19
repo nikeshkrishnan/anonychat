@@ -212,7 +212,7 @@ sealed class WebSocketEvent {
     data class DeleteAllMatchesError(val error: String) : WebSocketEvent()
     
     // Preference events
-    data class PreferencesData(val preferences: com.example.anonychat.network.GetPreferencesResponse) : WebSocketEvent()
+    data class PreferencesData(val preferences: com.example.anonychat.network.GetPreferencesResponse, val userEmail: String? = null) : WebSocketEvent()
     data class PreferencesError(val error: String, val email: String? = null) : WebSocketEvent()
     data class UpdatePreferencesSuccess(val message: String) : WebSocketEvent()
     data class UpdatePreferencesError(val error: String) : WebSocketEvent()
@@ -339,7 +339,7 @@ object WebSocketManager {
             // Wait for preferences response with timeout
             val prefsData = withTimeoutOrNull(5000L) {
                 events.first { event: WebSocketEvent ->
-                    event is WebSocketEvent.PreferencesData
+                    event is WebSocketEvent.PreferencesData && event.userEmail == message.from
                 } as? WebSocketEvent.PreferencesData
             }
             
@@ -2523,7 +2523,7 @@ object WebSocketManager {
                     lastRequestedPreferencesEmail = null
                     
                     withContext(Dispatchers.Main.immediate) {
-                        _events.emit(WebSocketEvent.PreferencesData(preferences))
+                        _events.emit(WebSocketEvent.PreferencesData(preferences, userEmail = preferences.gmail))
                     }
                 }
                 "preferences_error", "get_preferences_error" -> {
@@ -3876,10 +3876,25 @@ object WebSocketManager {
         }
     }
     
+    /**
+     * Reset the reconnect attempt counter.
+     * Call this when app comes to foreground or when user explicitly triggers reconnection.
+     */
+    fun resetReconnectAttempts() {
+        Log.i("WebSocketManager", "Resetting reconnect attempts (was: $reconnectAttempt)")
+        reconnectAttempt = 0
+    }
+    
     private fun scheduleReconnect(attempt: Int) {
-        if (wsUrl == null || attempt > 10) return
+        // No limit on reconnect attempts - will keep trying indefinitely
+        if (wsUrl == null) {
+            Log.w("WebSocketManager", "scheduleReconnect: No wsUrl available, cannot reconnect")
+            return
+        }
 
         val delayMs = (1000L * 2.0.pow(attempt - 1)).toLong().coerceAtMost(MAX_RECONNECT_DELAY_MS)
+        
+        Log.i("WebSocketManager", "Scheduling reconnect attempt #$attempt in ${delayMs}ms (infinite retries)")
 
         scope.launch {
             delay(delayMs)
@@ -3912,6 +3927,11 @@ object WebSocketManager {
                     Log.d("WebSocketManager", "reconnectIfNeeded: already active")
                     return@launch
                 }
+
+                // Reset reconnect attempt counter when explicitly reconnecting
+                // This ensures we don't give up after being in background for a long time
+                Log.i("WebSocketManager", "reconnectIfNeeded: Resetting reconnect attempt counter (was: $reconnectAttempt)")
+                reconnectAttempt = 0
 
                 try {
                     connect(context)

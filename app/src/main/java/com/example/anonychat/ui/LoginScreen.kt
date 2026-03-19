@@ -639,9 +639,11 @@ fun LoginScreen(
                                                         WebSocketManager.sendGetPreferences(loginResponse.accessToken)
                                                         
                                                         // Wait for response with timeout
+                                                        val userEmail = prefs.getString("user_email", null)
                                                         val prefEvent = withTimeoutOrNull(10_000) {
                                                             WebSocketManager.events.first { event ->
-                                                                event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                                                (event is WebSocketEvent.PreferencesData && event.userEmail == userEmail) ||
+                                                                (event is WebSocketEvent.PreferencesError && event.email == userEmail)
                                                             }
                                                         }
 

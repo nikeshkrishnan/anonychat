@@ -130,11 +130,11 @@ fun ProfileScreen(
                         val serverPrefs = event.preferences
                         val myEmail = userPrefs.getString("user_email", null)
                         
-                        android.util.Log.d("ProfilePrefs", "Received preferences via WebSocket: username=${serverPrefs.username}, gmail=${serverPrefs.gmail}")
+                        android.util.Log.d("ProfilePrefs", "Received preferences via WebSocket: username=${serverPrefs.username}, userEmail=${event.userEmail}")
                         android.util.Log.d("ProfilePrefs", "My email: $myEmail")
                         
                         // CRITICAL: Only update if preferences belong to the main user
-                        if (serverPrefs.gmail != null && serverPrefs.gmail == myEmail) {
+                        if (event.userEmail != null && event.userEmail == myEmail) {
                             android.util.Log.d("ProfilePrefs", "Preferences match main user - updating profile")
                             
                             // Update composable state with fetched data

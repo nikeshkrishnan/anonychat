@@ -502,8 +502,8 @@ fun KeyboardProofScreen(
                 val prefEvent = withTimeoutOrNull(10_000) {
                     WebSocketManager.events.first { event ->
                         // Only process PreferencesData for the current user (not the matched user)
-                        (event is WebSocketEvent.PreferencesData && event.preferences.gmail == userEmail) ||
-                        event is WebSocketEvent.PreferencesError
+                        (event is WebSocketEvent.PreferencesData && event.userEmail == userEmail) ||
+                        (event is WebSocketEvent.PreferencesError && event.email == userEmail)
                     }
                 }
                 
@@ -858,8 +858,8 @@ fun KeyboardProofScreen(
                 val prefEvent = withTimeoutOrNull(10_000) {
                     WebSocketManager.events.first { event ->
                         // Only process PreferencesData for the matched user (not the current user)
-                        (event is WebSocketEvent.PreferencesData && event.preferences.gmail == matchedUserGmail) ||
-                        event is WebSocketEvent.PreferencesError
+                        (event is WebSocketEvent.PreferencesData && event.userEmail == matchedUserGmail) ||
+                        (event is WebSocketEvent.PreferencesError && event.email == matchedUserGmail)
                     }
                 }
                 

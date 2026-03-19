@@ -408,6 +408,7 @@ fun ChatScreen(
                         prefs.edit().putBoolean("first_time_chat_screen", false).apply()
                         break
                     }
+
                     kotlinx.coroutines.delay(500) // Check every 500ms
                 }
             }
@@ -776,7 +777,8 @@ fun ChatScreen(
                                 
                                 val prefEvent = withTimeoutOrNull(10_000) {
                                         WebSocketManager.events.first { event ->
-                                                event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                                (event is WebSocketEvent.PreferencesData && event.userEmail == userEmail) ||
+                                                (event is WebSocketEvent.PreferencesError && event.email == userEmail)
                                         }
                                 }
                                 
@@ -1705,7 +1707,8 @@ fun ChatScreen(
                                                                                                 
                                                                                                 val prefEvent = withTimeoutOrNull(10_000) {
                                                                                                         WebSocketManager.events.first { event ->
-                                                                                                                event is WebSocketEvent.PreferencesData || event is WebSocketEvent.PreferencesError
+                                                                                                                (event is WebSocketEvent.PreferencesData && event.userEmail == entry.userEmail) ||
+                                                                                                                (event is WebSocketEvent.PreferencesError && event.email == entry.userEmail)
                                                                                                         }
                                                                                                 }
                                                                                                 
