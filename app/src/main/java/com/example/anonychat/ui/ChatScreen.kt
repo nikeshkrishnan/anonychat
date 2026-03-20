@@ -583,6 +583,7 @@ fun ChatScreen(
         var showResetDialog by remember { mutableStateOf(false) }
         var showLogoutDialog by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
+        var suspendedDialogMessage by remember { mutableStateOf<String?>(null) }
 
         if (showThemeDialog) {
                 AlertDialog(
@@ -621,13 +622,13 @@ fun ChatScreen(
                                                         showThemeDialog = false
                                                         showResetDialog = true
                                                 }
-                                        ) { Text("🔄 Reset Account", color = Color(0xFFE53935)) }
+                                        ) { Text("Reset Account") }
                                         TextButton(
                                                 onClick = {
                                                         showThemeDialog = false
                                                         showLogoutDialog = true
                                                 }
-                                        ) { Text("🚪 Logout", color = Color(0xFFFF6F00)) }
+                                        ) { Text("Logout") }
                                 }
                         },
                         confirmButton = {}
@@ -823,6 +824,28 @@ fun ChatScreen(
                         )
                 }
 
+                if (suspendedDialogMessage != null) {
+                        AlertDialog(
+                                onDismissRequest = { suspendedDialogMessage = null },
+                                title = {
+                                        Column(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                                Text("Matchmaking Suspended")
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Text("🚫", fontSize = 28.sp)
+                                        }
+                                },
+                                text = { Text(suspendedDialogMessage!!) },
+                                confirmButton = {
+                                        TextButton(onClick = { suspendedDialogMessage = null }) {
+                                                Text("OK")
+                                        }
+                                }
+                        )
+                }
+
         val exoPlayer =
                 remember(context, isDarkTheme) {
                         ExoPlayer.Builder(context).build().apply {
@@ -954,25 +977,26 @@ fun ChatScreen(
         // State to hold matched user info for navigation
         var pendingMatchNavigation by remember { mutableStateOf<Pair<User, Preferences>?>(null) }
         
-        // Handle back button press
-        BackHandler {
-            // If we're in loading state (searching for match) and have a pending match, skip it
-            if (isLoading && pendingMatchNavigation != null) {
+        // Handle back button press during loading or matching states
+        BackHandler(enabled = isLoading) {
+            if (isFirstTimeSetup) {
+                // Prevent back navigation during first time setup
+                Log.d("ChatScreen", "Back button pressed during first time setup - ignoring")
+            } else if (pendingMatchNavigation != null) {
+                // If we're searching and have a pending match, skip it
                 val matchedUser = pendingMatchNavigation?.first
                 val token = userPrefsForCounts.getString("access_token", null)
                 
                 if (matchedUser != null && token != null) {
-                    // Call skip endpoint to ignore this match
                     WebSocketManager.sendSkipUser(matchedUser.id, token)
                     Log.d("ChatScreen", "Skipping match with ${matchedUser.id} due to back button press")
                 }
                 
-                // Clear pending match and stop loading
                 pendingMatchNavigation = null
                 isLoading = false
             } else {
-                // Normal back button behavior - exit app
-                (context as? android.app.Activity)?.finish()
+                // Cancel ongoing search and hide the overlay
+                isLoading = false
             }
         }
         
@@ -1057,6 +1081,30 @@ fun ChatScreen(
                                 }
                                 is WebSocketEvent.MatchError -> {
                                         Log.e("ChatScreen", "Match error via WebSocket: ${event.error}")
+                                        if (event.rawError == "User suspended" && event.rawMessage != null) {
+                                            try {
+                                                val dateRegex = Regex("""Suspended until ([^,]+),""")
+                                                val matchResult = dateRegex.find(event.rawMessage)
+                                                if (matchResult != null) {
+                                                    val utcString = matchResult.groupValues[1]
+                                                    val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault())
+                                                    format.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                                                    val date = format.parse(utcString)
+                                                    
+                                                    val localFormat = java.text.SimpleDateFormat("MMM dd, yyyy 'at' hh:mm:ss a", java.util.Locale.getDefault())
+                                                    localFormat.timeZone = java.util.TimeZone.getDefault()
+                                                    val localTimeString = date?.let { localFormat.format(it) } ?: "later"
+                                                    
+                                                    suspendedDialogMessage = "Your rating has been less than 3 for a long time and matchmaking is disabled till $localTimeString 😔\n\nImprove your rating to lift the suspension, or wait for the ban to be lifted ⏳"
+                                                } else {
+                                                    suspendedDialogMessage = "Your rating has been less than 3 for a long time and matchmaking is disabled 😔\n\nImprove your rating to lift the suspension, or wait for the ban to be lifted ⏳"
+                                                }
+                                            } catch (e: Exception) {
+                                                suspendedDialogMessage = "Your rating has been less than 3 for a long time and matchmaking is disabled 😔\n\nImprove your rating to lift the suspension, or wait for the ban to be lifted ⏳"
+                                            }
+                                        } else {
+                                            Toast.makeText(context, event.error, Toast.LENGTH_LONG).show()
+                                        }
                                         isLoading = false
                                 }
                                 // NewMessage handling removed - now handled by ChatSocketService globally
@@ -1876,16 +1924,8 @@ fun ChatScreen(
                 selectedChats.clear()
         }
         
-        // Handle back button during match search (can be cancelled)
-        BackHandler(enabled = isLoading && !isFirstTimeSetup) {
-                isLoading = false // stop the heart overlay
-        }
+        // Unified loading state BackHandler handles loading and first time setup logic now.
         
-        // During first time setup, back button does nothing (overlay continues)
-        BackHandler(enabled = isFirstTimeSetup) {
-                // Do nothing - prevent back navigation during first time setup
-                Log.d("ChatScreen", "Back button pressed during first time setup - ignoring")
-        }
         // --- BIRD GIF (Bottom Right Corner) ---
         val birdImageLoader =
                 remember(context) {

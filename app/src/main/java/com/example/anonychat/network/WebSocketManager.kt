@@ -207,7 +207,7 @@ sealed class WebSocketEvent {
     
     // Matchmaking events
     data class MatchFound(val match: com.example.anonychat.network.MatchResponse) : WebSocketEvent()
-    data class MatchError(val error: String) : WebSocketEvent()
+    data class MatchError(val error: String, val rawMessage: String? = null, val rawError: String? = null) : WebSocketEvent()
     data class SkipUserSuccess(val message: String) : WebSocketEvent()
     data class SkipUserError(val error: String) : WebSocketEvent()
     data class AcceptUserSuccess(val message: String) : WebSocketEvent()
@@ -2444,10 +2444,25 @@ object WebSocketManager {
                     }
                 }
                 "match_error", "find_match_error" -> {
-                    val error = json.optString("error", json.optString("message", "Match error"))
-                    Log.e("WebSocketManager", "match_error received: $error")
+                    val rawError = json.optString("error", json.optString("message", "Match error"))
+                    val rawMessage = json.optString("message", null) // Store raw message
+                    Log.e("WebSocketManager", "match_error received: $rawError")
+                    
+                    val userFriendlyError = if (rawError == "User suspended") {
+                        val durationParts = rawMessage?.split(", ") ?: emptyList()
+                        val durationStr = if (durationParts.size > 1) {
+                            durationParts[1].replace(" remaining", "").trim()
+                        } else {
+                            ""
+                        }
+                        val pauseText = if (durationStr.isNotEmpty()) "for $durationStr" else "temporarily"
+                        "Matchmaking paused $pauseText. Your rating has been low for a long time. Chat with existing matches to improve it before finding new ones."
+                    } else {
+                        rawError
+                    }
+                    
                     withContext(Dispatchers.Main.immediate) {
-                        _events.emit(WebSocketEvent.MatchError(error))
+                        _events.emit(WebSocketEvent.MatchError(userFriendlyError, rawMessage, rawError))
                     }
                 }
                 "skip_user_success" -> {
