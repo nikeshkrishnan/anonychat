@@ -52,6 +52,24 @@ object Http403EventBus {
     }
 }
 
+// Sealed class for HTTP 426 events (App Update Required)
+sealed class Http426Event {
+    data class AppUpdateRequired(val message: String) : Http426Event()
+}
+
+// Global flow for HTTP 426 events
+object Http426EventBus {
+    private val _events = MutableSharedFlow<Http426Event>(
+        replay = 0,
+        extraBufferCapacity = 10
+    )
+    val events = _events.asSharedFlow()
+    
+    suspend fun emit(event: Http426Event) {
+        _events.emit(event)
+    }
+}
+
 class CachingDns : Dns {
 
         private val cache = mutableMapOf<String, List<InetAddress>>()
@@ -79,7 +97,12 @@ class AuthInterceptor(private val context: Context) : Interceptor {
                         "Retrieved token from SharedPreferences: $token"
                 )
                 val originalRequest = chain.request()
+
+                // Use global hardcoded build version
+                val buildVersion = NetworkConfig.BUILD_VERSION
+
                 val requestBuilder = originalRequest.newBuilder()
+                    .addHeader("x-build-version", buildVersion)
 
                 token?.let {
                         // Skip adding token for login, register, and reset-password endpoints
@@ -101,6 +124,32 @@ class AuthInterceptor(private val context: Context) : Interceptor {
 
                 val request = requestBuilder.build()
                 val response = chain.proceed(request)
+                
+                // Handle 426 or 400 responses (App Update Required)
+                val responseBodyStr = try { response.peekBody(Long.MAX_VALUE).string() } catch (e: Exception) { "" }
+                if (response.code == 426 || (response.code == 400 && responseBodyStr.contains("version", ignoreCase = true))) {
+                    val url = request.url.toString()
+                    Log.e("AuthInterceptor", "Version error received for URL: $url")
+                    Log.e("AuthInterceptor", "Response body: $responseBodyStr")
+                    
+                    try {
+                        val json = org.json.JSONObject(responseBodyStr)
+                        val message = json.optString("message", "App version is too old. Please update.")
+                        
+                        sharedPreferences.edit().clear().apply()
+                        
+                        kotlinx.coroutines.GlobalScope.launch {
+                            Http426EventBus.emit(Http426Event.AppUpdateRequired(message))
+                        }
+                    } catch (e: Exception) {
+                        Log.e("AuthInterceptor", "Failed to parse 426/400 response", e)
+                        sharedPreferences.edit().clear().apply()
+                        kotlinx.coroutines.GlobalScope.launch {
+                            Http426EventBus.emit(Http426Event.AppUpdateRequired("App version is too old. Please update."))
+                        }
+                    }
+                    return response
+                }
                 
                 // Handle 403 responses (ban/suspension)
                 if (response.code == 403) {

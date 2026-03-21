@@ -1262,6 +1262,10 @@ fun KeyboardProofScreen(
                     // Token expired and needs login - handled globally in MainActivity
                     // No action needed here
                 }
+                is WebSocketEvent.AppUpdateRequired -> {
+                    // App update required - handled globally in MainActivity
+                    // No action needed here
+                }
                 is WebSocketEvent.BlockedListData -> {
                     Log.d("KeyboardProofScreen", "Blocked list data received via WebSocket")
                 }

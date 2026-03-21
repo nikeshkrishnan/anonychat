@@ -335,10 +335,10 @@ fun LoginScreen(
     val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
 
     // ROOT BOX
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().background(Color.White)) {
 
         // LAYER 1: BACKGROUND (Video + Sky)
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().background(Color.White)) {
             // Video Section
             Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 50.dp)) {
                 VideoBackground(context = context)
@@ -1292,26 +1292,57 @@ fun VideoBackground(context: Context) {
         }
     }
 
-    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
     Box(modifier = Modifier.fillMaxSize()) {
         // Layer 1: The Video Player (Initially black/invisible)
         AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    val view = PlayerView(ctx).apply {
                         player = exoPlayer
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-
-                        // IMPORTANT: Set the shutter to Transparent so it doesn't paint black
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
 
-                        layoutParams =
-                                FrameLayout.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
-                                )
+                        layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                        )
                     }
+
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        when (event) {
+                            androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
+                                view.onPause()
+                                exoPlayer.pause()
+                            }
+                            androidx.lifecycle.Lifecycle.Event.ON_RESUME -> {
+                                view.onResume()
+                                exoPlayer.play()
+                            }
+                            androidx.lifecycle.Lifecycle.Event.ON_DESTROY -> {
+                                exoPlayer.release()
+                            }
+                            else -> {}
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+
+                    // Provide a way to remove the observer when this view is disposed, 
+                    // though typically we just rely on the Composable's lifecycle
+                    view.addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+                        override fun onViewAttachedToWindow(v: android.view.View) {}
+                        override fun onViewDetachedFromWindow(v: android.view.View) {
+                            lifecycleOwner.lifecycle.removeObserver(observer)
+                        }
+                    })
+
+                    view
+                },
+                update = { view ->
+                    view.requestLayout()
+                    view.invalidate()
                 },
                 modifier = Modifier.fillMaxSize()
         )

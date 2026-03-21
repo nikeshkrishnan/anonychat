@@ -239,6 +239,8 @@ sealed class WebSocketEvent {
     // Token expiration event - triggers redirect to login
     object TokenExpiredNeedLogin : WebSocketEvent()
     
+    data class AppUpdateRequired(val message: String) : WebSocketEvent()
+    
     // Blocked users events
     data class BlockedListData(val blockedUsers: List<BlockedUser>) : WebSocketEvent()
     data class BlockedListError(val error: String) : WebSocketEvent()
@@ -599,6 +601,10 @@ object WebSocketManager {
     private var heartbeatJob: Job? = null
     private var readyJob: Job? = null
     
+    private fun getBuildVersion(): String {
+        return NetworkConfig.BUILD_VERSION
+    }
+    
     /**
      * Get the current WebSocket instance for monitoring purposes.
      * Used by WebSocketMonitorService to check connection health.
@@ -635,7 +641,7 @@ object WebSocketManager {
             val beforePing = lastServerMessageAt
             
             // Send ping
-            val sent = ws.send(JSONObject().put("type", "ping").toString())
+            val sent = ws.send(JSONObject().put("buildVersion", getBuildVersion()).put("type", "ping").toString())
             if (!sent) {
                 return false
             }
@@ -687,7 +693,8 @@ object WebSocketManager {
                 curruser = email
                 Log.e("WebSocketManager", "Updated curruser to: $curruser")
                 
-                val url = "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
+                val buildVersion = getBuildVersion()
+                val url = "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}&buildVersion=${Uri.encode(buildVersion)}"
                 wsUrl = url
                 
                 Log.e("WebSocketManager", "WebSocket URL: $url")
@@ -1046,7 +1053,7 @@ object WebSocketManager {
         // state = "foreground" | "background" | "online" | "offline"
         if (readyState != ReadyState.READY) return
 
-        val payload = JSONObject().put("type", "presence").put("state", state).toString()
+        val payload = JSONObject().put("buildVersion", getBuildVersion()).put("type", "presence").put("state", state).toString()
 
         try {
             webSocket?.send(payload)
@@ -1103,7 +1110,7 @@ object WebSocketManager {
                     }
 
                     wsUrl =
-                            "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}"
+                            "${NetworkConfig.WS_BASE_URL}?token=${Uri.encode(token)}&gmail=${Uri.encode(email)}&buildVersion=${Uri.encode(NetworkConfig.BUILD_VERSION)}"
                     Log.i("WebSocketManager", "connect: Constructed WS URL: $wsUrl")
 
                     // Atomic boolean to ensure we resume the continuation exactly once
@@ -1562,7 +1569,7 @@ object WebSocketManager {
                         val payload =
                                 JSONObject()
                                         .apply {
-                                            put("type", "media")
+                                            put("buildVersion", getBuildVersion()).put("type", "media")
                                             put("to", toEmail)
                                             put("from", curruser)
                                             put("id", localId)
@@ -1670,7 +1677,7 @@ object WebSocketManager {
                 scope.launch {
                     while (isActive && readyState != ReadyState.READY) {
                         try {
-                            val readyMsg = JSONObject().put("type", "is_ready").toString()
+                            val readyMsg = JSONObject().put("buildVersion", getBuildVersion()).put("type", "is_ready").toString()
                             val sent = webSocket?.send(readyMsg) ?: false
                             if (sent) {
                                 Log.d("WebSocketManager", "is_ready sent: $readyMsg")
@@ -1964,7 +1971,7 @@ object WebSocketManager {
 
         val payload =
                 JSONObject()
-                        .put("type", "message_received_ack")
+                        .put("buildVersion", getBuildVersion()).put("type", "message_received_ack")
                         .put("messageId", messageId)
                         .put("to", senderGmail) // 👈 original sender
                         .toString()
@@ -1983,7 +1990,7 @@ object WebSocketManager {
         val payload =
                 JSONObject()
                         .apply {
-                            put("type", "message_read_ack")
+                            put("buildVersion", getBuildVersion()).put("type", "message_read_ack")
                             put("messageId", messageId)
                             put("to", senderGmail)
                         }
@@ -2006,6 +2013,23 @@ object WebSocketManager {
             val json = JSONObject(text)
             val type = json.optString("type")
             val messageId = json.optString("id", json.optString("messageId"))
+
+            if (type == "error") {
+                val message = json.optString("message", "")
+                if (message.contains("version too old", ignoreCase = true) || message.contains("build version", ignoreCase = true) || message.contains("Minimum required", ignoreCase = true)) {
+                    Log.e("WebSocketManager", "Received client build version error: $message")
+                    
+                    try {
+                        appContext.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit().clear().apply()
+                        forceCloseSocket()
+                    } catch (e: Exception) {
+                        Log.e("WebSocketManager", "Error clearing session on version error", e)
+                    }
+                    
+                    _events.emit(WebSocketEvent.AppUpdateRequired(message))
+                    return
+                }
+            }
 
             when (type) {
                 "ready_ack" -> {
@@ -2766,7 +2790,7 @@ object WebSocketManager {
                     while (isActive) {
                         delay(HEARTBEAT_INTERVAL_MS)
                         try {
-                            val sent = webSocket?.send(JSONObject().put("type", "ping").toString()) ?: false
+                            val sent = webSocket?.send(JSONObject().put("buildVersion", getBuildVersion()).put("type", "ping").toString()) ?: false
                             if (sent) {
                                 lastPingSentAt = System.currentTimeMillis()
                                 Log.d("WebSocketManager", "ping sent, awaiting pong within ${PING_PONG_TIMEOUT_MS}ms")
@@ -2792,7 +2816,7 @@ object WebSocketManager {
 
         val messageId = "chat_open_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "chat_open")
+            .put("buildVersion", getBuildVersion()).put("type", "chat_open")
             .put("with", peerGmail)
             .put("messageId", messageId)
             .toString()
@@ -2825,7 +2849,7 @@ object WebSocketManager {
 
         val messageId = "chat_close_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "chat_close")
+            .put("buildVersion", getBuildVersion()).put("type", "chat_close")
             .put("with", peerGmail)
             .put("messageId", messageId)
             .toString()
@@ -2858,7 +2882,7 @@ object WebSocketManager {
 
         val messageId = "spark_left_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "spark_left")
+            .put("buildVersion", getBuildVersion()).put("type", "spark_left")
             .put("to", peerGmail)
             .put("senderUserId", senderUserId)
             .put("messageId", messageId)
@@ -2891,7 +2915,7 @@ object WebSocketManager {
 
         val messageId = "spark_right_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "spark_right")
+            .put("buildVersion", getBuildVersion()).put("type", "spark_right")
             .put("to", peerGmail)
             .put("senderUserId", senderUserId)
             .put("messageId", messageId)
@@ -2923,7 +2947,7 @@ object WebSocketManager {
         ensureInit()
         val messageId = "spark_trigger_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "spark_trigger")
+            .put("buildVersion", getBuildVersion()).put("type", "spark_trigger")
             .put("to", peerGmail)
             .put("from", senderGmail)
             .put("messageId", messageId)
@@ -2952,7 +2976,7 @@ object WebSocketManager {
         ensureInit()
         val messageId = "spark_start_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "spark_start")
+            .put("buildVersion", getBuildVersion()).put("type", "spark_start")
             .put("to", peerGmail)
             .put("from", senderGmail)
             .put("messageId", messageId)
@@ -2981,7 +3005,7 @@ object WebSocketManager {
         ensureInit()
         val messageId = "spark_received_ack_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "spark_received_ack")
+            .put("buildVersion", getBuildVersion()).put("type", "spark_received_ack")
             .put("to", peerGmail)
             .put("from", senderGmail)
             .put("messageId", messageId)
@@ -3010,7 +3034,7 @@ object WebSocketManager {
         ensureInit()
         val messageId = "rose_gifted_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "rose_gifted")
+            .put("buildVersion", getBuildVersion()).put("type", "rose_gifted")
             .put("to", peerGmail)
             .put("from", senderGmail)
             .put("messageId", messageId)
@@ -3039,7 +3063,7 @@ object WebSocketManager {
         ensureInit()
         val messageId = "rose_taken_back_${System.currentTimeMillis()}"
         val payload = JSONObject()
-            .put("type", "rose_taken_back")
+            .put("buildVersion", getBuildVersion()).put("type", "rose_taken_back")
             .put("to", peerGmail)
             .put("from", senderGmail)
             .put("messageId", messageId)
@@ -3073,7 +3097,7 @@ object WebSocketManager {
     fun sendFindMatch(token: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "find_match")
+            .put("buildVersion", getBuildVersion()).put("type", "find_match")
             .put("authorization", "Bearer $token")
             .toString()
         
@@ -3102,7 +3126,7 @@ object WebSocketManager {
     fun sendSkipUser(candGmail: String, token: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "skip_user")
+            .put("buildVersion", getBuildVersion()).put("type", "skip_user")
             .put("candGmail", candGmail)
             .put("authorization", "Bearer $token")
             .toString()
@@ -3132,7 +3156,7 @@ object WebSocketManager {
     fun sendAcceptUser(candGmail: String, token: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "accept_user")
+            .put("buildVersion", getBuildVersion()).put("type", "accept_user")
             .put("candGmail", candGmail)
             .put("authorization", "Bearer $token")
             .toString()
@@ -3162,7 +3186,7 @@ object WebSocketManager {
     fun sendDeleteAllMatches(token: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "delete_all_matches")
+            .put("buildVersion", getBuildVersion()).put("type", "delete_all_matches")
             .put("authorization", "Bearer $token")
             .toString()
         
@@ -3202,7 +3226,7 @@ object WebSocketManager {
         lastRequestedPreferencesEmail = targetGmail
         
         val payload = JSONObject()
-            .put("type", "get_preferences")
+            .put("buildVersion", getBuildVersion()).put("type", "get_preferences")
             .put("authorization", "Bearer $token")
         
         targetGmail?.let {
@@ -3241,7 +3265,7 @@ object WebSocketManager {
         Log.e("WebSocketManager", "WebSocket instance: ${if (webSocket != null) "Present" else "NULL"}")
         
         val payload = JSONObject()
-            .put("type", "get_blocked_list")
+            .put("buildVersion", getBuildVersion()).put("type", "get_blocked_list")
             .put("authorization", "Bearer $token")
         
         val payloadStr = payload.toString()
@@ -3272,7 +3296,7 @@ object WebSocketManager {
         ensureInit()
         
         val payload = JSONObject()
-            .put("type", "unblock_user")
+            .put("buildVersion", getBuildVersion()).put("type", "unblock_user")
             .put("authorization", "Bearer $token")
             .put("userEmail", userEmail)
         
@@ -3313,7 +3337,7 @@ object WebSocketManager {
     ) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "update_preferences")
+            .put("buildVersion", getBuildVersion()).put("type", "update_preferences")
             .put("authorization", "Bearer $token")
         
         username?.let { payload.put("username", it) }
@@ -3359,7 +3383,7 @@ object WebSocketManager {
     fun sendTogglePickBest(token: String, enable: Boolean) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "toggle_pick_best")
+            .put("buildVersion", getBuildVersion()).put("type", "toggle_pick_best")
             .put("enable", enable)
             .put("authorization", "Bearer $token")
             .toString()
@@ -3396,7 +3420,7 @@ object WebSocketManager {
     ) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "add_rating")
+            .put("buildVersion", getBuildVersion()).put("type", "add_rating")
             .put("toParam", toParam)
             .put("rating", rating)
             .put("authorization", "Bearer $token")
@@ -3438,7 +3462,7 @@ object WebSocketManager {
     fun sendGetAverageRating(token: String, toParam: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "get_average_rating")
+            .put("buildVersion", getBuildVersion()).put("type", "get_average_rating")
             .put("toParam", toParam)
             .put("authorization", "Bearer $token")
             .toString()
@@ -3468,7 +3492,7 @@ object WebSocketManager {
     fun sendGetRatingsForUser(token: String, toParam: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "get_ratings_for_user")
+            .put("buildVersion", getBuildVersion()).put("type", "get_ratings_for_user")
             .put("toParam", toParam)
             .put("authorization", "Bearer $token")
             .toString()
@@ -3498,7 +3522,7 @@ object WebSocketManager {
     fun sendGetSpecificRating(token: String, fromParam: String, toParam: String) {
         ensureInit()
         val payload = JSONObject()
-            .put("type", "get_specific_rating")
+            .put("buildVersion", getBuildVersion()).put("type", "get_specific_rating")
             .put("fromParam", fromParam)
             .put("toParam", toParam)
             .put("authorization", "Bearer $token")
@@ -3540,7 +3564,7 @@ object WebSocketManager {
         val payload =
                 JSONObject()
                         .apply {
-                            put("type", "chat_message")
+                            put("buildVersion", getBuildVersion()).put("type", "chat_message")
                             put("to", toEmail)
                             put("from", curruser)
                             put("content", text)

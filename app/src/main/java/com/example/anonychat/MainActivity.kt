@@ -464,6 +464,7 @@ class MainActivity : ComponentActivity() {
         var suspensionMessage by remember { mutableStateOf<String?>(null) }
         var banMessage by remember { mutableStateOf<String?>(null) }
         var http403Message by remember { mutableStateOf<String?>(null) }
+        var http426Message by remember { mutableStateOf<String?>(null) }
 
         // Listen for warning, suspension, and ban notifications from WebSocket
         LaunchedEffect(Unit) {
@@ -501,6 +502,16 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                    is com.example.anonychat.network.WebSocketEvent.AppUpdateRequired -> {
+                        http426Message = event.message
+                        val currentRoute = navController.currentBackStackEntry?.destination?.route
+                        if (currentRoute != Screen.Login.route) {
+                            navController.navigate(Screen.Login.route) {
+                                popUpTo(0) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
                     else -> {}
                 }
             }
@@ -513,6 +524,25 @@ class MainActivity : ComponentActivity() {
                     is com.example.anonychat.network.Http403Event.AccountRestricted -> {
                         http403Message = event.message
                         // Only navigate to login if not already there
+                        val currentRoute = navController.currentBackStackEntry?.destination?.route
+                        if (currentRoute != Screen.Login.route) {
+                            navController.navigate(Screen.Login.route) {
+                                popUpTo(0) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Listen for HTTP 426 events (App Update Required)
+        LaunchedEffect(Unit) {
+            com.example.anonychat.network.Http426EventBus.events.collect { event ->
+                when (event) {
+                    is com.example.anonychat.network.Http426Event.AppUpdateRequired -> {
+                        http426Message = event.message
+                        // Navigate to login if not already there
                         val currentRoute = navController.currentBackStackEntry?.destination?.route
                         if (currentRoute != Screen.Login.route) {
                             navController.navigate(Screen.Login.route) {
@@ -578,6 +608,28 @@ class MainActivity : ComponentActivity() {
                         Text("OK")
                     }
                 }
+            )
+        }
+
+        // Show HTTP 426 dialog (App Update Required)
+        if (http426Message != null) {
+            AlertDialog(
+                onDismissRequest = { /* Non-dismissible */ },
+                title = { Text("🚀 Update Required") },
+                text = { Text(http426Message ?: "This version of the app is no longer supported. Please update.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        // Normally we'd take the user to the Play Store
+                        // Since this is non-dismissible until update, we can leave action empty or exit
+                        System.exit(0)
+                    }) {
+                        Text("Exit App")
+                    }
+                },
+                properties = androidx.compose.ui.window.DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false
+                )
             )
         }
 

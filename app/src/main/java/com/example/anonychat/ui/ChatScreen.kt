@@ -1153,22 +1153,64 @@ fun ChatScreen(
                 }
         }
         
-        DisposableEffect(exoPlayer) {
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        
+        DisposableEffect(exoPlayer, lifecycleOwner) {
+                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) {
+                                exoPlayer.pause()
+                        } else if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                                exoPlayer.play()
+                        }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+
                 onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
                         ChatScreenPipController.onBeforeEnterPip = null
                         exoPlayer.release()
                 }
         }
 
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxSize().background(if (isDarkTheme) Color.Black else Color.White)) {
                 AndroidView(
-                        factory = {
-                                PlayerView(it).apply {
+                        factory = { ctx ->
+                                val view = PlayerView(ctx).apply {
+                                        player = exoPlayer
                                         useController = false
                                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+
+                                        layoutParams = android.widget.FrameLayout.LayoutParams(
+                                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
                                 }
+
+                                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                                        when (event) {
+                                                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> view.onPause()
+                                                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> view.onResume()
+                                                else -> {}
+                                        }
+                                }
+                                lifecycleOwner.lifecycle.addObserver(observer)
+
+                                view.addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+                                        override fun onViewAttachedToWindow(v: android.view.View) {}
+                                        override fun onViewDetachedFromWindow(v: android.view.View) {
+                                                lifecycleOwner.lifecycle.removeObserver(observer)
+                                        }
+                                })
+
+                                view
                         },
-                        update = { it.player = exoPlayer },
+                        update = { view -> 
+                                view.player = exoPlayer
+                                view.requestLayout()
+                                view.invalidate()
+                        },
                         modifier = Modifier.fillMaxSize()
                 )
 
