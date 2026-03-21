@@ -136,6 +136,9 @@ interface ChatHistoryDao {
     @Query("UPDATE chat_history SET toEmail = :newEmail WHERE toEmail = :oldEmail")
     suspend fun updateToEmail(oldEmail: String, newEmail: String)
     
+    @Query("DELETE FROM chat_history WHERE id = :messageId")
+    suspend fun deleteMessage(messageId: String)
+    
     @Query("DELETE FROM chat_history") suspend fun deleteAll()
 }
 
@@ -235,6 +238,8 @@ sealed class WebSocketEvent {
     
     // Username update event for chat list
     data class UsernameUpdated(val email: String, val username: String) : WebSocketEvent()
+    
+    data class DeleteMessage(val messageId: String, val from: String) : WebSocketEvent()
     
     // Token expiration event - triggers redirect to login
     object TokenExpiredNeedLogin : WebSocketEvent()
@@ -1514,6 +1519,7 @@ object WebSocketManager {
                     val multipart =
                             MultipartBody.Builder()
                                     .setType(MultipartBody.FORM)
+                                    .addFormDataPart("buildVersion", getBuildVersion())
                                     .addFormDataPart("file", fileName, requestBody)
                                     .build()
                     Log.e("WebSocketManager", "[TRACE] sendMedia() multipart built")
@@ -1522,7 +1528,9 @@ object WebSocketManager {
                             "WebSocketManager",
                             "[TRACE] sendMedia() building HTTP request to $MEDIA_UPLOAD"
                     )
-                    val reqBuilder = Request.Builder().url(MEDIA_UPLOAD).post(multipart)
+                    
+                    val uploadUrl = "$MEDIA_UPLOAD?buildVersion=${Uri.encode(getBuildVersion())}"
+                    val reqBuilder = Request.Builder().url(uploadUrl).post(multipart)
 
                     if (token != null) {
                         Log.e("WebSocketManager", "[TRACE] sendMedia() adding Authorization header")
@@ -1675,19 +1683,17 @@ object WebSocketManager {
 
         readyJob =
                 scope.launch {
-                    while (isActive && readyState != ReadyState.READY) {
-                        try {
-                            val readyMsg = JSONObject().put("buildVersion", getBuildVersion()).put("type", "is_ready").toString()
+                    try {
+                        // We will rely on receiving 'ws_ready' from the server to send 'is_ready'.
+                        // However, as a fallback just in case the server expects it immediately:
+                        delay(500)
+                        if (readyState != ReadyState.READY && webSocket != null) {
+                            val readyMsg = """{"type":"is_ready","buildVersion":"${getBuildVersion()}"}"""
                             val sent = webSocket?.send(readyMsg) ?: false
-                            if (sent) {
-                                Log.d("WebSocketManager", "is_ready sent: $readyMsg")
-                            } else {
-                                Log.w("WebSocketManager", "is_ready send returned false")
-                            }
-                        } catch (e: Exception) {
-                            Log.e("WebSocketManager", "ready handshake send failed", e)
+                            if (sent) Log.d("WebSocketManager", "is_ready sent (fallback): $readyMsg")
                         }
-                        delay(READY_RETRY_INTERVAL_MS)
+                    } catch (e: Exception) {
+                        Log.e("WebSocketManager", "ready handshake send failed", e)
                     }
                 }
     }
@@ -1818,7 +1824,7 @@ object WebSocketManager {
 
             @RequiresApi(Build.VERSION_CODES.N)
             override fun onMessage(ws: WebSocket, text: String) {
-                Log.d("WebSocketManager", "<<< Received message: $text")
+                Log.e("WebSocketManager", "<<< RAW RECEIVED MESSAGE: $text")
                 lastServerMessageAt = System.currentTimeMillis()
                 lastPingSentAt = 0 // pong or any server message resets ping timeout
                 try {
@@ -2032,6 +2038,11 @@ object WebSocketManager {
             }
 
             when (type) {
+                "ws_ready" -> {
+                    Log.i("WebSocketManager", "ws_ready received, sending is_ready to server!")
+                    val readyMsg = """{"type":"is_ready","buildVersion":"${getBuildVersion()}"}"""
+                    webSocket?.send(readyMsg)
+                }
                 "ready_ack" -> {
                     Log.i("WebSocketManager", "ready_ack received → READY")
                     readyState = ReadyState.READY
@@ -2395,6 +2406,17 @@ object WebSocketManager {
                     Log.e("WebSocketManager", "!!! RECEIVED rose_gifted from: $from !!!")
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.RoseGifted(from))
+                    }
+                }
+                "delete_message" -> {
+                    val from = json.getString("from")
+                    val msgId = json.getString("messageId")
+                    Log.i("WebSocketManager", "!!! RECEIVED delete_message for $msgId from: $from !!!")
+                    scope.launch {
+                        historyDao.deleteMessage(msgId)
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        _events.emit(WebSocketEvent.DeleteMessage(msgId, from))
                     }
                 }
                 "rose_taken_back" -> {
@@ -3547,6 +3569,36 @@ object WebSocketManager {
         }
     }
 
+    fun deleteMessageLocally(messageId: String) {
+        scope.launch {
+            try {
+                historyDao.deleteMessage(messageId)
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "Failed to delete message locally", e)
+            }
+        }
+    }
+
+    fun sendDeleteMessage(peerGmail: String, messageId: String) {
+        val payload =
+            JSONObject()
+                .apply {
+                    put("buildVersion", getBuildVersion())
+                    put("type", "delete_message")
+                    put("to", peerGmail)
+                    put("from", curruser)
+                    put("messageId", messageId)
+                }
+                .toString()
+
+        try {
+            webSocket?.send(payload)
+            Log.i("WebSocketManager", "Sent delete_message to $peerGmail for $messageId")
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Failed to send delete_message", e)
+        }
+    }
+
     @RequiresApi(Build.VERSION_CODES.N)
     fun sendMessage(toEmail: String, text: String, localId: String) {
         val chatMessage =
@@ -3948,10 +4000,18 @@ object WebSocketManager {
     }
 
     private fun ensureAbsoluteUrl(url: String): String {
-        return if (url.startsWith("/")) {
-            "$MEDIA_BASE_URL$url"
+        // Strip leading slash to avoid double-slash since MEDIA_BASE_URL ends with /
+        val fullUrl = if (url.startsWith("/")) {
+            "$MEDIA_BASE_URL${url.trimStart('/')}"
         } else {
             url
+        }
+        // Append buildVersion if not already present
+        val separator = if (fullUrl.contains("?")) "&" else "?"
+        return if (!fullUrl.contains("buildVersion=")) {
+            "$fullUrl${separator}buildVersion=${Uri.encode(getBuildVersion())}"
+        } else {
+            fullUrl
         }
     }
 

@@ -411,6 +411,7 @@ fun KeyboardProofScreen(
     var overlayModeIsDead by remember { mutableStateOf(false) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
     var hasMessageBeenSent by remember { mutableStateOf(false) }
+    var messageToDelete by remember { mutableStateOf<ChatMessage?>(null) }
     
     // Menu and Report Dialog states
     var showMenu by remember { mutableStateOf(false) }
@@ -795,7 +796,26 @@ fun KeyboardProofScreen(
                         Log.e("SparkOverlay", "=".repeat(60))
                         Log.e("SparkOverlay", "[RECEIVER] ✅ Both conditions met: timer reached AND spark_start received")
                         Log.e("SparkOverlay", "[RECEIVER] Sending spark_received_ack and showing overlay")
-                        
+
+                        // Call hasSparked API (same as INITIATOR)
+                        try {
+                            val request = com.example.anonychat.network.SparkRequest(
+                                userA = localGmail,
+                                userB = matchedUserGmail
+                            )
+                            Log.e("SparkOverlay", "[RECEIVER] Calling hasSparked API with emails: $request")
+                            val response = NetworkClient.api.hasSparked(request)
+                            Log.e("SparkOverlay", "[RECEIVER] hasSparked response: ${response.code()} sparked=${response.body()?.sparked}")
+                            if (response.isSuccessful) {
+                                alreadySparked = true
+                                Log.e("SparkOverlay", "[RECEIVER] ✅ Marked as sparked in backend")
+                            } else {
+                                Log.e("SparkOverlay", "[RECEIVER] ❌ hasSparked failed: ${response.errorBody()?.string()}")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("SparkOverlay", "[RECEIVER] ❌ hasSparked exception: ${e.message}", e)
+                        }
+
                         // Send ack to initiator
                         WebSocketManager.sendSparkReceivedAck(matchedUserGmail, localGmail)
                         
@@ -808,6 +828,7 @@ fun KeyboardProofScreen(
                         Log.e("SparkOverlay", "[RECEIVER] Timer reached but waiting for spark_start from peer...")
                     }
                 }
+
             } else {
                 Log.e("SparkOverlay", "[${if (isInitiator) "INITIATOR" else "RECEIVER"}] ❌ Conditions not met after timer - overlay skipped")
                 Log.e("SparkOverlay", "  chatOpenSent=$chatOpenSent peerChatOpenReceived=$peerChatOpenReceived alreadySparked=$alreadySparked")
@@ -1037,6 +1058,10 @@ fun KeyboardProofScreen(
                     if (index != -1) {
                         messages[index] = messages[index].copy(status = MessageStatus.Read)
                     }
+                }
+                is WebSocketEvent.DeleteMessage -> {
+                    Log.i("KeyboardProofScreen", "Deleting message from UI: ${event.messageId}")
+                    messages.removeIf { it.id == event.messageId }
                 }
                 is WebSocketEvent.DeliveryFailed -> {
                     Log.e("ChatWebSocket", "-> Message failed")
@@ -1880,7 +1905,8 @@ fun KeyboardProofScreen(
                                                             messages[idx].copy(status = status)
                                                 }
                                                 WebSocketManager.updateMessageStatus(id, status)
-                                            }
+                                            },
+                                            onLongPress = { msg -> messageToDelete = msg }
                                     )
                                 }
                                 is ChatHistoryItem.DateHeader -> {
@@ -2994,6 +3020,43 @@ fun KeyboardProofScreen(
                 )
             }
 
+            // Message Deletion Dialog
+            if (messageToDelete != null) {
+                val msg = messageToDelete!!
+                AlertDialog(
+                    onDismissRequest = { messageToDelete = null },
+                    title = { Text("Delete Message") },
+                    text = {
+                        Column {
+                            Text("Choose how you want to delete this message.")
+                            Spacer(modifier = Modifier.height(16.dp))
+                            TextButton(onClick = {
+                                messages.removeIf { it.id == msg.id }
+                                WebSocketManager.deleteMessageLocally(msg.id)
+                                messageToDelete = null
+                            }) {
+                                Text("Delete for me")
+                            }
+                            if (msg.from == localGmail) {
+                                TextButton(onClick = {
+                                    messages.removeIf { it.id == msg.id }
+                                    WebSocketManager.deleteMessageLocally(msg.id)
+                                    WebSocketManager.sendDeleteMessage(matchedUserGmail, msg.id)
+                                    messageToDelete = null
+                                }) {
+                                    Text("Delete for everyone")
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { messageToDelete = null }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+
             // Report User Dialog
             if (showReportDialog) {
                 ReportUserDialog(
@@ -3404,7 +3467,8 @@ private fun KeyboardMessageBubble(
         messageTextColor: Color,
         onVideoClick: (String) -> Unit,
         onImageClick: (String) -> Unit = {},
-        onStatusUpdate: (String, MessageStatus) -> Unit
+        onStatusUpdate: (String, MessageStatus) -> Unit,
+        onLongPress: (ChatMessage) -> Unit = {}
 ) {
     val time =
             remember(message.timestamp) {
@@ -3423,7 +3487,9 @@ private fun KeyboardMessageBubble(
                 color =
                         if (isAnyMedia) Color.Transparent
                         else (if (isMe) outgoingBubbleColor else incomingBubbleColor),
-                modifier = Modifier.widthIn(max = 280.dp)
+                modifier = Modifier.widthIn(max = 280.dp).pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { onLongPress(message) })
+                }
         ) {
             when {
                 message.audioUri != null -> {
@@ -3452,8 +3518,13 @@ private fun KeyboardMessageBubble(
                                 painter = rememberAsyncImagePainter(message.mediaUri),
                                 contentDescription = null,
                                 modifier =
-                                        Modifier.fillMaxWidth().clickable {
-                                            if (!isRemote) onImageClick(message.mediaUri ?: "")
+                                        Modifier.fillMaxWidth().pointerInput(message) {
+                                            detectTapGestures(
+                                                onTap = {
+                                                    if (!isRemote) onImageClick(message.mediaUri ?: "")
+                                                },
+                                                onLongPress = { onLongPress(message) }
+                                            )
                                         },
                                 contentScale = ContentScale.FillWidth,
                                 alpha = if (isRemote) 0.5f else 1f
@@ -3486,8 +3557,13 @@ private fun KeyboardMessageBubble(
                                 painter = rememberAsyncImagePainter(message.mediaUri),
                                 contentDescription = null,
                                 modifier =
-                                        Modifier.fillMaxWidth().clickable {
-                                            if (!isRemote) onImageClick(message.mediaUri ?: "")
+                                        Modifier.fillMaxWidth().pointerInput(message) {
+                                            detectTapGestures(
+                                                onTap = {
+                                                    if (!isRemote) onImageClick(message.mediaUri ?: "")
+                                                },
+                                                onLongPress = { onLongPress(message) }
+                                            )
                                         },
                                 contentScale = ContentScale.FillWidth,
                                 alpha = if (isRemote) 0.5f else 1f
@@ -3533,7 +3609,8 @@ private fun KeyboardMessageBubble(
                                             onStatusUpdate(message.id, MessageStatus.Read)
                                         }
                                     }
-                                }
+                                },
+                                onLongPress = { onLongPress(message) }
                         )
                         androidx.compose.animation.AnimatedVisibility(
                                 visible = isRemote,
@@ -3790,7 +3867,7 @@ fun AudioWaveform(
 }
 
 @Composable
-fun VideoMessageBubble(videoUri: String, showPlayButton: Boolean, onPlayClick: () -> Unit) {
+fun VideoMessageBubble(videoUri: String, showPlayButton: Boolean, onPlayClick: () -> Unit, onLongPress: () -> Unit = {}) {
     val context = LocalContext.current
     val imageLoader =
             remember(context) {
@@ -3801,10 +3878,15 @@ fun VideoMessageBubble(videoUri: String, showPlayButton: Boolean, onPlayClick: (
 
     Box(
             modifier =
-                    Modifier.fillMaxWidth() // Fill width
-                            .wrapContentHeight() // Auto-height based on aspect ratio
+                    Modifier.fillMaxWidth()
+                            .wrapContentHeight()
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable { onPlayClick() },
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onTap = { onPlayClick() },
+                                    onLongPress = { onLongPress() }
+                                )
+                            },
             contentAlignment = Alignment.Center
     ) {
         // Use Coil AsyncImage to load the first frame
