@@ -452,12 +452,19 @@ fun KeyboardProofScreen(
 
     val ipVersion by WebSocketManager.ipVersion.collectAsState()
     val isOnWifi by WebSocketManager.isOnWifi.collectAsState()
-    var isCallUnblockedBySatellite by remember { mutableStateOf(false) }
+    val isCallUnblockedBySatellite by WebSocketManager.isCallUnblockedBySatellite.collectAsState()
 
     // Reset unblock state if we lose IPv6
     LaunchedEffect(ipVersion) {
         if (ipVersion == "IPv4" || ipVersion == null) {
-            isCallUnblockedBySatellite = false
+            WebSocketManager.setCallUnblocked(false)
+        }
+    }
+
+    // Monitor call status replies and show toast
+    LaunchedEffect(Unit) {
+        WebSocketManager.callStatusReply.collect { status ->
+            Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1799,6 +1806,9 @@ fun KeyboardProofScreen(
                                                     "Enable calling by clicking on the satellite icon",
                                                     Toast.LENGTH_SHORT
                                                 ).show()
+                                            } else {
+                                                // All good on our side, check peer status
+                                                WebSocketManager.checkPeerCallStatus(matchedUserGmail)
                                             }
                                         },
                                         modifier = Modifier.size((42 * iconScale).dp)
@@ -1846,7 +1856,7 @@ fun KeyboardProofScreen(
                                                     }
                                                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                                                 } else {
-                                                    isCallUnblockedBySatellite = !isCallUnblockedBySatellite
+                                                    WebSocketManager.setCallUnblocked(!isCallUnblockedBySatellite)
                                                 }
                                             }
                                     ) {

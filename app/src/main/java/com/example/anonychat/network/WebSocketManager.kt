@@ -616,6 +616,32 @@ object WebSocketManager {
     private val _isOnWifi = MutableStateFlow(false)
     val isOnWifi: StateFlow<Boolean> = _isOnWifi.asStateFlow()
 
+    private val _isCallUnblockedBySatellite = MutableStateFlow(false)
+    val isCallUnblockedBySatellite: StateFlow<Boolean> = _isCallUnblockedBySatellite.asStateFlow()
+
+    private val _callStatusReply = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 1)
+    val callStatusReply = _callStatusReply.asSharedFlow()
+
+    fun setCallUnblocked(unblocked: Boolean) {
+        _isCallUnblockedBySatellite.value = unblocked
+    }
+
+    fun checkPeerCallStatus(toEmail: String) {
+        scope.launch {
+            val localId = java.util.UUID.randomUUID().toString()
+            val payload = JSONObject().apply {
+                put("type", "check_peer_Calll_Status")
+                put("to", toEmail)
+                put("from", curruser)
+                put("id", localId)
+                put("messageId", localId)
+                put("buildVersion", getBuildVersion())
+            }
+            webSocket?.send(payload.toString())
+            Log.e("WebSocketManager", "Sent check_peer_Calll_Status to $toEmail with id $localId")
+        }
+    }
+
     private var heartbeatJob: Job? = null
     private var readyJob: Job? = null
     
@@ -2111,6 +2137,31 @@ object WebSocketManager {
             }
 
             when (type) {
+                "check_peer_Calll_Status" -> {
+                    val fromEmail = json.optString("from")
+                    val status = when {
+                        ipVersion.value == "IPv4" || ipVersion.value == null -> "Peer's network is currently incompatible with calling"
+                        !_isCallUnblockedBySatellite.value -> "Peer has not enabled calling for this chat yet"
+                        else -> "Peer is ready for call"
+                    }
+                    val localId = java.util.UUID.randomUUID().toString()
+                    val reply = JSONObject().apply {
+                        put("type", "reply_peer_Calll_Status")
+                        put("to", fromEmail)
+                        put("from", curruser)
+                        put("id", localId)
+                        put("messageId", localId)
+                        put("status", status)
+                        put("buildVersion", getBuildVersion())
+                    }
+                    webSocket?.send(reply.toString())
+                    Log.e("WebSocketManager", "Received check_peer_Calll_Status from $fromEmail. Replied with: $status (id: $localId)")
+                }
+                "reply_peer_Calll_Status" -> {
+                    val status = json.optString("status")
+                    Log.e("WebSocketManager", "Received reply_peer_Calll_Status: $status")
+                    _callStatusReply.emit(status)
+                }
                 "ws_ready" -> {
                     Log.i("WebSocketManager", "ws_ready received, sending is_ready to server!")
                     val readyMsg = """{"type":"is_ready","buildVersion":"${getBuildVersion()}"}"""
