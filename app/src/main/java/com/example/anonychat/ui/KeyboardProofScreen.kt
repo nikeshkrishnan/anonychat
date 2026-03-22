@@ -81,6 +81,7 @@ import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.KeyboardVoice
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
@@ -109,10 +110,11 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -370,6 +372,9 @@ fun KeyboardProofScreen(
         forceDarkTheme: Boolean? = null,
         isNewMatch: Boolean = false // <-- NEW: true if opened from match API, false if from conversation list
 ) {
+    val configuration = LocalConfiguration.current
+    val iconScale = (configuration.screenWidthDp / 411f).coerceIn(0.75f, 1.15f)
+    
     val context = LocalContext.current
     val view = LocalView.current
     val listState = rememberLazyListState()
@@ -707,9 +712,6 @@ fun KeyboardProofScreen(
                         Log.e("ChatLifecycle", "!!! CHAT HIDDEN → $matchedUserGmail !!!")
                         WebSocketManager.sendChatClose(matchedUserGmail)
                         chatOpenSent = false
-                        // Reset mutual chat session
-                        peerChatOpenReceived = false
-                        mutualChatStartTime = null
                         Log.e("SparkOverlay", "Mutual chat session ended (user left)")
                         
                         // Clear active chat tracking
@@ -1552,9 +1554,11 @@ fun KeyboardProofScreen(
                                     modifier =
                                             Modifier.fillMaxWidth()
                                                     .height(80.dp)
-                                                    .padding(horizontal = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                                    .padding(horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceEvenly
                             ) {
+                                // Group 1: Back
                                 IconButton(
                                     onClick = {
                                         keyboardController?.hide()
@@ -1596,70 +1600,10 @@ fun KeyboardProofScreen(
                                 ) {
                                     Icon(Icons.Default.ArrowBack, "Back", tint = headerContentColor)
                                 }
-                                Spacer(Modifier.width(8.dp))
 
-                                Box(
-                                    modifier = Modifier.size(46.dp)
-                                        .clickable {
-                                            // Navigate to target user's ratings screen
-                                            navController.navigate(
-                                                "ratings?email=${matchedUserGmail}&username=${matchedUser.username}" +
-                                                "&gender=${matchedUserPrefs.gender}&romanceMin=${matchedUserPrefs.romanceMin}" +
-                                                "&romanceMax=${matchedUserPrefs.romanceMax}"
-                                            )
-                                        }
-                                ) {
-                                    Surface(
-                                            shape = CircleShape,
-                                            color = avatarRingColor,
-                                            border = BorderStroke(2.dp, Color.White),
-                                            modifier = Modifier.size(46.dp)
-                                    ) {
-                                        Image(
-                                                painter =
-                                                        rememberAsyncImagePainter(
-                                                                avatarUri,
-                                                                imageLoader = if (isUserDeactivated) imageLoader else staticImageLoader
-                                                        ),
-                                                contentDescription = null,
-                                                modifier = Modifier.padding(2.dp).clip(CircleShape),
-                                                contentScale = ContentScale.Crop
-                                        )
-                                    }
-                                    
-                                    // Small heart or heartbreak icon overlay
-                                    if (showProfileIcon != null) {
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.BottomCenter)
-                                                .size(20.dp)
-                                                .offset(y = 8.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (showProfileIcon == "heart") {
-                                                Image(
-                                                    painter = rememberAsyncImagePainter(
-                                                        R.drawable.heart,
-                                                        imageLoader = imageLoader
-                                                    ),
-                                                    contentDescription = "Rose Sent",
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    contentScale = ContentScale.Fit
-                                                )
-                                            } else {
-                                                Text(
-                                                    text = "🥀",
-                                                    fontSize = 14.sp,
-                                                    lineHeight = 14.sp
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Spacer(Modifier.width(12.dp))
-                                Spacer(Modifier.width(12.dp))
-                                Column(
+                                // Group 2: Avatar + Name/Status
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.clickable {
                                         // Navigate to target user's ratings screen
                                         navController.navigate(
@@ -1669,98 +1613,147 @@ fun KeyboardProofScreen(
                                         )
                                     }
                                 ) {
-                                    // Username on first line
-                                    // For testing: uncomment the line below and comment the line after it
-                               //   val displayUsername = "TestUser99"
-                                    val displayUsername = if (isUserDeactivated) "Deactivated" else matchedUser.username
-                                    
-                                    Text(
-                                            text = displayUsername,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 16.sp,
-                                            color = headerContentColor
-                                    )
-                                    
-                                    // Roses and Sparks on second line
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        // Roses count
-                                        Text(
-                                                text = formatCount(roses),
-                                                style = TextStyle(
-                                                        color = Color(0xFFFF1053),
+                                    Box(modifier = Modifier.size(46.dp)) {
+                                        Surface(
+                                                shape = CircleShape,
+                                                color = avatarRingColor,
+                                                border = BorderStroke(2.dp, Color.White),
+                                                modifier = Modifier.size(46.dp)
+                                        ) {
+                                            Image(
+                                                    painter =
+                                                            rememberAsyncImagePainter(
+                                                                    avatarUri,
+                                                                    imageLoader = if (isUserDeactivated) imageLoader else staticImageLoader
+                                                            ),
+                                                    contentDescription = null,
+                                                    modifier = Modifier.padding(2.dp).clip(CircleShape),
+                                                    contentScale = ContentScale.Crop
+                                            )
+                                        }
+                                        
+                                        // Small heart or heartbreak icon overlay
+                                        if (showProfileIcon != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomCenter)
+                                                    .size(20.dp)
+                                                    .offset(y = 8.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (showProfileIcon == "heart") {
+                                                    Image(
+                                                        painter = rememberAsyncImagePainter(
+                                                            R.drawable.heart,
+                                                            imageLoader = imageLoader
+                                                        ),
+                                                        contentDescription = "Rose Sent",
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        contentScale = ContentScale.Fit
+                                                    )
+                                                } else {
+                                                    Text(
+                                                        text = "🥀",
                                                         fontSize = 14.sp,
-                                                        fontWeight = FontWeight.ExtraBold,
-                                                        shadow = Shadow(
-                                                                color = Color.Black.copy(alpha = 0.5f),
-                                                                offset = Offset(2f, 2f),
-                                                                blurRadius = 2f
-                                                        )
-                                                )
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Image(
-                                                painter = rememberAsyncImagePainter(
-                                                        R.drawable.roseg,
-                                                        imageLoader = imageLoader
-                                                ),
-                                                contentDescription = "Roses",
-                                                modifier = Modifier.size(18.dp)
+                                                        lineHeight = 14.sp
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(Modifier.width(12.dp))
+
+                                    Column {
+                                        // Username on first line
+                                        val displayUsername = if (isUserDeactivated) "Deactivated" else matchedUser.username
+                                        
+                                        Text(
+                                                text = displayUsername,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 16.sp,
+                                                color = headerContentColor
                                         )
                                         
-                                        Spacer(modifier = Modifier.width(12.dp))
+                                        // Roses and Sparks on second line
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            // Roses count
+                                            Text(
+                                                    text = formatCount(roses),
+                                                    style = TextStyle(
+                                                            color = Color(0xFFFF1053),
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.ExtraBold,
+                                                            shadow = Shadow(
+                                                                    color = Color.Black.copy(alpha = 0.5f),
+                                                                    offset = Offset(2f, 2f),
+                                                                    blurRadius = 2f
+                                                            )
+                                                    )
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Image(
+                                                    painter = rememberAsyncImagePainter(
+                                                            R.drawable.roseg,
+                                                            imageLoader = imageLoader
+                                                    ),
+                                                    contentDescription = "Roses",
+                                                    modifier = Modifier.size(18.dp)
+                                            )
+                                            
+                                            Spacer(modifier = Modifier.width(16.dp)) // Increased spacer
+                                            
+                                            // Sparks count
+                                            Text(
+                                                    text = formatCount(sparks),
+                                                    style = TextStyle(
+                                                            color = Color(0xFFFFD700),
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.ExtraBold,
+                                                            shadow = Shadow(
+                                                                    color = Color.Black.copy(alpha = 0.5f),
+                                                                    offset = Offset(2f, 2f),
+                                                                    blurRadius = 2f
+                                                            )
+                                                    )
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Image(
+                                                    painter = rememberAsyncImagePainter(
+                                                            R.drawable.sparkling,
+                                                            imageLoader = imageLoader
+                                                    ),
+                                                    contentDescription = "Sparks",
+                                                    modifier = Modifier.size(20.dp)
+                                            )
+                                        }
                                         
-                                        // Sparks count
+                                        val presenceText =
+                                                if (presenceStatus == "online") {
+                                                    "Online"
+                                                } else if (lastSeenTime > 0) {
+                                                    val now = System.currentTimeMillis()
+                                                    val diffMillis = now - lastSeenTime
+                                                    val diffDays = diffMillis / (1000 * 60 * 60 * 24)
+
+                                                    if (diffDays >= 1) {
+                                                        "Last seen $diffDays day${if (diffDays > 1L) "s" else ""} ago"
+                                                    } else {
+                                                        "Last seen ${SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(lastSeenTime))}"
+                                                    }
+                                                } else {
+                                                    ""
+                                                }
                                         Text(
-                                                text = formatCount(sparks),
-                                                style = TextStyle(
-                                                        color = Color(0xFFFFD700),
-                                                        fontSize = 14.sp,
-                                                        fontWeight = FontWeight.ExtraBold,
-                                                        shadow = Shadow(
-                                                                color = Color.Black.copy(alpha = 0.5f),
-                                                                offset = Offset(2f, 2f),
-                                                                blurRadius = 2f
-                                                        )
-                                                )
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Image(
-                                                painter = rememberAsyncImagePainter(
-                                                        R.drawable.sparkling,
-                                                        imageLoader = imageLoader
-                                                ),
-                                                contentDescription = "Sparks",
-                                                modifier = Modifier.size(20.dp)
+                                                text = presenceText,
+                                                fontWeight = FontWeight.Normal,
+                                                fontSize = 12.sp,
+                                                color = headerContentColor.copy(alpha = 0.7f)
                                         )
                                     }
-                                    
-                                    val presenceText =
-                                            if (presenceStatus == "online") {
-                                                "Online"
-                                            } else if (lastSeenTime > 0) {
-                                                val now = System.currentTimeMillis()
-                                                val diffMillis = now - lastSeenTime
-                                                val diffDays = diffMillis / (1000 * 60 * 60 * 24)
-
-                                                if (diffDays >= 1) {
-                                                    "Last seen $diffDays day${if (diffDays > 1L) "s" else ""} ago"
-                                                } else {
-                                                    "Last seen ${SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(lastSeenTime))}"
-                                                }
-                                            } else {
-                                                ""
-                                            }
-                                    Text(
-                                            text = presenceText,
-                                            fontWeight = FontWeight.Normal,
-                                            fontSize = 12.sp,
-                                            color = headerContentColor.copy(alpha = 0.7f)
-                                    )
                                 }
                                 
-                                Spacer(Modifier.weight(1f))
-                                
-                                // Heart/Favorite button
+                                // Group 3: Favorite
                                 IconButton(
                                     onClick = {
                                         isFavorite = !isFavorite
@@ -1769,16 +1762,69 @@ fun KeyboardProofScreen(
                                         // Update conversation repository
                                         ConversationRepository.updateFavorite(matchedUserGmail, isFavorite)
                                     },
-                                    modifier = Modifier.size(40.dp)
+                                    modifier = Modifier.size((42 * iconScale).dp)
                                 ) {
                                     Icon(
                                         imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                         contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
-                                        tint = if (isFavorite) Color(0xFF9C27B0) else headerContentColor
+                                        tint = if (isFavorite) Color(0xFF9C27B0) else headerContentColor,
+                                        modifier = Modifier.size((28 * iconScale).dp)
                                     )
                                 }
-                                
-                                // Three-dot menu
+
+                                // Group 4: Phone + Satellite
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = {
+                                            if (!peerChatOpenReceived) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Call cannot be initiated as peer is not viewing your chat window",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        },
+                                        modifier = Modifier.size((42 * iconScale).dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.size((28 * iconScale).dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Phone,
+                                                contentDescription = "Peer chat status",
+                                                tint = if (isDarkTheme) Color(0xFFB0BEC5).copy(alpha = 0.6f) else headerContentColor.copy(alpha = 0.35f),
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                            // Show 🚫 when peer is NOT currently in chat
+                                            if (!peerChatOpenReceived) {
+                                                Text(
+                                                    text = "🚫",
+                                                    fontSize = (24 * iconScale).sp,
+                                                    modifier = Modifier.align(Alignment.Center)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    if (isDarkTheme) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.padding(horizontal = (2 * iconScale).dp)
+                                        ) {
+                                            Text(text = "🛰️", fontSize = (20 * iconScale).sp)
+                                            Text(text = "🚫", fontSize = (24 * iconScale).sp)
+                                        }
+                                    } else {
+                                        Text(
+                                            text = "🛰️",
+                                            fontSize = (24 * iconScale).sp,
+                                            modifier = Modifier.padding(horizontal = (2 * iconScale).dp)
+                                        )
+                                    }
+                                }
+
+                                // Group 5: Menu
                                 Box {
                                     IconButton(
                                         onClick = { showMenu = true },

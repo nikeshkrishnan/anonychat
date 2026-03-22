@@ -599,6 +599,7 @@ object WebSocketManager {
     private const val PING_PONG_TIMEOUT_MS = 10_000L // reconnect if no pong within 10 seconds
     private const val READY_RETRY_INTERVAL_MS = 3_000L // increased to reduce spam
     private const val OUTGOING_SEND_DELAY_MS = 40L // throttle to avoid kernel buffer overflow
+    private var consecutivePongCount = 0
 
     // ack timeout — how long to wait for delivery_ack before retrying
     private const val ACK_TIMEOUT_MS = 20_000L
@@ -2046,6 +2047,7 @@ object WebSocketManager {
                 "ready_ack" -> {
                     Log.i("WebSocketManager", "ready_ack received → READY")
                     readyState = ReadyState.READY
+                    consecutivePongCount = 0
                     // On ready, reset any IN_FLIGHT messages to QUEUED so they can be retried
                     startHeartbeat()
                     for (msg in pendingQueue.toList()) {
@@ -2280,6 +2282,12 @@ object WebSocketManager {
                     Log.d("WebSocketManager", "pong received")
                     lastServerMessageAt = System.currentTimeMillis()
                     lastPingSentAt = 0 // clear ping timeout — pong received within window
+                    
+                    consecutivePongCount++
+                    if (consecutivePongCount == 3) {
+                        Log.i("WebSocketManager", "Third consecutive pong received, resending presence for safety")
+                        sendOnlinePresenceIfReady()
+                    }
                     return
                 }
                 "delivery_failed" -> {
@@ -2342,6 +2350,7 @@ object WebSocketManager {
                     val from = json.getString("from")
                     Log.e("WebSocketManager", "!!! RECEIVED chat_open from: $from !!!")
                     activeChatSessions.add(from)
+                    sendMessageReceivedAck(messageId, from)
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.ChatOpen(from))
                     }
@@ -2350,6 +2359,7 @@ object WebSocketManager {
                     val from = json.getString("from")
                     Log.e("WebSocketManager", "!!! RECEIVED chat_close from: $from !!!")
                     activeChatSessions.remove(from)
+                    sendMessageReceivedAck(messageId, from)
                     withContext(Dispatchers.Main.immediate) {
                         _events.emit(WebSocketEvent.ChatClose(from))
                     }
