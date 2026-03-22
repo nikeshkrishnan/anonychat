@@ -70,20 +70,21 @@ object Http426EventBus {
     }
 }
 
+
 class CachingDns : Dns {
-
-        private val cache = mutableMapOf<String, List<InetAddress>>()
-
-        override fun lookup(hostname: String): List<InetAddress> {
-                return try {
-                        val result = Dns.SYSTEM.lookup(hostname)
-                        cache[hostname] = result
-                        result
-                } catch (e: UnknownHostException) {
-                        cache[hostname] ?: throw e
-                }
-        }
-}
+ 
+         private val cache = mutableMapOf<String, List<InetAddress>>()
+ 
+         override fun lookup(hostname: String): List<InetAddress> {
+                 return try {
+                         val result = Dns.SYSTEM.lookup(hostname)
+                         cache[hostname] = result
+                         result
+                 } catch (e: UnknownHostException) {
+                         cache[hostname] ?: throw e
+                 }
+         }
+ }
 
 // This interceptor adds the auth token to requests
 class AuthInterceptor(private val context: Context) : Interceptor {
@@ -636,7 +637,7 @@ object NetworkClient {
                                                         .build()
                                         chain.proceed(request)
                                 }
-                                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                                .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
                                 .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                 .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                 .build()

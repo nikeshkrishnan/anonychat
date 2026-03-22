@@ -26,8 +26,12 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import android.net.NetworkCapabilities
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -576,6 +580,9 @@ object WebSocketManager {
                             }
                                     .apply { level = HttpLoggingInterceptor.Level.BODY }
                     )
+                    .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                     .build()
 
     private var webSocket: WebSocket? = null
@@ -601,8 +608,13 @@ object WebSocketManager {
     private const val OUTGOING_SEND_DELAY_MS = 40L // throttle to avoid kernel buffer overflow
     private var consecutivePongCount = 0
 
-    // ack timeout — how long to wait for delivery_ack before retrying
     private const val ACK_TIMEOUT_MS = 20_000L
+
+    private val _ipVersion = MutableStateFlow<String?>(null)
+    val ipVersion: StateFlow<String?> = _ipVersion.asStateFlow()
+
+    private val _isOnWifi = MutableStateFlow(false)
+    val isOnWifi: StateFlow<Boolean> = _isOnWifi.asStateFlow()
 
     private var heartbeatJob: Job? = null
     private var readyJob: Job? = null
@@ -807,6 +819,9 @@ object WebSocketManager {
 
                         override fun onAvailable(network: Network) {
                             Log.e("WebSocketManager", "Network AVAILABLE → reconnect")
+                            _ipVersion.value = null // Reset to allow fresh evaluation on new network
+                            updateNetworkType()
+                            fetchIpVersion()
                             reconnectIfNeeded(context)
                             if (!AppVisibility.isForeground) {
 
@@ -842,6 +857,10 @@ object WebSocketManager {
     suspend fun init(context: Context) {
         if (initialized) return
         appContext = context.applicationContext
+        
+        // Initial network check
+        updateNetworkType()
+        fetchIpVersion()
 
         val db =
                 Room.databaseBuilder(
@@ -1052,6 +1071,52 @@ object WebSocketManager {
             }
 
             Log.i("WebSocketManager", "Presence auto-sent: online after reconnect")
+        }
+    }
+
+    private fun updateNetworkType() {
+        try {
+            val activeNetwork = connectivityManager.activeNetwork
+            val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+            val isWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            _isOnWifi.value = isWifi
+            Log.e("WebSocketManager", "Network Type: ${if (isWifi) "WIFI" else "MOBILE/OTHER"}")
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "updateNetworkType failed", e)
+        }
+    }
+
+    private fun fetchIpVersion() {
+        scope.launch {
+            try {
+                // Use api6.ipify.org - success indicates IPv6 connectivity
+                val url = "https://api6.ipify.org?format=json"
+                val request = Request.Builder().url(url).build()
+
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string()
+                        if (!body.isNullOrBlank()) {
+                            val json = JSONObject(body)
+                            val ip = json.optString("ip")
+                            if (ip.contains(":")) {
+                                _ipVersion.value = "IPv6"
+                                Log.e("WebSocketManager", "IPv6 Detected via api6.ipify.org: $ip")
+                            } else {
+                                // Technically api6 should only return IPv6, but handle anyway
+                                _ipVersion.value = "IPv4"
+                                Log.e("WebSocketManager", "IPv4 fallback (unexpected from api6): $ip")
+                            }
+                        }
+                    } else {
+                        Log.e("WebSocketManager", "api6.ipify.org failed (likely no IPv6): ${response.code}")
+                        _ipVersion.value = "IPv4"
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("WebSocketManager", "fetchIpVersion failed (likely no IPv6)", e)
+                _ipVersion.value = "IPv4"
+            }
         }
     }
 
@@ -1798,6 +1863,9 @@ object WebSocketManager {
                 reconnectAttempt = 0
 
                 Log.i("WebSocketManager", "WebSocket CONNECTED (waiting for ready_ack)")
+                
+                updateNetworkType()
+                fetchIpVersion()
 
                 // Log response headers
                 Log.e("WebSocketManager", "WebSocket Response Headers:")
@@ -1837,6 +1905,8 @@ object WebSocketManager {
 
             override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
                 Log.e("WebSocketManager", "WebSocket FAILURE", t)
+                updateNetworkType()
+                fetchIpVersion()
                 
                 // Check if failure is due to 401 (token expired/invalid)
                 val is401 = r?.code == 401
@@ -1926,6 +1996,8 @@ object WebSocketManager {
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.w("WebSocketManager", "WebSocket CLOSED: $code $reason")
+                updateNetworkType()
+                fetchIpVersion()
                 
                 // Check if closure is due to authentication/authorization
                 val isAuthFailure = code == 1008 || reason.contains("403", ignoreCase = true) ||

@@ -450,6 +450,17 @@ fun KeyboardProofScreen(
         }
     }
 
+    val ipVersion by WebSocketManager.ipVersion.collectAsState()
+    val isOnWifi by WebSocketManager.isOnWifi.collectAsState()
+    var isCallUnblockedBySatellite by remember { mutableStateOf(false) }
+
+    // Reset unblock state if we lose IPv6
+    LaunchedEffect(ipVersion) {
+        if (ipVersion == "IPv4" || ipVersion == null) {
+            isCallUnblockedBySatellite = false
+        }
+    }
+
     val floatingDate by remember {
         derivedStateOf {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
@@ -1782,6 +1793,12 @@ fun KeyboardProofScreen(
                                                     "Call cannot be initiated as peer is not viewing your chat window",
                                                     Toast.LENGTH_SHORT
                                                 ).show()
+                                            } else if (!isCallUnblockedBySatellite) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Enable calling by clicking on the satellite icon",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
                                             }
                                         },
                                         modifier = Modifier.size((42 * iconScale).dp)
@@ -1793,11 +1810,15 @@ fun KeyboardProofScreen(
                                             Icon(
                                                 imageVector = Icons.Default.Phone,
                                                 contentDescription = "Peer chat status",
-                                                tint = if (isDarkTheme) Color(0xFFB0BEC5).copy(alpha = 0.6f) else headerContentColor.copy(alpha = 0.35f),
+                                                tint = if (!peerChatOpenReceived || !isCallUnblockedBySatellite) {
+                                                    if (isDarkTheme) Color(0xFFB0BEC5).copy(alpha = 0.6f) else headerContentColor.copy(alpha = 0.35f)
+                                                } else {
+                                                    headerContentColor
+                                                },
                                                 modifier = Modifier.fillMaxSize()
                                             )
-                                            // Show 🚫 when peer is NOT currently in chat
-                                            if (!peerChatOpenReceived) {
+                                            // Show 🚫 when peer is NOT currently in chat or satellite is blocked
+                                            if (!peerChatOpenReceived || !isCallUnblockedBySatellite) {
                                                 Text(
                                                     text = "🚫",
                                                     fontSize = (24 * iconScale).sp,
@@ -1807,20 +1828,38 @@ fun KeyboardProofScreen(
                                         }
                                     }
 
-                                    if (isDarkTheme) {
-                                        Box(
-                                            contentAlignment = Alignment.Center,
-                                            modifier = Modifier.padding(horizontal = (2 * iconScale).dp)
-                                        ) {
-                                            Text(text = "🛰️", fontSize = (20 * iconScale).sp)
-                                            Text(text = "🚫", fontSize = (24 * iconScale).sp)
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = (2 * iconScale).dp)
+                                            .clickable {
+                                                if (!peerChatOpenReceived) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Call cannot be initiated as peer is not viewing your chat window",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else if (ipVersion == "IPv4") {
+                                                    val msg = if (isOnWifi) {
+                                                        "Turn off wifi and switch over to mobile data to enable calling"
+                                                    } else {
+                                                        "Your mobile network is not supporting calls"
+                                                    }
+                                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                                } else {
+                                                    isCallUnblockedBySatellite = !isCallUnblockedBySatellite
+                                                }
+                                            }
+                                    ) {
+                                        Text(text = "🛰️", fontSize = (22 * iconScale).sp)
+                                        if (ipVersion == "IPv4") {
+                                            Text(
+                                                text = "❌",
+                                                fontSize = (10 * iconScale).sp,
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .offset(x = 3.dp, y = (-6).dp)
+                                            )
                                         }
-                                    } else {
-                                        Text(
-                                            text = "🛰️",
-                                            fontSize = (24 * iconScale).sp,
-                                            modifier = Modifier.padding(horizontal = (2 * iconScale).dp)
-                                        )
                                     }
                                 }
 
